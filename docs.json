@@ -1,53 +1,65 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Cloak Bot SDK",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#2e76e2",
+    "light": "#57aaf2",
+    "dark": "#234585"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "fonts": {
+    "family": "Source Sans 3"
   },
   "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://cloak.chat"
+  },
   "navigation": {
-    "pages": [
+    "groups": [
       {
-        "group": "Getting Started",
+        "group": "Get started",
         "pages": [
           "index",
           "quickstart"
         ]
+      },
+      {
+        "group": "Core concepts",
+        "pages": [
+          "concepts/how-bots-work",
+          "concepts/permissions",
+          "concepts/message-delivery",
+          "concepts/keys-and-keystore",
+          "concepts/connection-lifecycle"
+        ]
+      },
+      {
+        "group": "Examples",
+        "pages": [
+          "examples/welcome-bot"
+        ]
+      },
+      {
+        "group": "API reference",
+        "pages": [
+          "api-reference/client",
+          "api-reference/events",
+          "api-reference/types",
+          "api-reference/permissions"
+        ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    ]
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
       "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "label": "Open Cloak",
+      "href": "https://cloak.chat"
     }
   },
   "contextual": {
@@ -55,18 +67,25 @@
       "copy",
       "view",
       "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
+      "claude"
     ]
   },
   "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    "links": [
+      {
+        "header": "Cloak",
+        "items": [
+          { "label": "Homepage", "href": "https://cloak.chat" },
+          { "label": "Quickstart", "href": "/quickstart" }
+        ]
+      },
+      {
+        "header": "SDK",
+        "items": [
+          { "label": "API reference", "href": "/api-reference/client" },
+          { "label": "Permissions", "href": "/api-reference/permissions" }
+        ]
+      }
+    ]
   }
 }

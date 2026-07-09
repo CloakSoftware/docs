@@ -1,20 +1,72 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Cloak Bot SDK"
+description: "Build end-to-end encrypted bots for Cloak with a familiar, discord.js-flavored API."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+The Cloak Bot SDK is the official TypeScript library for building bots on [Cloak](https://cloak.chat), the end-to-end encrypted chat platform. If you have written a Discord bot, you already know the shape of this API. You create a `Client`, listen for events like `messageCreate`, and call `msg.reply()`.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+The difference is what happens underneath. Your bot is a full end-to-end encrypted member of every server it joins. It holds its own identity, encrypts and decrypts messages inside your own process, and the Cloak service only ever relays ciphertext. Nobody in the middle can read what your bot sends or receives.
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+```ts
+import { Client } from '@cloak/bot-sdk';
+
+const client = new Client({ token: process.env.CLOAK_TOKEN! });
+
+client.on('ready', () => console.log(`Logged in as ${client.user?.id}`));
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() === '!ping') msg.reply('pong');
+});
+
+await client.login();
+```
+
+That is a complete, working bot. It answers `!ping` in every channel it can see, across every server it belongs to.
+
+## Start here
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from zero to a live bot answering messages in about five minutes.
+  </Card>
+  <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
+    Understand the encryption model and what makes a Cloak bot different.
+  </Card>
+  <Card title="Examples" icon="code" href="/examples/welcome-bot">
+    Read an annotated welcome bot you can copy and run.
+  </Card>
+  <Card title="API reference" icon="book" href="/api-reference/client">
+    Every option, method, event, and type the SDK exposes.
+  </Card>
+</CardGroup>
+
+## What you get
+
+<CardGroup cols={2}>
+  <Card title="End-to-end encrypted" icon="shield-halved">
+    Message content and keys are encrypted in your process. The service relays ciphertext and never sees plaintext.
+  </Card>
+  <Card title="Familiar API" icon="discord">
+    `Client`, events, and `msg.reply()`. Porting a Discord bot feels mechanical.
+  </Card>
+  <Card title="Hear everything at once" icon="tower-broadcast">
+    Your bot receives messages from every channel it can view, with no per-channel setup.
+  </Card>
+  <Card title="Resilient by default" icon="arrows-rotate">
+    Automatic reconnect with backoff. Identity and keys persist across restarts.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+- **Node.js** `20.19+` or `22.12+`. The SDK uses a modern transport that needs a recent Node runtime.
+- A **Cloak account** and a **bot token**, both created in the Cloak app.
+
+There is no server for you to run or host. Your bot connects directly to Cloak's hosted service.
+
+<Note>
+  A Cloak bot is not wire-compatible with Discord. The API mirrors discord.js so the code feels familiar, but a Cloak bot talks to Cloak, not to Discord.
+</Note>
+
+Ready? Head to the [Quickstart](/quickstart).

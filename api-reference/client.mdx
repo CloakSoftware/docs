@@ -1,0 +1,148 @@
+---
+title: "Client"
+description: "The Client is your bot. It connects to Cloak, emits events, and sends messages."
+---
+
+Everything starts with a `Client`. You construct it with your token, attach event listeners, and call `login()`.
+
+```ts
+import { Client } from '@cloak/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json',
+  requiredPermissions: ['message_send'],
+});
+```
+
+## Constructor options
+
+<ParamField path="token" type="string" required>
+  Your bot token, in the form `botid.tokenid.secret`. Create it in the Cloak app under **Settings > My Bots**. Treat it like a password. Read it from an environment variable, never hardcode it.
+</ParamField>
+
+<ParamField path="keystorePath" type="string">
+  Path to a file where the SDK persists your bot's identity and its conversation keys. Strongly recommended for any bot you keep running. Without it, your bot cannot reuse its identity and keys across restarts. See [Keys and the keystore](/concepts/keys-and-keystore).
+</ParamField>
+
+<ParamField path="requiredPermissions" type="PermissionName[]">
+  The permissions your bot declares it needs. Sent to servers on login. Declaring is a request, not a grant. A human approves a subset per server. See [Permissions](/concepts/permissions).
+</ParamField>
+
+<ParamField path="deviceId" type="string">
+  A stable device id used for clean takeover on reconnect. Defaults to a value derived from your token. Set it only if you have a specific reason to.
+</ParamField>
+
+<ParamField path="debug" type="boolean" default="false">
+  Logs every frame the SDK sends and receives. Your bot token is redacted in the output. Useful while developing, noisy in production.
+</ParamField>
+
+<Accordion title="Advanced: self-hosted and local dev options" icon="wrench">
+  These options exist only for pointing the SDK at a Cloak stack you run yourself. Bots against the hosted Cloak service never need them.
+
+  <ParamField path="url" type="string">
+    The connection endpoint. Defaults to Cloak's hosted service. Set it only to target a self-hosted or local development stack.
+  </ParamField>
+
+  <ParamField path="serverCertificateHashes" type="{ algorithm: 'sha-256'; value: Uint8Array }[]">
+    Certificate pins for a self-hosted stack that uses a self-signed certificate. Not needed for the hosted service, which uses a standard CA-signed certificate.
+  </ParamField>
+</Accordion>
+
+## Properties
+
+<ResponseField name="user" type="BotUser | null">
+  Your bot's identity after login, or `null` before `login()` completes. Its `id` is a normalized value you can compare against `msg.authorId` to detect your bot's own messages. See [BotUser](/api-reference/types#botuser).
+</ResponseField>
+
+## Methods
+
+### login
+
+```ts
+login(): Promise<void>
+```
+
+Connects, authenticates, publishes your bot's identity if needed, emits `guildCreate` for existing servers, then emits `ready`. Call this once, after attaching your listeners.
+
+```ts
+client.on('ready', () => console.log('online'));
+await client.login();
+```
+
+### send
+
+```ts
+send(serverId: string, channelId: string, text: string, groupId?: string): Promise<void>
+```
+
+Sends an encrypted message to a channel. Sends are serialized internally so they never race each other.
+
+Most of the time you use [`msg.reply()`](/api-reference/types#message) instead, which already knows where the message came from. Reach for `send()` when you want to send somewhere other than where a message arrived, such as greeting a new member.
+
+<Warning>
+  `send()` throws if your bot does not hold the server's conversation key yet. This happens right after a first join, before the key handoff completes. See [first message takes a moment](/quickstart#first-message-takes-a-moment).
+</Warning>
+
+```ts
+await client.send(serverId, channelId, 'Welcome!', groupId);
+```
+
+### watch
+
+```ts
+watch(serverId: string, channelId: string, groupId?: string): Promise<void>
+```
+
+Optionally pre-selects a channel, for example to warm its key before your first send. You rarely need this, because the [firehose](/concepts/message-delivery) already delivers every visible channel. The target is remembered and re-established after a reconnect.
+
+### can
+
+```ts
+can(permission: PermissionName, serverId: string): boolean
+```
+
+Advisory check of whether your bot holds `permission` in `serverId`, based on the last grant the server sent. `administrator` implies every permission. Returns `false` if no grant has arrived yet.
+
+Use it to pre-gate your own commands. The server re-checks every action and remains the authority. See [Permissions](/concepts/permissions).
+
+```ts
+if (client.can('message_send', msg.serverId)) {
+  await msg.reply('pong');
+}
+```
+
+### permissions
+
+```ts
+permissions(serverId: string): PermissionSet | undefined
+```
+
+Returns the full resolved capability set for a server, or `undefined` if no grant has arrived for it yet. See [PermissionSet](/api-reference/types#permissionset).
+
+### visibleChannelIds
+
+```ts
+visibleChannelIds(serverId: string): string[]
+```
+
+Returns the channel ids your bot is permitted to view in a server. This mirrors the [firehose read-gate](/concepts/message-delivery#delivery-is-view-gated): a channel absent from this list is one your bot will not receive `messageCreate` for. Returns an empty array if the grant is unknown.
+
+### destroy
+
+```ts
+destroy(): Promise<void>
+```
+
+Closes the connection and stops reconnecting. The clean way to shut a bot down. See [Connection lifecycle](/concepts/connection-lifecycle#shutting-down).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Events" icon="bell" href="/api-reference/events">
+    Everything a Client emits.
+  </Card>
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types">
+    Message, SystemMessageEvent, and more.
+  </Card>
+</CardGroup>

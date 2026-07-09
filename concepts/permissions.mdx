@@ -1,0 +1,87 @@
+---
+title: "Permissions"
+description: "Your bot declares what it needs. A human approves what it gets. Here is how to work with both sides."
+---
+
+Permissions on Cloak follow a simple rule: a bot **declares** the capabilities it wants, and a **human approves** a subset per server when adding it. Declaring is a request, not a grant.
+
+## Declare what your bot needs
+
+Pass the permissions your bot needs to the `Client` constructor. The SDK sends this list to the server when your bot logs in.
+
+```ts
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  requiredPermissions: ['message_send', 'view_text', 'reaction_add'],
+});
+```
+
+This is your bot's manifest. It tells servers what the bot is asking for. It does not give the bot anything on its own.
+
+## A human approves the grant
+
+When someone adds your bot to a server through **Server Settings > Invites > Add a Bot**, Cloak shows them a consent screen. They approve some or all of what the bot declared. The server then resolves the actual grant for that server and pushes it back to your bot.
+
+The result is that the same bot can hold different permissions in different servers, depending on what each server's admin approved.
+
+## Receive the resolved grant
+
+The server sends your bot its resolved permissions per server. The SDK caches the result and surfaces it three ways.
+
+### Listen for updates
+
+The `permissionsUpdate` event fires whenever a server resolves or changes your bot's grant.
+
+```ts
+client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
+  console.log(`grant for ${serverId}: send=${perms.message_send} rank=${effectiveRank}`);
+});
+```
+
+### Check before you act
+
+`can()` is an advisory check. Use it to avoid firing an action the server would only reject.
+
+```ts
+if (client.can('message_send', msg.serverId)) {
+  await msg.reply('pong');
+}
+```
+
+### Read the full set
+
+`permissions()` returns the whole capability set for a server, or `undefined` if no grant has arrived yet.
+
+```ts
+const set = client.permissions(serverId);
+if (set?.member_ban) {
+  // the bot may ban in this server
+}
+```
+
+## Advisory means the server decides
+
+`can()`, `permissions()`, and `visibleChannelIds()` reflect the last grant the server sent. They exist so your bot can pre-gate its own commands, which keeps it from firing actions that will bounce.
+
+<Warning>
+  These checks are advisory. The server re-checks every action and remains the authority. Never treat a passing `can()` as a guarantee, and never rely on it for security decisions. It is a courtesy to your own code, not an enforcement point.
+</Warning>
+
+## Administrator implies everything
+
+The `administrator` permission is special. If a bot holds it in a server, `can()` returns `true` for every other permission in that server.
+
+## Permission names
+
+You declare and query permissions by name. The full list of names, such as `message_send`, `member_ban`, `manage_channels`, and `administrator`, lives in the [permissions reference](/api-reference/permissions).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
+    Permissions decide which channels your bot can view.
+  </Card>
+  <Card title="Permissions reference" icon="list" href="/api-reference/permissions">
+    Every permission name in one place.
+  </Card>
+</CardGroup>

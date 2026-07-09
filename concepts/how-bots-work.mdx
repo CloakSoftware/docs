@@ -1,0 +1,79 @@
+---
+title: "How bots work"
+description: "A Cloak bot is a full end-to-end encrypted member of every server it joins. Here is what that means for you."
+---
+
+A Cloak bot is a program you run. It connects to Cloak's hosted service, joins servers as a member, and sends and receives encrypted messages. What sets it apart from a bot on most chat platforms is where the encryption happens.
+
+## Your bot is an encrypted member
+
+On many platforms, a bot is a privileged client of a server that can read message content in the clear. On Cloak, your bot is a first-class encrypted member, the same as any person in the server.
+
+That means:
+
+- Your bot holds its own cryptographic identity.
+- Your bot receives each server's encryption key through Cloak's normal key exchange.
+- All encryption and decryption happen inside your process.
+
+The Cloak service relays encrypted bytes between members. It never sees plaintext message content, and it never sees an unwrapped key.
+
+<Note>
+  Because your bot does the crypto itself, it needs to hold real keys. Persisting those keys safely is the single most important operational detail. See [Keys and the keystore](/concepts/keys-and-keystore).
+</Note>
+
+## The lifecycle of a message
+
+When someone sends a message your bot can see:
+
+<Steps>
+  <Step title="A member sends an encrypted message">
+    Their app encrypts the content with the server's key and sends the ciphertext to Cloak.
+  </Step>
+  <Step title="Cloak relays it to your bot">
+    The service delivers the ciphertext to your bot's session as part of the [firehose](/concepts/message-delivery).
+  </Step>
+  <Step title="Your bot decrypts it locally">
+    The SDK decrypts the content with the key your bot holds and hands you a `Message` with readable `content`.
+  </Step>
+  <Step title="Your bot replies">
+    When you call `msg.reply()`, the SDK encrypts your text in the process and sends the ciphertext back through Cloak.
+  </Step>
+</Steps>
+
+At no point does the plaintext leave your machine unencrypted.
+
+## What you are responsible for
+
+Because your bot is a real member holding real keys, a few responsibilities sit with you rather than with the platform.
+
+<CardGroup cols={2}>
+  <Card title="Guard the token" icon="key">
+    The bot token grants full encrypted membership. Keep it in an environment variable or secret manager, never in code.
+  </Card>
+  <Card title="Keep the keystore" icon="database">
+    The keystore file holds your bot's identity and its live keys. Persist it and protect it. See [Keys and the keystore](/concepts/keys-and-keystore).
+  </Card>
+  <Card title="Host the process" icon="server">
+    Your bot is a program you run and keep running. Cloak does not host it for you.
+  </Card>
+  <Card title="Handle permissions" icon="shield">
+    Declare what your bot needs, and check what each server granted before acting. See [Permissions](/concepts/permissions).
+  </Card>
+</CardGroup>
+
+## The API is familiar on purpose
+
+The SDK is shaped like [discord.js](https://discord.js.org). You get a `Client`, you attach listeners for events like `messageCreate` and `guildCreate`, and messages carry a `reply()` method. If you have built a Discord bot, porting it is mostly mechanical.
+
+Keep one thing in mind: the resemblance is in the shape of the code, not the wire protocol. A Cloak bot talks to Cloak. It cannot connect to Discord, and a Discord bot cannot connect to Cloak.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
+    How your bot hears from every channel at once.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Declaring, granting, and checking capabilities.
+  </Card>
+</CardGroup>

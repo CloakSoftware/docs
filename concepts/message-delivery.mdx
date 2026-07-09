@@ -1,0 +1,73 @@
+---
+title: "Message delivery"
+description: "Your bot hears from every channel it can view, with no per-channel subscription. This is the firehose."
+---
+
+Most chat SDKs make you subscribe to channels one at a time. Cloak does not. When your bot logs in, it starts receiving the live messages of every channel it is permitted to view, across every server it belongs to. This is called the **firehose**.
+
+## You do not subscribe to channels
+
+Once your bot is running, `messageCreate` fires for messages in any channel it can see. You do not register interest in a channel first. Each event carries where it came from, so you always know how to respond.
+
+```ts
+client.on('messageCreate', (msg) => {
+  // msg.serverId and msg.channelId tell you where this arrived.
+  if (msg.content.trim() === '!ping') {
+    msg.reply('pong'); // replies into the same channel it came from
+  }
+});
+```
+
+A single `!ping` handler answers in every channel of every server the bot is in. No channel needs to be selected ahead of time.
+
+## Every message knows where it belongs
+
+Both `messageCreate` and `systemMessage` events carry the source location on the payload:
+
+| Field | Meaning |
+| --- | --- |
+| `serverId` | The server the message came from. |
+| `channelId` | The channel within that server. |
+| `groupId` | The channel's group, where known. Used internally to route replies. |
+
+Because of this, `msg.reply()` and `msg.channel.send()` already know where to go. You only reach for [`client.send()`](/api-reference/client#send) when you want to send somewhere other than where a message arrived.
+
+## Delivery is view-gated
+
+The server decides which channels your bot may view, based on the permissions it was granted. `messageCreate` fires only for channels the bot is allowed to see. The SDK does not filter the firehose on your side. The server gates it before it reaches you.
+
+This has one practical consequence worth remembering:
+
+<Warning>
+  A quiet channel can mean the bot is not permitted to view it, not just that nobody is talking. Silence is not proof that the bot is listening.
+</Warning>
+
+To reason about which channels your bot should be hearing from, ask it:
+
+```ts
+const channels = client.visibleChannelIds(serverId);
+console.log(`Bot can view ${channels.length} channels in ${serverId}`);
+```
+
+See [`visibleChannelIds()`](/api-reference/client#visiblechannelids) for details.
+
+## Pre-selecting a channel is optional
+
+You almost never need to select a channel, because the firehose already delivers everything. One method exists for the rare case where you want to warm a specific channel ahead of time, for example to prepare its key before your first send:
+
+```ts
+await client.watch(serverId, channelId);
+```
+
+`watch()` is remembered and re-established automatically after a reconnect. If you are just replying to messages as they arrive, you can ignore it entirely.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    What decides which channels are visible.
+  </Card>
+  <Card title="Connection lifecycle" icon="arrows-rotate" href="/concepts/connection-lifecycle">
+    Reconnects, and what carries across them.
+  </Card>
+</CardGroup>

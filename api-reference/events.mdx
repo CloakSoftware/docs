@@ -1,0 +1,128 @@
+---
+title: "Events"
+description: "Every event a Client emits, when it fires, and what it carries."
+---
+
+The `Client` is an event emitter. You subscribe with `client.on(event, listener)`. The event map is fully typed, so your listener's arguments are inferred.
+
+```ts
+client.on('messageCreate', (msg) => {
+  // msg is typed as Message
+});
+```
+
+## Overview
+
+| Event | Payload | Fires when |
+| --- | --- | --- |
+| `ready` | none | Login has completed and the bot is online. |
+| `messageCreate` | [`Message`](/api-reference/types#message) | A user message arrives from any visible channel. |
+| `systemMessage` | [`SystemMessageEvent`](/api-reference/types#systemmessageevent) | A system event happens, such as a member joining. |
+| `guildCreate` | [`Guild`](/api-reference/types#guild) | The bot is added to a server, or is already in one at login. |
+| `guildDelete` | [`Guild`](/api-reference/types#guild) | The bot is removed from a server. |
+| `permissionsUpdate` | `{ serverId: string } & PermissionSet` | A server resolves or changes the bot's grant. |
+| `disconnect` | `unknown` | The connection drops. |
+| `reconnecting` | `{ attempt: number; delayMs: number }` | A reconnect attempt is scheduled. |
+| `reconnected` | none | A reconnect succeeds. |
+
+## Message events
+
+### messageCreate
+
+Fires for every user message in a channel your bot can view. Because delivery is a [firehose](/concepts/message-delivery), this covers all visible channels across all servers, with no subscription.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() === '!ping') msg.reply('pong');
+});
+```
+
+<Note>
+  Your bot receives its own messages too. Guard with `msg.authorId === client.user?.id` so it does not respond to itself.
+</Note>
+
+### systemMessage
+
+Fires for system events rather than user messages. The `type` field tells you which. Today that is `member_join` and `bot_add`.
+
+```ts
+client.on('systemMessage', (evt) => {
+  if (evt.type === 'member_join') {
+    client.send(evt.serverId, evt.channelId, `Welcome!`, evt.groupId);
+  }
+});
+```
+
+See [SystemMessageEvent](/api-reference/types#systemmessageevent) for the full payload.
+
+## Lifecycle events
+
+### ready
+
+Fires once, after `login()` finishes. Permission grants are already populated, so [`can()`](/api-reference/client#can) works inside this handler.
+
+```ts
+client.on('ready', () => console.log(`Online as ${client.user?.id}`));
+```
+
+### guildCreate
+
+Fires when your bot is added to a server, and once per existing server during login.
+
+```ts
+client.on('guildCreate', (guild) => console.log(`in server ${guild.id}`));
+```
+
+### guildDelete
+
+Fires when your bot is removed from a server. The SDK drops that server's cached key. Reconnection and any other work continue.
+
+```ts
+client.on('guildDelete', (guild) => console.log(`removed from ${guild.id}`));
+```
+
+### permissionsUpdate
+
+Fires when a server resolves or changes your bot's grant. The payload is the `serverId` plus the full [PermissionSet](/api-reference/types#permissionset), spread flat.
+
+```ts
+client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
+  console.log(`send in ${serverId}: ${perms.message_send}, rank ${effectiveRank}`);
+});
+```
+
+## Connection events
+
+These three let you observe the automatic reconnect. You do not need to act on them. Reconnection is handled for you. See [Connection lifecycle](/concepts/connection-lifecycle).
+
+### disconnect
+
+```ts
+client.on('disconnect', (err) => console.warn('connection dropped', err));
+```
+
+### reconnecting
+
+```ts
+client.on('reconnecting', ({ attempt, delayMs }) =>
+  console.log(`reconnecting (attempt ${attempt}) in ${delayMs}ms`),
+);
+```
+
+### reconnected
+
+```ts
+client.on('reconnected', () => console.log('back online'));
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types">
+    The shape of each event payload.
+  </Card>
+  <Card title="Client" icon="book" href="/api-reference/client">
+    The methods you call in response.
+  </Card>
+</CardGroup>

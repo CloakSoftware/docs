@@ -1,0 +1,83 @@
+---
+title: "Connection lifecycle"
+description: "Logging in, staying connected, recovering from drops, and shutting down cleanly."
+---
+
+Your bot maintains a live connection to Cloak. The SDK handles the hard parts of keeping that connection healthy, and gives you events so you can observe what is happening.
+
+## Logging in
+
+Calling `login()` runs the full startup sequence:
+
+<Steps>
+  <Step title="Connect and authenticate">
+    The SDK opens a connection and authenticates with your bot token.
+  </Step>
+  <Step title="Publish identity if needed">
+    On the very first login, your bot's identity is published to the server. On later logins, it reuses the identity from your [keystore](/concepts/keys-and-keystore).
+  </Step>
+  <Step title="Announce existing servers">
+    `guildCreate` fires for each server the bot is already in.
+  </Step>
+  <Step title="Signal readiness">
+    `ready` fires once startup is complete. Permission grants are populated before this, so `can()` is usable inside your `ready` handler.
+  </Step>
+</Steps>
+
+```ts
+client.on('ready', () => console.log(`Online as ${client.user?.id}`));
+await client.login();
+```
+
+## Staying connected and recovering
+
+If the connection drops unexpectedly, the SDK reconnects on its own. It rebuilds the connection, re-authenticates, and re-establishes your last [`watch()`](/concepts/message-delivery#pre-selecting-a-channel-is-optional) target if you set one. It uses exponential backoff with jitter, capped at 30 seconds between attempts, so a flaky network does not turn into a tight retry loop.
+
+Your keys and identity carry across reconnects, so the bot picks up where it left off.
+
+Observe the process with three events:
+
+```ts
+client.on('disconnect', (err) => console.warn('connection dropped', err));
+
+client.on('reconnecting', ({ attempt, delayMs }) =>
+  console.log(`reconnecting (attempt ${attempt}) in ${delayMs}ms`),
+);
+
+client.on('reconnected', () => console.log('back online'));
+```
+
+<Note>
+  Reconnection is automatic. You do not need to call `login()` again after a drop. The events are for logging and observability, not for driving the reconnect yourself.
+</Note>
+
+## Being removed from a server
+
+If your bot is kicked or banned, the SDK drops that server's cached key and fires `guildDelete`. This does not stop reconnection or tear down your other work.
+
+```ts
+client.on('guildDelete', (guild) => {
+  console.log(`removed from server ${guild.id}`);
+});
+```
+
+## Shutting down
+
+Call `destroy()` to close the connection and stop reconnecting. This is the clean way to end your bot's session.
+
+```ts
+await client.destroy();
+```
+
+A bot that has been removed from everything and has nothing left to do can call `destroy()` from its own `guildDelete` handler.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Events reference" icon="bell" href="/api-reference/events">
+    Every lifecycle event and its payload.
+  </Card>
+  <Card title="Keys and the keystore" icon="database" href="/concepts/keys-and-keystore">
+    What persists across a reconnect.
+  </Card>
+</CardGroup>

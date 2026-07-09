@@ -1,0 +1,92 @@
+---
+title: "Permissions"
+description: "Every permission name you can declare or check, grouped by what it controls."
+---
+
+Permissions are referenced by name throughout the SDK. You declare them in [`requiredPermissions`](/api-reference/client#constructor-options), check them with [`can()`](/api-reference/client#can), and read them from a [`PermissionSet`](/api-reference/types#permissionset). The names below are the exact strings to use.
+
+For how declaring and granting work together, see the [Permissions concept](/concepts/permissions).
+
+```ts
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  requiredPermissions: ['view_text', 'message_send', 'reaction_add'],
+});
+```
+
+## Administrator
+
+<ParamField path="administrator" type="PermissionName">
+  Grants every permission. If your bot holds this in a server, [`can()`](/api-reference/client#can) returns `true` for every other permission there. Ask for it only when your bot genuinely needs full control.
+</ParamField>
+
+## Server management
+
+| Name | Controls |
+| --- | --- |
+| `manage_server` | Change server settings. |
+| `manage_channels` | Create, edit, and delete channels. |
+| `invite_creation` | Create invites to the server. |
+| `emoji_gif_manage` | Manage the server's emoji and GIFs. |
+| `view_audit` | View the audit log. |
+| `view_insights` | View server insights. |
+
+## Viewing
+
+| Name | Controls |
+| --- | --- |
+| `view_text` | View text channels. Required to receive messages from them. |
+| `view_voice` | View voice channels. |
+| `message_read_history` | Read past messages in a channel. |
+
+<Note>
+  `view_text` is what puts a text channel on your bot's [firehose](/concepts/message-delivery). Without it in a given channel, your bot does not receive that channel's messages.
+</Note>
+
+## Messaging
+
+| Name | Controls |
+| --- | --- |
+| `message_send` | Send messages. |
+| `message_manage` | Manage other members' messages, such as deleting them. |
+| `embed_link` | Post links that render as embeds. |
+| `upload_file` | Upload files. |
+| `reaction_add` | Add reactions to messages. |
+| `mention_roles` | Mention roles. |
+| `commands` | Use commands. |
+
+## Members
+
+| Name | Controls |
+| --- | --- |
+| `member_kick` | Remove members from the server. |
+| `member_ban` | Ban members from the server. |
+| `member_timeout` | Time members out. |
+| `nickname_change` | Change the bot's own nickname. |
+| `nickname_manage` | Change other members' nicknames. |
+
+## Voice
+
+| Name | Controls |
+| --- | --- |
+| `voice_connect` | Connect to voice channels. |
+| `voice_speak` | Speak in voice channels. |
+| `voice_video` | Share video in voice channels. |
+| `voice_activity` | Use voice activity detection. |
+| `members_mute` | Mute members in voice. |
+| `members_deafen` | Deafen members in voice. |
+| `members_move` | Move members between voice channels. |
+
+## Using names in code
+
+Every name above is a value of the `PermissionName` type. The type is exported, so you get autocomplete and compile-time checking.
+
+```ts
+import type { PermissionName } from '@cloak/bot-sdk';
+
+const needed: PermissionName[] = ['view_text', 'message_send'];
+```
+
+<Tip>
+  Ask only for the permissions your bot actually uses. A smaller request is easier for a server admin to approve, and it keeps the bot's footprint honest.
+</Tip>

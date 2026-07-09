@@ -1,47 +1,123 @@
 ---
 title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+description: "Create a bot, add it to a server, and watch it reply to a message. About five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+By the end of this guide you will have a running bot that answers `!ping` with `pong` in any channel it can see.
 
 ## Prerequisites
 
-Before you begin, you must have:
+- **Node.js** `20.19+` or `22.12+`. Check with `node --version`.
+- A **Cloak account**. Download Cloak from [cloak.chat](https://cloak.chat) if you do not have it yet.
+- A server where you have the **Manage Server** permission, so you can add a bot to it.
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Steps
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Install the SDK">
+    In a new project folder, install the package.
 
-    ```bash
-    npm install your-package
+    <CodeGroup>
+    ```bash npm
+    npm install @cloak/bot-sdk
+    ```
+
+    ```bash pnpm
+    pnpm add @cloak/bot-sdk
+    ```
+
+    ```bash yarn
+    yarn add @cloak/bot-sdk
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Create a bot and copy its token">
+    In the Cloak app, open **Settings > My Bots**, create a bot, and copy the token.
+
+    The token has the shape `botid.tokenid.secret` and is shown only once. It grants full encrypted membership, so treat it like a password. Store it in an environment variable or a secret manager, and never commit it to source control.
+
+    <Warning>
+      If you lose the token you cannot recover it. Create a new one from the same screen.
+    </Warning>
+  </Step>
+
+  <Step title="Add the bot to a server">
+    Open the server you want the bot in, then go to **Server Settings > Invites > Add a Bot**. This requires the Manage Server permission.
+
+    Adding the bot shares that server's encryption key with it, which is what lets the bot decrypt and send messages there.
+  </Step>
+
+  <Step title="Write the bot">
+    Create `bot.ts` with the following. Read the token from an environment variable so it stays out of your code.
+
+    ```ts bot.ts
+    import { Client } from '@cloak/bot-sdk';
+
+    const client = new Client({
+      token: process.env.CLOAK_TOKEN!,
+      keystorePath: './bot.cloak-keystore.json', // persists identity and keys
+    });
+
+    client.on('ready', () => {
+      console.log(`Online as ${client.user?.id}`);
+    });
+
+    client.on('messageCreate', (msg) => {
+      if (msg.authorId === client.user?.id) return; // ignore our own messages
+      if (msg.content.trim() === '!ping') {
+        msg.reply('pong').catch(console.error);
+      }
+    });
+
+    await client.login();
+    ```
+
+    Add your keystore to `.gitignore` so it never gets committed:
+
+    ```bash .gitignore
+    *.cloak-keystore.json
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
   <Step title="Run it">
-    Show the first thing a user does to see it working.
+    Pass the token on the command line and start the bot. This example uses [tsx](https://tsx.is) to run TypeScript directly.
 
     ```bash
-    your-cli start
+    CLOAK_TOKEN="botid.tokenid.secret" npx tsx bot.ts
     ```
+
+    You should see `Online as ...` in your terminal. Now send `!ping` in any channel the bot can see, and it replies `pong`.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## First message takes a moment
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+The first time a bot joins a server, another member who already holds that server's key needs to be online to hand the key to the bot. Until that happens the bot can connect but cannot decrypt or send in that server. The SDK retries automatically, so once a member comes online the bot catches up on its own.
+
+<Tip>
+  Keep the person who added the bot online for a minute after the first join. That is usually all it takes for the key handoff to complete.
 </Tip>
+
+## What just happened
+
+- Your bot logged in and published its identity to Cloak.
+- It started receiving messages from every channel it is allowed to view. This is called the [firehose](/concepts/message-delivery), and it means you never subscribe to channels by hand.
+- When it saw `!ping`, it encrypted `pong` in your process and sent the ciphertext. Cloak relayed it and the sender's app decrypted it.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
+    The encryption model behind that `pong`.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Declare what your bot needs and check what it was granted.
+  </Card>
+  <Card title="Welcome bot example" icon="hand-wave" href="/examples/welcome-bot">
+    Greet new members and handle more events.
+  </Card>
+  <Card title="API reference" icon="book" href="/api-reference/client">
+    The full surface of the `Client`.
+  </Card>
+</CardGroup>
