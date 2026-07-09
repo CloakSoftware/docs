@@ -1,0 +1,151 @@
+---
+title: "Members and roles"
+description: "Read members and roles for a server, on demand."
+---
+
+Sometimes you need the full roster of a server, not just the people who happen to be talking on the firehose. `fetchMembers()` and `fetchRoles()` read that for you when you ask. Both go to the server every time, so what you get back is current as of the call.
+
+## Fetch the members
+
+`client.fetchMembers(serverId)` returns a `Promise<Member[]>`. It reads the server's members on demand and does not cache, so each call is a fresh read.
+
+```ts
+const members = await client.fetchMembers(serverId);
+console.log(`${members.length} members`);
+```
+
+Each entry describes one member of that server.
+
+<ResponseField name="userId" type="string">
+  The member's normalized id.
+</ResponseField>
+
+<ResponseField name="username" type="string">
+  The member's username.
+</ResponseField>
+
+<ResponseField name="status" type="number">
+  An online-status code. `0` means offline.
+</ResponseField>
+
+<ResponseField name="createdAt" type="Date | null">
+  When the account was created, when known. This is the account creation time, not the time the member joined this server. `null` when unknown.
+</ResponseField>
+
+<ResponseField name="icon" type="string | null">
+  The member's icon, or `null` if none is set.
+</ResponseField>
+
+<ResponseField name="subscriptionTier" type="number | null">
+  The member's subscription tier, or `null` if unknown.
+</ResponseField>
+
+<ResponseField name="isBot" type="boolean">
+  `true` if this member is a bot.
+</ResponseField>
+
+<ResponseField name="role" type="MemberRole | null">
+  The member's assigned role, or `null` if they have none. A `MemberRole` is `{ id, name, color, secondColor, admin }`, where `admin` is `true` when the role carries admin.
+</ResponseField>
+
+## Count members and bots
+
+Because you get a plain array back, you can slice it however you like. Here a `!count` command reports how many members are humans and how many are bots.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() !== '!count') return;
+
+  const members = await client.fetchMembers(msg.serverId);
+  const bots = members.filter((m) => m.isBot);
+  const humans = members.length - bots.length;
+
+  await msg.reply(`${members.length} members: ${humans} people, ${bots.length} bots`);
+});
+```
+
+## Fetch the roles
+
+`client.fetchRoles(serverId)` returns a `Promise<Role[]>`. Like `fetchMembers()`, it reads on demand and does not cache.
+
+```ts
+const roles = await client.fetchRoles(serverId);
+for (const role of roles) {
+  console.log(`${role.name}: ${role.memberCount} members`);
+}
+```
+
+Each entry describes one role in the server.
+
+<ResponseField name="id" type="string">
+  The role's id.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The role's name.
+</ResponseField>
+
+<ResponseField name="color" type="string | null">
+  The role's primary color, or `null` if none is set.
+</ResponseField>
+
+<ResponseField name="secondColor" type="string | null">
+  The role's secondary color, or `null` if none is set.
+</ResponseField>
+
+<ResponseField name="position" type="number | null">
+  The role's position, or `null` if unknown.
+</ResponseField>
+
+<ResponseField name="memberCount" type="number">
+  How many members hold this role.
+</ResponseField>
+
+## Read through the guild() handle
+
+Both reads are also available on the `guild()` handle, if you already have one for the server. These are the same calls, just reached a different way.
+
+```ts
+const guild = client.guild(serverId);
+const members = await guild.fetchMembers();
+const roles = await guild.fetchRoles();
+```
+
+See [The guild() handle](/guides/guild-handle) for what else the handle gives you.
+
+<Note>
+  These reads always hit the server, so treat them as a point-in-time snapshot rather than a live view. Call again when you need current data. For continuous member activity, use the firehose instead.
+</Note>
+
+## Handle failures
+
+Both calls reject with `CloakActionError` if the read fails. Wrap them in a `try/catch` and decide what to do when the roster is not available.
+
+```ts
+try {
+  const members = await client.fetchMembers(serverId);
+  console.log(`${members.length} members`);
+} catch (err) {
+  console.error('could not read members', err);
+}
+```
+
+The server decides whether your bot may read this data and is the authority on the result. If a read is refused, it rejects here rather than returning a partial list.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Member type" icon="user" href="/api-reference/types#member">
+    Every field on a member.
+  </Card>
+  <Card title="Role type" icon="tag" href="/api-reference/types#role">
+    Every field on a role.
+  </Card>
+  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
+    The other way to reach these reads.
+  </Card>
+  <Card title="Moderation" icon="gavel" href="/guides/moderation">
+    Act on the members you just read.
+  </Card>
+</CardGroup>

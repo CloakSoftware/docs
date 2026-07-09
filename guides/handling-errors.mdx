@@ -1,0 +1,113 @@
+---
+title: "Handling errors"
+description: "Catch CloakActionError and report exactly what an action was denied for."
+---
+
+Every action your bot awaits can be denied by the server. When that happens, the promise rejects with a `CloakActionError`, a typed error that tells you what went wrong and, when the denial maps to a named permission, which permission the bot was missing. This guide shows you how to catch it and report exactly what an action was denied for.
+
+## What CloakActionError is
+
+`CloakActionError` is the typed error every awaited action rejects with when the server denies it. Import it from the SDK:
+
+```ts
+import { CloakActionError } from '@cloak/bot-sdk';
+```
+
+It carries four fields:
+
+<ParamField path="message" type="string">
+  A human-readable explanation of the denial. This is always present and is the field to show in logs or relay to a user.
+</ParamField>
+
+<ParamField path="permission" type="PermissionName | undefined">
+  The named permission the bot was missing, when the denial maps to one. Undefined for denials that have no named permission.
+</ParamField>
+
+<ParamField path="opcode" type="number">
+  A raw numeric diagnostic. For logging only.
+</ParamField>
+
+<ParamField path="code" type="number">
+  A raw numeric diagnostic. For logging only.
+</ParamField>
+
+The stable surface for bots is `.message` and `.permission`. Treat `.opcode` and `.code` as raw diagnostics for logging: do not branch business logic on their exact values.
+
+## The canonical pattern
+
+Wrap the awaited action in a `try/catch`, check for `CloakActionError` with `instanceof`, and re-throw anything else so you never swallow an unrelated bug.
+
+```ts
+import { CloakActionError } from '@cloak/bot-sdk';
+
+try {
+  await msg.delete();
+} catch (e) {
+  if (e instanceof CloakActionError) {
+    const missing = e.permission ? ' (missing ' + e.permission + ')' : '';
+    console.log('denied: ' + e.message + missing);
+  } else {
+    throw e;
+  }
+}
+```
+
+The `missing` string is only appended when `.permission` is set. That keeps the message useful for permission-style denials while still reading cleanly for denials that have no named permission.
+
+## Why .permission can be undefined
+
+`.permission` is set only when the denial maps to one of the named permissions. Deleting another member's message without `message_manage`, for example, sets `.permission` to `'message_manage'`.
+
+Some denials have no named permission. A pin denial uses a channel-level permission that has no name, so `.permission` comes back undefined even though the failure is permission-style. Always fall back to `.message`, which is always present.
+
+<Note>
+  `.message` is the field you can always rely on. Read `.permission` when it is set, but never assume it is set.
+</Note>
+
+## Which calls reject with CloakActionError
+
+Any action the server can deny rejects with `CloakActionError` when it does. That covers:
+
+- Message actions: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
+- Moderation: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
+- Channel and group management: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
+- Reads: `fetchMembers`, `fetchRoles`, and `fetchMessages` when read history is denied.
+
+Each of these returns a promise, so wrap the ones you call in the pattern above.
+
+## Sending is different
+
+`client.send()` and `msg.reply()` are fire-and-forget for delivery. They do **not** reject with `CloakActionError`. The only local throw from `send()` is a plain `Error`, raised when the bot has no conversation key yet.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() !== '!ping') return;
+  msg.reply('pong').catch((e) => console.error('reply failed', e));
+});
+```
+
+<Warning>
+  Do not wrap `send()` or `reply()` in a `CloakActionError` check expecting a delivery denial. There is none. Catch the plain `Error` from `send()` if you want to handle the no-key case, and treat everything else as fire-and-forget.
+</Warning>
+
+## Describing an error from its diagnostics
+
+The SDK also exports a helper, `describeActionError(opcode, code)`, that returns `{ message, permission? }`. Reach for it only when you have a raw `opcode` and `code` in hand (for example from a log line) and want the same human-readable description without a live error object. For normal handling, the `CloakActionError` you catch already carries `.message` and `.permission`, so you rarely need the helper.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="CloakActionError reference" icon="triangle-exclamation" href="/api-reference/errors">
+    Every field on the typed error.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    What decides whether an action is allowed.
+  </Card>
+  <Card title="Moderation" icon="gavel" href="/guides/moderation">
+    Actions that commonly reject when a grant is missing.
+  </Card>
+  <Card title="Message history" icon="clock-rotate-left" href="/guides/message-history">
+    Where fetchMessages can be denied.
+  </Card>
+</CardGroup>

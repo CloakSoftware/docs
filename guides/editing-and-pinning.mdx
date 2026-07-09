@@ -1,0 +1,148 @@
+---
+title: "Editing, deleting, and pinning"
+description: "Edit, delete, pin, and unpin messages, and react to those changes."
+---
+
+Your bot can change a message after it sends it, remove one, and pin or unpin it. It can also hear when any of that happens, including its own changes. This page covers `msg.edit()`, `msg.delete()`, `msg.pin()`, and `msg.unpin()`, plus the events that report each change.
+
+## Edit a message the bot sent
+
+`msg.edit(newContent)` replaces the text of a message and returns `Promise<void>`. The server allows only the message's author to edit it, so a bot can edit its own messages, never another member's. The new content is re-encrypted exactly like a normal `send()`.
+
+The bot receives its own messages on the firehose, so it can hold on to one and edit it later.
+
+```ts
+import { Client, Message } from '@cloak/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  requiredPermissions: ['message_send'],
+});
+
+// The last message the bot posted, captured from the firehose.
+let lastPost: Message | undefined;
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) {
+    lastPost = msg; // our own message, so remember it
+    return;
+  }
+  if (msg.content.trim() === '!revise' && lastPost) {
+    await lastPost.edit('Edited: the details changed.');
+  }
+});
+```
+
+## Delete a message
+
+`msg.delete()` removes a message and returns `Promise<void>`. The server allows the author to delete their own message, or a member holding the `message_manage` permission to delete another member's message.
+
+This is the method a moderation bot reaches for. Pre-gate with an advisory `can()` check so the bot skips a delete the server would only reject.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (!msg.content.toLowerCase().includes('bannedword')) return;
+  if (!client.can('message_manage', msg.serverId)) return;
+  await msg.delete();
+});
+```
+
+## Pin and unpin
+
+`msg.pin()` and `msg.unpin()` both return `Promise<void>`. Pinning is allowed for the message's author or for a member holding the channel's pin permission. Both methods work on any `Message` the bot holds, whether it came from the firehose or from `fetchMessages`.
+
+```ts
+// message is any Message the bot is holding on to.
+await message.pin();
+
+// Later, take it back down.
+await message.unpin();
+```
+
+<Note>
+  Pinning uses a channel-level pin permission that is not one of the 29 named permissions. Because of that, a pin denial's `CloakActionError` carries no `.permission` attribution, though its `.message` still explains what happened.
+</Note>
+
+## Every action needs createdAt
+
+`edit()`, `delete()`, `pin()`, and `unpin()` all need the message's `createdAt`. Live messages from the firehose and messages you load with `fetchMessages` both carry it, so you rarely have to think about this.
+
+<Note>
+  If `createdAt` is missing, the call rejects with a plain `Error` before it ever reaches the server.
+</Note>
+
+## Handle a denied action
+
+All four methods reject with a `CloakActionError` when the server denies the action, for example when the bot lacks the permission to delete another member's message. Catch it and read `.message`.
+
+```ts
+import { CloakActionError } from '@cloak/bot-sdk';
+
+try {
+  await msg.delete();
+} catch (err) {
+  if (err instanceof CloakActionError) {
+    console.error('the server refused the delete:', err.message);
+  } else {
+    throw err;
+  }
+}
+```
+
+See [Handling errors](/guides/handling-errors) for the full pattern.
+
+## React to changes
+
+Three events report changes to existing messages. Each one fires for the bot's own actions too, so filter where you only care about other members.
+
+```ts
+client.on('messageUpdate', ({ messageId, content, channelId }) => {
+  console.log(`message ${messageId} in ${channelId} now reads: ${content}`);
+});
+
+client.on('messageDelete', ({ messageId, channelId }) => {
+  console.log(`message ${messageId} was removed from ${channelId}`);
+});
+
+client.on('pinUpdate', ({ messageId, pinned }) => {
+  console.log(`message ${messageId} is ${pinned ? 'pinned' : 'unpinned'}`);
+});
+```
+
+<ResponseField name="messageUpdate" type="{ messageId, content, serverId, channelId }">
+  `content` is the decrypted new text, best-effort. When the key is missing it is an empty string, never raw ciphertext.
+</ResponseField>
+
+<ResponseField name="messageDelete" type="{ messageId, serverId, channelId }">
+  Fires when a message is removed.
+</ResponseField>
+
+<ResponseField name="pinUpdate" type="{ messageId, pinned, serverId, channelId }">
+  `pinned` is a boolean: `true` when the message was pinned, `false` when it was unpinned.
+</ResponseField>
+
+Because each event fires for the bot's own edits, deletes, and pins as well, remember the message ids the bot just acted on and skip them if you want to react only to other members' changes.
+
+`Message.pinned` is a boolean that is available when known, from history via `fetchMessages` or from a `pinUpdate` event. Treat an undefined value as unknown rather than as unpinned.
+
+<Note>
+  On an older Cloak server, `serverId` and `channelId` on these events can fall back to the current selection. An up-to-date Cloak server always reports the message's own location.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The Message object" icon="message" href="/api-reference/types#message">
+    Every field and method on a message, including edit, delete, pin, and unpin.
+  </Card>
+  <Card title="Events" icon="bell" href="/api-reference/events">
+    The full payload for messageUpdate, messageDelete, and pinUpdate.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    What CloakActionError carries and how to catch it.
+  </Card>
+  <Card title="Message history" icon="clock-rotate-left" href="/guides/message-history">
+    Load past messages with fetchMessages so you have one to act on.
+  </Card>
+</CardGroup>

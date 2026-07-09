@@ -1,0 +1,185 @@
+---
+title: "Channels and groups"
+description: "Create, rename, move, and delete channels and groups."
+---
+
+Channels live inside groups, and a server is a set of groups holding channels. Your bot can shape that structure at runtime: open a new channel, rename it, move it between groups, or tear it down. Every method on this page needs the `manage_channels` permission, and every one reports a server deny by rejecting with `CloakActionError`.
+
+## Channels live inside groups
+
+A group is a labeled section of a server, and each channel belongs to exactly one group. That is why the channel methods take a `groupId` alongside the `channelId`: the pair tells the server which channel to act on and where it lives. Create groups to organize channels, and create channels inside them.
+
+<Note>
+  Every method here requires the `manage_channels` permission. Declare it on the `Client` and let a human approve it per server. See [Permissions](/concepts/permissions).
+</Note>
+
+## Create a channel
+
+`createChannel()` opens a new channel inside a group and resolves to the new channel's id. Pass the server, the channel name, and the group it should live in.
+
+```ts
+const channelId = await client.createChannel(serverId, 'release-notes', groupId);
+console.log(`created channel ${channelId}`);
+```
+
+<ParamField path="channelType" type="number" default="0">
+  The kind of channel to create. Defaults to `0`, a text channel.
+</ParamField>
+
+<ResponseField name="returns" type="Promise<string>">
+  The id of the newly created channel.
+</ResponseField>
+
+## Rename a channel
+
+`editChannel()` renames a channel in place. Pass the channel and its group, then the new name.
+
+```ts
+await client.editChannel(serverId, channelId, groupId, 'release-notes-archive');
+```
+
+## Move a channel
+
+`moveChannel()` relocates a channel to a group and a position within it. Pass the group the channel is in now, the group it should move to, and the target order.
+
+```ts
+// Move a channel into another group, placing it at the top.
+await client.moveChannel(serverId, channelId, fromGroupId, toGroupId, 0);
+```
+
+<ParamField path="newOrder" type="number">
+  The channel's position in the destination group. Clamped to the range `0` to `126`.
+</ParamField>
+
+<Warning>
+  Moving a channel to the same group and the same order is a no-op, and the server rejects it. Move to a different group or a different position.
+</Warning>
+
+## Delete a channel
+
+`deleteChannel()` removes a channel along with its messages and pins. Pass the channel and its group.
+
+```ts
+await client.deleteChannel(serverId, channelId, groupId);
+```
+
+<Warning>
+  Deleting a channel also deletes its messages and pins. There is no undo.
+</Warning>
+
+## Work with groups
+
+Groups are the sections that hold channels. Create one before you fill it with channels, rename it, or delete it once it is empty of anything you want to keep.
+
+### Create a group
+
+`createGroup()` creates a channel group. It resolves to the new group's id, captured best-effort from the server's create broadcast by matching the name within a short window. When the id cannot be captured, it resolves to `undefined`, so always handle that case.
+
+```ts
+const groupId = await client.createGroup(serverId, 'Announcements');
+if (!groupId) {
+  console.warn('group was created, but its id could not be captured');
+  return;
+}
+const channelId = await client.createChannel(serverId, 'news', groupId);
+```
+
+<ResponseField name="returns" type="Promise<string | undefined>">
+  The id of the new group, or `undefined` when it could not be captured.
+</ResponseField>
+
+### Rename a group
+
+`editGroup()` renames a group.
+
+```ts
+await client.editGroup(serverId, groupId, 'Company Announcements');
+```
+
+### Delete a group
+
+`deleteGroup()` deletes a group and every channel inside it.
+
+```ts
+await client.deleteGroup(serverId, groupId);
+```
+
+<Warning>
+  Deleting a group deletes its channels too. Move out anything you want to keep first.
+</Warning>
+
+## Use the guild() handle
+
+Every method above is also available on the [`guild()` handle](/guides/guild-handle), which binds the server id for you so you pass one fewer argument. This reads well when a command already knows which server it is acting on.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() !== '!new-channel') return;
+
+  const guild = client.guild(msg.serverId);
+  const groupId = await guild.createGroup('Bot Output');
+  if (!groupId) return; // id was not captured, nothing to fill
+  const channelId = await guild.createChannel('bot-log', groupId);
+  await msg.reply(`opened <#${channelId}>`);
+});
+```
+
+## Listen for lifecycle changes
+
+Every create, rename, move, and delete fires an event, so your bot can react to structural changes it did not make. These events fire for the bot's own mutations too, so filter by the ids you just acted on when you only want changes from elsewhere.
+
+| Event | Payload | Fires when |
+| --- | --- | --- |
+| `channelCreate` | `{ channelId, name, groupId, type, serverId }` | A channel is created. |
+| `channelUpdate` | `{ channelId, name, serverId }` | A channel is renamed. |
+| `channelDelete` | `{ channelId, serverId }` | A channel is deleted. |
+| `groupCreate` | `{ groupId, name, serverId }` | A group is created. |
+| `groupUpdate` | `{ groupId, name, serverId }` | A group is renamed. |
+| `groupDelete` | `{ groupId, serverId }` | A group is deleted. |
+
+```ts
+client.on('channelCreate', ({ channelId, name, groupId, serverId }) => {
+  console.log(`channel ${name} (${channelId}) created in group ${groupId} on ${serverId}`);
+});
+
+client.on('groupDelete', ({ groupId, serverId }) => {
+  console.log(`group ${groupId} removed from ${serverId}`);
+});
+```
+
+<Note>
+  Routing these events to a bot for a server it has not selected requires an up-to-date Cloak server.
+</Note>
+
+## Servers are owner-level
+
+There are no methods to edit or delete a server. Those actions are owner-level and reach your bot only as events, so your bot can observe them but not perform them.
+
+| Event | Payload | Fires when |
+| --- | --- | --- |
+| `serverUpdate` | `{ serverId, name }` | A server is renamed. |
+| `serverDelete` | `{ serverId }` | A server is deleted. |
+
+```ts
+client.on('serverUpdate', ({ serverId, name }) => {
+  console.log(`server ${serverId} is now called ${name}`);
+});
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Events" icon="bell" href="/api-reference/events">
+    Every lifecycle event and its payload.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    Catch a CloakActionError when the server denies an action.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Why these methods need manage_channels.
+  </Card>
+  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
+    Bind a server id and pass one fewer argument.
+  </Card>
+</CardGroup>

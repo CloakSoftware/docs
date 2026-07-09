@@ -35,6 +35,10 @@ If the connection drops unexpectedly, the SDK reconnects on its own. It rebuilds
 
 Your keys and identity carry across reconnects, so the bot picks up where it left off.
 
+<Note>
+  A `watch()` target is only a preference. If the watched channel was deleted or is no longer selectable while the bot was offline, the SDK drops the watch and continues on the firehose rather than failing the reconnect. A working bot never gets stranded over an optional pre-selection.
+</Note>
+
 Observe the process with three events:
 
 ```ts

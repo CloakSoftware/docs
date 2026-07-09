@@ -1,0 +1,88 @@
+---
+title: "Errors"
+description: "CloakActionError, the typed error every action rejects with when the server says no."
+---
+
+Every awaited action that the server can deny rejects with a `CloakActionError`. It carries a human-readable message and, when the denial maps to a named permission, the permission your bot was missing. This lets a bot report exactly why an action failed. For the practical pattern, see [Handling errors](/guides/handling-errors).
+
+```ts
+import { CloakActionError } from '@cloak/bot-sdk';
+```
+
+## CloakActionError
+
+```ts
+class CloakActionError extends Error {
+  readonly opcode: number;
+  readonly code: number;
+  readonly permission?: PermissionName;
+  // plus the standard Error `message`
+}
+```
+
+<ResponseField name="message" type="string">
+  A human-readable explanation of the failure, for example `missing the kick-members permission` or `ban reason too long (max 256 chars)`. This is the stable field to show or log.
+</ResponseField>
+
+<ResponseField name="permission" type="PermissionName | undefined">
+  The named permission the bot was denied on, when the failure maps to one. For example, deleting another member's message without `message_manage` sets this to `'message_manage'`. It is `undefined` when the failure does not map to a named permission, so always fall back to `message`.
+</ResponseField>
+
+<ResponseField name="opcode" type="number">
+  A raw numeric diagnostic identifying the action. For logging only.
+</ResponseField>
+
+<ResponseField name="code" type="number">
+  A raw numeric diagnostic for the specific failure. For logging only.
+</ResponseField>
+
+<Warning>
+  Treat `opcode` and `code` as opaque diagnostics. Branch your logic on `permission` and show `message`. Do not hardcode specific numeric codes.
+</Warning>
+
+## Which calls throw it
+
+Any awaited action can reject with `CloakActionError`:
+
+- Message actions: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
+- Moderation: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
+- Channels and groups: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
+- Reads: `fetchMembers`, `fetchRoles`, and `fetchMessages` when read history is denied.
+
+<Note>
+  `send()` and `msg.reply()` are the exception. They are fire-and-forget for delivery and do not reject with `CloakActionError`. The only local throw from `send()` is a plain `Error` when the bot has no conversation key yet. See [Sending messages](/guides/sending-messages).
+</Note>
+
+## When there is no named permission
+
+Some denials are permission-style but do not map to one of the 29 [named permissions](/api-reference/permissions). Pinning is the clearest example: it is gated by a channel-level pin permission that has no name in the vocabulary. In that case `permission` is `undefined` and `message` still explains what happened.
+
+```ts
+try {
+  await msg.pin();
+} catch (e) {
+  if (e instanceof CloakActionError) {
+    // e.permission may be undefined here; e.message is always set.
+    console.log(e.message);
+  }
+}
+```
+
+## describeActionError
+
+```ts
+describeActionError(opcode: number, code: number): { message: string; permission?: PermissionName }
+```
+
+An exported helper that maps a raw `(opcode, code)` pair to the same message and optional permission that `CloakActionError` uses. You rarely need it, since the thrown error already carries both. It is available for tooling that inspects raw failures.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Handling errors" icon="shield-halved" href="/guides/handling-errors">
+    The catch-and-report pattern in practice.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    What the permission field points at.
+  </Card>
+</CardGroup>

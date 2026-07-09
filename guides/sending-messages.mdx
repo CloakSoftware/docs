@@ -1,0 +1,110 @@
+---
+title: "Sending messages"
+description: "Send and reply with encrypted messages, and choose where they land."
+---
+
+Your bot sends text by handing it to the SDK, which encrypts it in your process and puts the ciphertext on the wire. You have three ways to send: reply where a message arrived, send into that same channel, or send somewhere else entirely. This page covers when to reach for each.
+
+## Reply where a message arrived
+
+When you are handling an incoming message, the location is already known, so you pass only the text. Prefer `msg.reply(text)` and `msg.channel.send(text)`. Both send into the same channel the message came from.
+
+```ts
+import { Client } from '@cloak/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  requiredPermissions: ['message_send'],
+});
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() === '!ping') {
+    msg.reply('pong').catch((e) => console.error('reply failed', e));
+  }
+});
+```
+
+`msg.reply()` and `msg.channel.send()` are thin wrappers over `client.send()`. They read the source location off the `Message` for you, so you never repeat where the reply should go.
+
+## Send somewhere else
+
+Reach for `client.send()` when you want to send to a channel other than the one a message arrived in. A common case is greeting a new member in a specific welcome channel.
+
+```ts
+client.on('systemMessage', (evt) => {
+  if (evt.type !== 'member_join') return;
+  client
+    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, evt.groupId)
+    .catch((e) => console.error('welcome send failed', e));
+});
+```
+
+`client.send(serverId, channelId, text, groupId?)` returns `Promise<void>`. It encrypts `text` in your process and sends the ciphertext.
+
+<ParamField path="serverId" type="string" required>
+  The server that holds the target channel.
+</ParamField>
+
+<ParamField path="channelId" type="string" required>
+  The channel to send into.
+</ParamField>
+
+<ParamField path="text" type="string" required>
+  The message content. The SDK encrypts it before it leaves your process.
+</ParamField>
+
+<ParamField path="groupId" type="string">
+  The channel's group. Optional, and auto-resolved from the SDK's channel cache for any channel the bot has already seen. Pass it only when sending to a channel with no prior traffic.
+</ParamField>
+
+### When to pass groupId
+
+For any channel the bot has already seen traffic from, the SDK resolves `groupId` from its channel cache, so you can leave it out. Pass it explicitly when you are sending into a channel the bot has no prior traffic from, such as a member-join greeting in a fresh channel. The `systemMessage` event carries `evt.groupId` for exactly this reason.
+
+## Sends never race
+
+Every send goes through a single internal queue, so sends never race each other. You do not manage ordering. Fire them in the order you want them to arrive and let the SDK serialize them.
+
+```ts
+await client.send(serverId, channelId, 'first');
+await client.send(serverId, channelId, 'second');
+```
+
+## Sending right after a first join
+
+`send()` throws a plain `Error` when the bot does not yet hold the server's conversation key. This happens right after a first join, before the key handoff completes. The SDK retries key acquisition automatically, so a later send succeeds once a key-holding member has been online.
+
+<Note>
+  This is the only case where `send()` throws locally. Catch it and let the bot try again later rather than treating it as fatal.
+</Note>
+
+```ts
+try {
+  await client.send(serverId, channelId, 'hello');
+} catch (e) {
+  // Most likely the conversation key has not arrived yet. A later send will work.
+  console.error('send failed, will retry later', e);
+}
+```
+
+<Warning>
+  `send()` does not surface per-message delivery receipts, and it does not throw a `CloakActionError` when a send is denied. The only failure it reports locally is the missing-key case above.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
+    How the firehose decides where messages reach you.
+  </Card>
+  <Card title="Reactions" icon="face-smile" href="/guides/reactions">
+    Respond without sending a new message.
+  </Card>
+  <Card title="The Message object" icon="envelope" href="/api-reference/types#message">
+    Every field a received message carries.
+  </Card>
+  <Card title="client.send()" icon="paper-plane" href="/api-reference/client#send">
+    The full method signature and options.
+  </Card>
+</CardGroup>

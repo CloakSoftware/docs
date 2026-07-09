@@ -22,15 +22,16 @@ A single `!ping` handler answers in every channel of every server the bot is in.
 
 ## Every message knows where it belongs
 
-Both `messageCreate` and `systemMessage` events carry the source location on the payload:
+A `messageCreate` `Message` carries the source location on its payload:
 
 | Field | Meaning |
 | --- | --- |
 | `serverId` | The server the message came from. |
 | `channelId` | The channel within that server. |
-| `groupId` | The channel's group, where known. Used internally to route replies. |
 
-Because of this, `msg.reply()` and `msg.channel.send()` already know where to go. You only reach for [`client.send()`](/api-reference/client#send) when you want to send somewhere other than where a message arrived.
+The SDK tracks the channel's group internally, so `msg.reply()` and `msg.channel.send()` already know where to go. You only reach for [`client.send()`](/api-reference/client#send) when you want to send somewhere other than where a message arrived.
+
+A `systemMessage` additionally carries a `groupId`, since a member join can happen in a channel the bot has not seen traffic from yet. Pass it to `send()` so the reply lands in the right place. See [SystemMessageEvent](/api-reference/types#systemmessageevent).
 
 ## Delivery is view-gated
 
@@ -61,11 +62,20 @@ await client.watch(serverId, channelId);
 
 `watch()` is remembered and re-established automatically after a reconnect. If you are just replying to messages as they arrive, you can ignore it entirely.
 
+## More than messages
+
+The firehose delivers more than new messages. Edits, deletions, reactions, pins, and channel or group changes all arrive as [events](/api-reference/events) too, each carrying its source location the same way.
+
+One thing to keep in mind: these events fire for the bot's own actions as well. When your bot deletes a message, its own `messageDelete` handler runs. Filter by author or actor id where that matters, the same way you skip your bot's own messages in `messageCreate`.
+
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     What decides which channels are visible.
+  </Card>
+  <Card title="Events" icon="bell" href="/api-reference/events">
+    Every event the firehose can deliver.
   </Card>
   <Card title="Connection lifecycle" icon="arrows-rotate" href="/concepts/connection-lifecycle">
     Reconnects, and what carries across them.

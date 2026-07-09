@@ -1,13 +1,13 @@
 ---
 title: "Types"
-description: "The objects the SDK hands you: Message, SystemMessageEvent, Guild, BotUser, and PermissionSet."
+description: "The objects the SDK hands you: Message, Member, Role, BanInfo, and the rest."
 ---
 
 These are the data types you receive in event payloads and from `Client` methods. The SDK ships full TypeScript declarations, so your editor knows all of this already.
 
 ## Message
 
-The payload of a [`messageCreate`](/api-reference/events#messagecreate) event. It carries the decrypted content, who sent it, where it came from, and helpers to reply.
+The payload of a [`messageCreate`](/api-reference/events#messagecreate) event, and each element of a [`fetchMessages()`](/api-reference/client#fetchmessages) result. It carries the decrypted content, who sent it, where it came from, when it was sent, any reply context, and the actions you can take on it.
 
 ```ts
 interface Message {
@@ -17,10 +17,26 @@ interface Message {
   messageId: string;
   serverId: string;
   channelId: string;
+  createdAt: Date | null;
+  repliedTo: {
+    messageId: string;
+    authorId: string;
+    content: string;
+    createdAt: Date | null;
+  } | null;
   reply(text: string): Promise<void>;
   channel: { send(text: string): Promise<void> };
+  react(reactionId: string): Promise<void>;
+  unreact(reactionId: string): Promise<void>;
+  edit(newContent: string): Promise<void>;
+  delete(): Promise<void>;
+  pin(): Promise<void>;
+  unpin(): Promise<void>;
+  pinned?: boolean;
 }
 ```
+
+### Fields
 
 <ResponseField name="content" type="string">
   The decrypted message text. Empty string if the key was missing or decryption failed, so check for content before acting on it.
@@ -31,7 +47,7 @@ interface Message {
 </ResponseField>
 
 <ResponseField name="authorName" type="string">
-  The sender's display name.
+  The sender's display name. This is empty for messages returned by [`fetchMessages()`](/api-reference/client#fetchmessages), which does not carry usernames.
 </ResponseField>
 
 <ResponseField name="messageId" type="string">
@@ -46,22 +62,53 @@ interface Message {
   The channel the message came from.
 </ResponseField>
 
+<ResponseField name="createdAt" type="Date | null">
+  The server-generated send time, or `null` when the payload omitted it. The `edit`, `delete`, `pin`, `unpin`, `react`, and `unreact` actions all need this value, so they reject when it is `null`. Live and fetched messages carry it.
+</ResponseField>
+
+<ResponseField name="repliedTo" type="object | null">
+  The context of the message this one replies to, or `null` for a normal message. Its `content` is the decrypted quote, and is `''` when the quote cannot be decrypted, never raw ciphertext. Compare `repliedTo.authorId` with `client.user?.id` to detect a reply to your bot.
+</ResponseField>
+
+<ResponseField name="pinned" type="boolean">
+  Whether the message is pinned, when known. Present on messages from [`fetchMessages()`](/api-reference/client#fetchmessages) and after a [`pinUpdate`](/api-reference/events#pinupdate).
+</ResponseField>
+
+### Methods
+
 <ResponseField name="reply" type="(text: string) => Promise<void>">
-  Sends a reply into the same channel this message arrived in. The location is already known, so you pass only the text.
+  Sends a reply into the same channel this message arrived in.
 </ResponseField>
 
 <ResponseField name="channel.send" type="(text: string) => Promise<void>">
-  Sends into the same channel. Equivalent to `reply`, phrased as sending to the channel rather than replying to a message.
+  Sends into the same channel. Equivalent to `reply`, phrased as sending to the channel.
 </ResponseField>
 
-```ts
-client.on('messageCreate', (msg) => {
-  if (msg.content.trim() === '!ping') {
-    msg.reply('pong');           // reply to the message
-    // or: msg.channel.send('pong'); // same destination
-  }
-});
-```
+<ResponseField name="react" type="(reactionId: string) => Promise<void>">
+  Adds a reaction. Requires `reaction_add`. See [Reactions](/guides/reactions).
+</ResponseField>
+
+<ResponseField name="unreact" type="(reactionId: string) => Promise<void>">
+  Removes the bot's own reaction.
+</ResponseField>
+
+<ResponseField name="edit" type="(newContent: string) => Promise<void>">
+  Edits the message (author only). Re-encrypts like `send`. See [Editing, deleting, and pinning](/guides/editing-and-pinning).
+</ResponseField>
+
+<ResponseField name="delete" type="() => Promise<void>">
+  Deletes the message. Author, or a member with `message_manage` for others' messages.
+</ResponseField>
+
+<ResponseField name="pin" type="() => Promise<void>">
+  Pins the message. Author, or a member with the channel's pin permission.
+</ResponseField>
+
+<ResponseField name="unpin" type="() => Promise<void>">
+  Unpins the message.
+</ResponseField>
+
+`react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` reject with [`CloakActionError`](/api-reference/errors) on a server deny. `reply` and `channel.send` are fire-and-forget for delivery and do not reject on a deny. See [Handling errors](/guides/handling-errors).
 
 ## SystemMessageEvent
 
@@ -79,7 +126,7 @@ interface SystemMessageEvent {
 ```
 
 <ResponseField name="type" type="'member_join' | 'bot_add' | 'unknown'">
-  Which system event this is. `member_join` when someone joins, `bot_add` when a bot is added, `unknown` for anything the SDK does not recognize.
+  Which system event this is.
 </ResponseField>
 
 <ResponseField name="actorId" type="string">
@@ -99,7 +146,192 @@ interface SystemMessageEvent {
 </ResponseField>
 
 <ResponseField name="groupId" type="string">
-  The group of the source channel, where known. Pass it to `send()` so the message lands in the right channel, even one the bot has not seen traffic from yet. May be undefined if the channel's group has not been seen.
+  The group of the source channel, where known. Pass it to `send()` so the message lands in the right channel.
+</ResponseField>
+
+## Member
+
+One server member, returned by [`fetchMembers()`](/api-reference/client#fetchmembers).
+
+```ts
+interface Member {
+  userId: string;
+  username: string;
+  status: number;
+  createdAt: Date | null;
+  icon: string | null;
+  subscriptionTier: number | null;
+  isBot: boolean;
+  role: MemberRole | null;
+}
+```
+
+<ResponseField name="userId" type="string">
+  The member's normalized id.
+</ResponseField>
+
+<ResponseField name="username" type="string">
+  The member's display name.
+</ResponseField>
+
+<ResponseField name="status" type="number">
+  Online status code, where `0` means offline.
+</ResponseField>
+
+<ResponseField name="createdAt" type="Date | null">
+  Account creation time, not the time the member joined the server, when known.
+</ResponseField>
+
+<ResponseField name="icon" type="string | null">
+  The member's avatar reference, or `null`.
+</ResponseField>
+
+<ResponseField name="subscriptionTier" type="number | null">
+  The member's subscription tier, or `null`.
+</ResponseField>
+
+<ResponseField name="isBot" type="boolean">
+  Whether the member is a bot.
+</ResponseField>
+
+<ResponseField name="role" type="MemberRole | null">
+  The member's assigned role, or `null`.
+</ResponseField>
+
+## MemberRole
+
+A member's assigned role, carried on [`Member`](#member).
+
+```ts
+interface MemberRole {
+  id: string;
+  name: string;
+  color: string | null;
+  secondColor: string | null;
+  admin: boolean;
+}
+```
+
+<ResponseField name="id" type="string">
+  The role's normalized id.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The role's name.
+</ResponseField>
+
+<ResponseField name="color" type="string | null">
+  The role's primary color, or `null`.
+</ResponseField>
+
+<ResponseField name="secondColor" type="string | null">
+  The role's secondary color, or `null`.
+</ResponseField>
+
+<ResponseField name="admin" type="boolean">
+  Whether the role confers admin standing.
+</ResponseField>
+
+## Role
+
+One server role, returned by [`fetchRoles()`](/api-reference/client#fetchroles).
+
+```ts
+interface Role {
+  id: string;
+  name: string;
+  color: string | null;
+  secondColor: string | null;
+  position: number | null;
+  memberCount: number;
+}
+```
+
+<ResponseField name="id" type="string">
+  The role's normalized id.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The role's name.
+</ResponseField>
+
+<ResponseField name="color" type="string | null">
+  The role's primary color, or `null`.
+</ResponseField>
+
+<ResponseField name="secondColor" type="string | null">
+  The role's secondary color, or `null`.
+</ResponseField>
+
+<ResponseField name="position" type="number | null">
+  The role's position in the ordering, or `null`. Lower numbers sort higher.
+</ResponseField>
+
+<ResponseField name="memberCount" type="number">
+  How many members hold the role.
+</ResponseField>
+
+## BanInfo
+
+One entry in a server's ban list, returned by [`fetchBans()`](/api-reference/client#fetchbans).
+
+```ts
+interface BanInfo {
+  userId: string;
+  username: string | null;
+  bannedAt: Date | null;
+  reason: string;
+}
+```
+
+<ResponseField name="userId" type="string">
+  The banned member's normalized id.
+</ResponseField>
+
+<ResponseField name="username" type="string | null">
+  The resolved display name, or `null` when the account no longer resolves.
+</ResponseField>
+
+<ResponseField name="bannedAt" type="Date | null">
+  When the ban was recorded, when known.
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  The stored ban reason, or an empty string.
+</ResponseField>
+
+## MessageLocation
+
+The remembered location of a message the bot has seen, returned by [`messageLocation()`](/api-reference/client#messagelocation).
+
+```ts
+interface MessageLocation {
+  serverId: string;
+  channelId: string;
+  groupId?: string;
+  authorId: string;
+  createdAtMs: number | null;
+}
+```
+
+<ResponseField name="serverId" type="string">
+  The server the message is in.
+</ResponseField>
+
+<ResponseField name="channelId" type="string">
+  The channel the message is in.
+</ResponseField>
+
+<ResponseField name="groupId" type="string">
+  The channel's group, where known.
+</ResponseField>
+
+<ResponseField name="authorId" type="string">
+  The message author's normalized id.
+</ResponseField>
+
+<ResponseField name="createdAtMs" type="number | null">
+  The message's send time in milliseconds, or `null`.
 </ResponseField>
 
 ## Guild
@@ -149,20 +381,19 @@ It is one boolean per permission, plus a numeric rank.
   One boolean per [permission name](/api-reference/permissions), such as `message_send` or `member_ban`. `true` means the bot holds it in this server.
 </ResponseField>
 
-```ts
-const set = client.permissions(serverId);
-if (set?.message_send) {
-  // the bot may send here
-}
-```
-
 ## Next
 
 <CardGroup cols={2}>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    The CloakActionError every action can throw.
+  </Card>
   <Card title="Permissions" icon="list" href="/api-reference/permissions">
     Every permission name.
   </Card>
   <Card title="Events" icon="bell" href="/api-reference/events">
     Where these types come from.
+  </Card>
+  <Card title="Client" icon="book" href="/api-reference/client">
+    The methods that return them.
   </Card>
 </CardGroup>

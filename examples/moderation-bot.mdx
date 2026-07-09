@@ -1,0 +1,182 @@
+---
+title: "Moderation bot"
+description: "A command-driven bot that exercises reactions, history, moderation, and the guild() handle."
+---
+
+This bot answers a handful of `!` commands, and each one exercises a different corner of the SDK: reactions, message history, and the moderation actions behind the `guild()` handle. It is command-driven, so every action starts from a message you send in a channel the bot can see. Copy it, set your token, and run it.
+
+## The full bot
+
+```ts moderation-bot.ts
+import { Client, CloakActionError } from '@cloak/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './mod-bot.cloak-keystore.json',
+  // Declare what the bot needs. A human approves a subset per server.
+  requiredPermissions: [
+    'message_send',
+    'message_read_history',
+    'message_manage',
+    'reaction_add',
+    'member_timeout',
+    'member_ban',
+  ],
+});
+
+client.on('ready', () => {
+  console.log(`Moderation bot online as ${client.user?.id}`);
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+
+  const [cmd, ...args] = msg.content.trim().split(/\s+/);
+  // A server-scoped handle for every moderation action below.
+  const g = client.guild(msg.serverId);
+
+  try {
+    switch (cmd) {
+      case '!ping': {
+        // React to the command message instead of replying.
+        await msg.react('👍');
+        break;
+      }
+
+      case '!roles': {
+        const roles = (await g.fetchRoles()).sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
+        const lines = roles.map((r) => `${r.name} (${r.memberCount})`);
+        await msg.reply(`Roles by position:\n${lines.join('\n')}`);
+        break;
+      }
+
+      case '!members': {
+        const members = await g.fetchMembers();
+        const bots = members.filter((m) => m.isBot).length;
+        await msg.reply(`${members.length} members, ${bots} of them bots.`);
+        break;
+      }
+
+      case '!bans': {
+        const bans = await g.fetchBans();
+        const lines = bans.map((b) => `${b.username ?? b.userId}: ${b.reason || '(no reason)'}`);
+        await msg.reply(bans.length ? lines.join('\n') : 'No bans on record.');
+        break;
+      }
+
+      case '!history': {
+        // Default 20, capped at 100.
+        const n = Math.min(Number(args[0]) || 20, 100);
+        const messages = await g.fetchMessages(msg.channelId, { limit: n });
+        const authors = new Set(messages.map((m) => m.authorId));
+        await msg.reply(`Last ${messages.length} messages from ${authors.size} distinct authors.`);
+        break;
+      }
+
+      case '!purge': {
+        // Newest n, capped at 50. Reverse so the newest go first.
+        const n = Math.min(Number(args[0]) || 0, 50);
+        if (!n) {
+          await msg.reply('usage: !purge <n>');
+          break;
+        }
+        const newest = (await g.fetchMessages(msg.channelId, { limit: n })).reverse();
+        for (const m of newest) {
+          await m.delete();
+        }
+        break;
+      }
+
+      case '!timeout': {
+        const [userId, seconds] = args;
+        if (!userId || !seconds) {
+          await msg.reply('usage: !timeout <userId> <seconds>');
+          break;
+        }
+        await g.timeout(userId, Number(seconds));
+        await msg.react('⏳');
+        break;
+      }
+
+      case '!pin': {
+        // Use this as a reply to the message you want pinned.
+        const replied = msg.repliedTo;
+        if (!replied) {
+          await msg.reply('Reply to a message with !pin to pin it.');
+          break;
+        }
+        const around = replied.createdAt ?? new Date();
+        const target = (await g.fetchMessages(msg.channelId, { around })).find(
+          (m) => m.messageId === replied.messageId,
+        );
+        if (target) {
+          await target.pin();
+          await msg.react('📌');
+        }
+        break;
+      }
+    }
+  } catch (e) {
+    if (e instanceof CloakActionError) {
+      const missing = e.permission ? ` (needs ${e.permission})` : '';
+      console.error(`${cmd} rejected: ${e.message}${missing}`);
+    } else {
+      console.error(cmd, e);
+    }
+  }
+});
+
+// Observe server events. These fire for the bot's own actions too.
+client.on('messageDelete', (evt) => console.log('messageDelete', evt));
+client.on('pinUpdate', (evt) => console.log('pinUpdate', evt));
+client.on('reactionUpdate', (evt) => console.log('reactionUpdate', evt));
+client.on('channelCreate', (evt) => console.log('channelCreate', evt));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+## Run it
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx moderation-bot.ts
+```
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="The guild() handle" icon="server">
+    `client.guild(msg.serverId)` returns a handle scoped to one server. Every server-level action in this bot runs through it: `fetchRoles()`, `fetchMembers()`, `fetchBans()`, `fetchMessages()`, and `timeout()`, plus the message-level `delete()` and `pin()` you reach from the messages it returns. The handle does no work until you call one of its methods, so it is cheap to create fresh on each event. See [The guild() handle](/guides/guild-handle).
+  </Accordion>
+
+  <Accordion title="Error handling with CloakActionError" icon="triangle-exclamation">
+    Any moderation call can be refused by the server, because the server re-checks each action and remains the authority even when `can()` looked fine. When that happens the SDK throws a `CloakActionError`. The handler reads `e.message` for the reason and `e.permission` for the capability that was missing, then falls through to a plain `console.error` for anything else. See [Handling errors](/guides/handling-errors).
+  </Accordion>
+
+  <Accordion title="Why !purge reverses the list" icon="broom">
+    `fetchMessages()` returns the page with the newest message last, so `!purge` calls `.reverse()` and deletes from the newest end first. The command message you typed is too new to appear in the fetched page, so it is never part of the batch and stays put. `!purge` caps at 50 messages per run to keep a single command from clearing a whole channel.
+  </Accordion>
+
+  <Accordion title="Observing events" icon="binoculars">
+    The `messageDelete`, `pinUpdate`, `reactionUpdate`, and `channelCreate` listeners log what the server reports, which is handy while you learn the event shapes. Remember that they fire for the bot's own actions too: when `!purge` deletes a message you see a `messageDelete`, and when `!pin` reacts you see a `reactionUpdate`. Guard against responding to your own effects if one of these handlers ever does real work.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Moderation" icon="gavel" href="/guides/moderation">
+    Bans, timeouts, purges, and pins in depth.
+  </Card>
+  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
+    The server-scoped handle every action above uses.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    What CloakActionError carries and how to read it.
+  </Card>
+  <Card title="Welcome bot" icon="hand-wave" href="/examples/welcome-bot">
+    A simpler starting example to compare against.
+  </Card>
+</CardGroup>

@@ -34,7 +34,7 @@ That is a complete, working bot. It answers `!ping` in every channel it can see,
     Understand the encryption model and what makes a Cloak bot different.
   </Card>
   <Card title="Examples" icon="code" href="/examples/welcome-bot">
-    Read an annotated welcome bot you can copy and run.
+    Read annotated bots you can copy and run.
   </Card>
   <Card title="API reference" icon="book" href="/api-reference/client">
     Every option, method, event, and type the SDK exposes.
@@ -55,6 +55,31 @@ That is a complete, working bot. It answers `!ping` in every channel it can see,
   </Card>
   <Card title="Resilient by default" icon="arrows-rotate">
     Automatic reconnect with backoff. Identity and keys persist across restarts.
+  </Card>
+</CardGroup>
+
+## Build with the SDK
+
+The SDK covers the full surface a bot needs, from replying to messages to running moderation.
+
+<CardGroup cols={2}>
+  <Card title="Messages" icon="message" href="/guides/sending-messages">
+    Send, reply, react, edit, delete, and pin.
+  </Card>
+  <Card title="History" icon="clock-rotate-left" href="/guides/message-history">
+    Page through past messages with date or message cursors.
+  </Card>
+  <Card title="Moderation" icon="gavel" href="/guides/moderation">
+    Kick, ban, time out members, and read the ban list.
+  </Card>
+  <Card title="Channels and groups" icon="folder-tree" href="/guides/channels-and-groups">
+    Create, rename, move, and delete channels and groups.
+  </Card>
+  <Card title="Members and roles" icon="users" href="/guides/members-and-roles">
+    Read a server's members and roles on demand.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    Catch `CloakActionError` and report what was denied.
   </Card>
 </CardGroup>
 

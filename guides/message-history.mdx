@@ -1,0 +1,209 @@
+---
+title: "Message history"
+description: "Read past messages with fetchMessages, using date or message cursors."
+---
+
+Sometimes your bot needs messages it did not see live: the last few in a channel, everything before a date, or the context around a single message. `client.fetchMessages()` reads them back from the server, always ordered oldest to newest. This guide covers the cursors, the paging behavior, and what you get back.
+
+## Read the newest messages
+
+With no cursor, `fetchMessages(serverId, channelId, opts?)` returns the newest messages in a channel, oldest to newest. `limit` defaults to 50.
+
+```ts
+const recent = await client.fetchMessages(serverId, channelId);
+for (const msg of recent) {
+  console.log(`${msg.authorId}: ${msg.content}`);
+}
+```
+
+Reads are auto-paginated for you, so a larger `limit` fetches across as many pages as it takes.
+
+```ts
+const lastHundred = await client.fetchMessages(serverId, channelId, { limit: 100 });
+```
+
+## Cursors are a Date or a Message
+
+You point a read at a moment in time with a cursor. A cursor is always a `Date` or a `Message`, never a message id.
+
+<Note>
+  Cloak message ids are random UUIDv4 values, so they do not sort by time. There is no id cursor. When you pass a `Message` as a cursor, the read uses that message's `createdAt`.
+</Note>
+
+Three options place the window relative to the cursor: `before`, `after`, and `around`.
+
+## Page backward with before
+
+`before` returns messages strictly older than the cursor. The newest `limit` of them are kept, and the result is still ordered oldest to newest.
+
+```ts
+// The 50 messages just before the start of the year.
+const older = await client.fetchMessages(serverId, channelId, {
+  before: new Date('2026-01-01T00:00:00Z'),
+});
+```
+
+Pass a `Message` to walk backward from one you already have. This is the usual way to load older history a page at a time.
+
+```ts
+const page = await client.fetchMessages(serverId, channelId, { limit: 50 });
+// Fetch the previous page: everything before the oldest message so far.
+const previous = await client.fetchMessages(serverId, channelId, {
+  before: page[0],
+  limit: 50,
+});
+```
+
+`before` is auto-paginated.
+
+## Page forward with after
+
+`after` returns messages strictly newer than the cursor. The `limit` closest to the cursor are returned, so the oldest matching messages are the ones you keep.
+
+```ts
+// The first 50 messages after the bot joined.
+const since = await client.fetchMessages(serverId, channelId, {
+  after: joinedAt,
+  limit: 50,
+});
+```
+
+`after` is auto-paginated.
+
+## Fetch context around a message
+
+`around` returns a single window of about 50 messages straddling the cursor. Reach for it when you want the context on either side of one message.
+
+```ts
+const context = await client.fetchMessages(serverId, channelId, {
+  around: flaggedMessage,
+});
+```
+
+<Note>
+  `around` is the one read that is not auto-paginated. It returns a single window and ignores `limit` for paging.
+</Note>
+
+## Options
+
+<ParamField path="before" type="Date | Message">
+  Return messages strictly older than the cursor. Auto-paginated.
+</ParamField>
+
+<ParamField path="after" type="Date | Message">
+  Return messages strictly newer than the cursor. Auto-paginated.
+</ParamField>
+
+<ParamField path="around" type="Date | Message">
+  Return a single window of about 50 messages straddling the cursor. Not auto-paginated.
+</ParamField>
+
+<ParamField path="limit" type="number" default="50">
+  How many messages to keep. Applies to `before`, `after`, and a cursorless read. `around` ignores it for paging.
+</ParamField>
+
+<ParamField path="groupId" type="string">
+  The channel's group, where you already know it.
+</ParamField>
+
+<Info>
+  The whole paged read runs as one serialized action, so the channel selection cannot move mid-read. You get a consistent slice even when several pages are fetched under the hood.
+</Info>
+
+## Returned messages are live
+
+Every message from `fetchMessages` is fully actionable, exactly like one you received on the firehose. Each carries `reply`, `react`, `edit`, `delete`, `pin`, and `unpin`, plus a `pinned` boolean.
+
+```ts
+const recent = await client.fetchMessages(serverId, channelId, { limit: 20 });
+for (const msg of recent) {
+  if (msg.authorId === client.user?.id) continue; // skip our own messages
+  if (!msg.pinned && msg.content.includes('important')) {
+    await msg.pin();
+  }
+}
+```
+
+See the [Message type](/api-reference/types#message) for the full shape.
+
+## Undecryptable messages
+
+Each message decrypts with the key for that message. If a row cannot be decrypted, its `content` is the empty string `''`. You never receive raw ciphertext, so a simple check is enough to skip a message you cannot read.
+
+```ts
+const history = await client.fetchMessages(serverId, channelId);
+const readable = history.filter((msg) => msg.content !== '');
+```
+
+## Requires the message_read_history permission
+
+`fetchMessages` requires the `message_read_history` permission. If the server has not granted it, the promise rejects with a `CloakActionError` whose `.permission` is `'message_read_history'`.
+
+```ts
+import { CloakActionError } from '@cloak/bot-sdk';
+
+try {
+  const history = await client.fetchMessages(serverId, channelId);
+  console.log(`read ${history.length} messages`);
+} catch (err) {
+  if (err instanceof CloakActionError && err.permission === 'message_read_history') {
+    console.warn('This server has not granted history access.');
+  }
+}
+```
+
+<Tip>
+  You can pre-gate the call with `client.can('message_read_history', serverId)` to skip it when the grant is missing. The check is advisory, and the server stays the authority. See [Permissions](/concepts/permissions).
+</Tip>
+
+## Find where a message lives
+
+`client.messageLocation(messageId)` tells you where a message the bot has seen lives, whether it arrived live or through `fetchMessages`. It returns a `MessageLocation`, or `undefined` when the message is not in the cache.
+
+```ts
+const where = client.messageLocation(someMessageId);
+if (where) {
+  console.log(`message is in ${where.serverId} / ${where.channelId}`);
+}
+```
+
+<ResponseField name="serverId" type="string">
+  The server the message lives in.
+</ResponseField>
+
+<ResponseField name="channelId" type="string">
+  The channel within that server.
+</ResponseField>
+
+<ResponseField name="groupId" type="string">
+  The channel's group, where known.
+</ResponseField>
+
+<ResponseField name="authorId" type="string">
+  The id of the message's author.
+</ResponseField>
+
+<ResponseField name="createdAtMs" type="number | null">
+  When the message was created, in milliseconds, or `null` if unknown.
+</ResponseField>
+
+<Note>
+  The lookup is a bounded, best-effort cache of about the last 5000 messages the bot has seen. Older messages fall out, and `messageLocation` returns `undefined` for them.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The Message object" icon="message" href="/api-reference/types#message">
+    Everything a returned message can do.
+  </Card>
+  <Card title="MessageLocation" icon="location-dot" href="/api-reference/types#messagelocation">
+    The shape messageLocation returns.
+  </Card>
+  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
+    Work with a server your bot belongs to.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    What message_read_history grants and how.
+  </Card>
+</CardGroup>

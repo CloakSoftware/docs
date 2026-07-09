@@ -1,0 +1,130 @@
+---
+title: "Reactions"
+description: "Add and remove reactions, and listen for reaction changes."
+---
+
+Your bot can react to any message it can see, remove its own reaction, and hear when reactions change anywhere it is watching. Reactions are keyed by an opaque `reactionId`: a unicode emoji for the common case, or a custom emoji id for server-specific emoji. This page covers both sides, adding reactions and listening for them.
+
+## Add a reaction
+
+Call `msg.react(reactionId)` on a `Message` to add the bot's reaction. It returns `Promise<void>` and requires the `reaction_add` permission. For a plain emoji, pass the unicode character directly.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() === '!celebrate') {
+    if (!client.can('reaction_add', msg.serverId)) return;
+    msg.react('🎉').catch((e) => console.error('react failed', e));
+  }
+});
+```
+
+The `reactionId` is opaque. The SDK does not validate it and passes it straight through to the server. An invalid id is rejected by the server, not caught locally.
+
+## Remove the bot's reaction
+
+Call `msg.unreact(reactionId)` to remove the bot's own reaction from a message. It only affects the reaction the bot added, not anyone else's.
+
+```ts
+await msg.react('👀');
+// later, once the bot is done looking
+await msg.unreact('👀');
+```
+
+## React with a custom emoji
+
+For a server's custom emoji, pass its id instead of a unicode character. Get ids from `client.fetchEmojis()`, which returns `Promise<{ emojis, category }>`, the global emoji catalog. Its ids are exactly the custom-emoji ids that `react()` accepts.
+
+```ts
+const { emojis, category } = await client.fetchEmojis();
+// The shape of emojis and category is server-defined. Treat the catalog
+// as data you look an id up in, then hand that id to react().
+const partyId = findEmojiId(emojis, 'party_blob');
+await msg.react(partyId);
+```
+
+<Note>
+  The shape of `emojis` and `category` is defined by the server, so treat them as data to look ids up in rather than a fixed structure.
+</Note>
+
+## Listen for reaction changes
+
+The `reactionUpdate` event fires when a reaction is added or removed on any message your bot can see. The payload carries the message, the reaction, and the new total.
+
+```ts
+client.on('reactionUpdate', ({ messageId, reactionId, count, userId, serverId, channelId }) => {
+  console.log(`${reactionId} on ${messageId} is now at ${count}`);
+});
+```
+
+<ParamField path="messageId" type="string">
+  The message whose reactions changed.
+</ParamField>
+
+<ParamField path="reactionId" type="string">
+  The reaction that changed, the same opaque id you pass to `react()`.
+</ParamField>
+
+<ParamField path="count" type="number">
+  The new total for that reaction on the message. The event does not say whether the change was an add or a remove, only the new count.
+</ParamField>
+
+<ParamField path="userId" type="string">
+  The user who added or removed the reaction.
+</ParamField>
+
+<ParamField path="serverId" type="string">
+  The server the message belongs to.
+</ParamField>
+
+<ParamField path="channelId" type="string">
+  The channel the message belongs to.
+</ParamField>
+
+Because `count` is the new total and no add-or-remove flag is included, treat the event as "this reaction now has this many," not "someone just added one."
+
+### Filter out the bot's own reactions
+
+`reactionUpdate` fires for the bot's own reactions too, including the ones it adds with `react()`. When that matters, filter on `userId`.
+
+```ts
+client.on('reactionUpdate', (evt) => {
+  if (evt.userId === client.user?.id) return; // skip our own reactions
+  console.log(`someone reacted with ${evt.reactionId}`);
+});
+```
+
+<Note>
+  On an older Cloak server, `serverId` and `channelId` on `reactionUpdate` can fall back to the bot's currently selected server and channel. An up-to-date Cloak server always reports the message's own location.
+</Note>
+
+## Handling errors
+
+Both `react()` and `unreact()` reject with `CloakActionError` when the server denies the action, for example when the bot lacks `reaction_add` or the `reactionId` is invalid. Pre-gate with `can('reaction_add', serverId)` to skip actions the server would only reject, and still catch the promise for the cases you cannot predict.
+
+```ts
+try {
+  await msg.react('👍');
+} catch (e) {
+  console.error('could not react', e);
+}
+```
+
+Both methods also require the message's `createdAt` to be present. If it is missing, they reject with a plain `Error` before anything reaches the server. Live messages from `messageCreate` and fetched messages both carry `createdAt`, so this only comes up with older payload shapes.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The Message object" icon="message" href="/api-reference/types#message">
+    Where `react()` and `unreact()` live.
+  </Card>
+  <Card title="reactionUpdate event" icon="face-smile" href="/api-reference/events#reactionupdate">
+    The full event payload in one place.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    Working with `CloakActionError` and friends.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Why `reaction_add` must be granted first.
+  </Card>
+</CardGroup>

@@ -1,0 +1,186 @@
+---
+title: "The guild() handle"
+description: "Bind a serverId once and call server-scoped methods without repeating it."
+---
+
+Most server-scoped actions on the flat client take a `serverId` as their first argument. When a handler does several things in one server, you end up passing the same id over and over. `client.guild(serverId)` returns a lightweight handle that binds the id once, so every call after it reads a little cleaner.
+
+## Bind the server once
+
+Call `client.guild()` with a `serverId` and keep the handle it returns. Each of its methods delegates to the identically named flat client method with that id already filled in.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() !== '!sweep') return;
+
+  const g = client.guild(msg.serverId);
+  await g.timeout(msg.authorId, 300);
+  const members = await g.fetchMembers();
+  const history = await g.fetchMessages(msg.channelId, { limit: 100 });
+});
+```
+
+The handle carries no cache and no state. It is pure sugar over the flat methods, and the flat methods remain the source of truth. Reach for it when a single handler takes several actions in one server. For a one-off call, the flat form is just as good.
+
+## It is optional sugar
+
+The two forms below do exactly the same thing. `g.timeout(userId, 300)` delegates straight to `client.timeout(serverId, userId, 300)`.
+
+```ts
+// Flat form: pass the serverId every time.
+await client.timeout(serverId, userId, 300);
+
+// Handle form: bind it once, then omit it.
+const g = client.guild(serverId);
+await g.timeout(userId, 300);
+```
+
+Because every handle method delegates to its flat counterpart, the semantics, required permissions, return types, and errors are exactly the same. The handle only removes the repeated `serverId`.
+
+<Note>
+  The handle holds no state of its own. It does not fetch anything when you create it, and it never goes stale. You can make a new one per handler without cost.
+</Note>
+
+## What the handle exposes
+
+`id` is the `serverId` you passed. Every other member is a bound version of a flat client method. The semantics live in the linked guides, since the handle changes nothing about how each method behaves.
+
+### Identity
+
+<ResponseField name="id" type="string">
+  The `serverId` this handle is bound to.
+</ResponseField>
+
+### Messaging
+
+<ParamField path="send" type="(channelId, text, groupId?) => Promise">
+  Send a message into a channel in this server. See [Message history](/guides/message-history) for how sends and history relate.
+</ParamField>
+
+<ParamField path="fetchMessages" type="(channelId, opts?) => Promise">
+  Read recent messages from a channel. See [Message history](/guides/message-history).
+</ParamField>
+
+### Moderation
+
+<ParamField path="kick" type="(userId) => Promise">
+  Remove a member from this server.
+</ParamField>
+
+<ParamField path="ban" type="(userId, reason?) => Promise">
+  Ban a member, with an optional reason.
+</ParamField>
+
+<ParamField path="unban" type="(userId) => Promise">
+  Lift a ban.
+</ParamField>
+
+<ParamField path="timeout" type="(userId, seconds) => Promise">
+  Time a member out for a number of seconds.
+</ParamField>
+
+<ParamField path="removeTimeout" type="(userId) => Promise">
+  Clear an active timeout.
+</ParamField>
+
+<ParamField path="fetchBans" type="() => Promise">
+  List the server's bans.
+</ParamField>
+
+<ParamField path="fetchMembers" type="() => Promise">
+  List the server's members.
+</ParamField>
+
+<ParamField path="fetchRoles" type="() => Promise">
+  List the server's roles.
+</ParamField>
+
+All of these are covered in [Moderation](/guides/moderation).
+
+### Channels and groups
+
+<ParamField path="createChannel" type="(name, groupId, type?) => Promise">
+  Create a channel inside a group.
+</ParamField>
+
+<ParamField path="editChannel" type="(channelId, groupId, name) => Promise">
+  Rename a channel.
+</ParamField>
+
+<ParamField path="deleteChannel" type="(channelId, groupId) => Promise">
+  Delete a channel.
+</ParamField>
+
+<ParamField path="moveChannel" type="(channelId, fromGroupId, toGroupId, order) => Promise">
+  Move a channel between groups and set its order.
+</ParamField>
+
+<ParamField path="createGroup" type="(name) => Promise">
+  Create a channel group.
+</ParamField>
+
+<ParamField path="editGroup" type="(groupId, name) => Promise">
+  Rename a group.
+</ParamField>
+
+<ParamField path="deleteGroup" type="(groupId) => Promise">
+  Delete a group.
+</ParamField>
+
+The channel and group methods are covered in [Channels and groups](/guides/channels-and-groups).
+
+### Permissions and visibility
+
+<ParamField path="can" type="(permission) => boolean">
+  Advisory check for a single permission in this server.
+</ParamField>
+
+<ParamField path="permissions" type="() => PermissionSet | undefined">
+  The resolved permission set for this server, or `undefined` if none has arrived yet.
+</ParamField>
+
+<ParamField path="visibleChannelIds" type="() => string[]">
+  The channels the bot may currently view in this server.
+</ParamField>
+
+These mirror the advisory checks described in [Permissions](/concepts/permissions).
+
+## Putting it together
+
+A moderation handler is where the handle earns its place. One bind, then several bound calls that never repeat the server id.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.content.trim() !== '!lockdown') return;
+
+  const g = client.guild(msg.serverId);
+  if (!g.can('member_ban')) return; // advisory pre-gate
+
+  const bans = await g.fetchBans();
+  console.log(`${g.id} currently has ${bans.length} bans`);
+
+  await g.timeout(msg.authorId, 600);
+  await g.send(msg.channelId, 'Channel is quiet for ten minutes.');
+});
+```
+
+Every call above delegates to the flat client, so if you already know the flat methods you already know the handle.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Moderation" icon="gavel" href="/guides/moderation">
+    Kicks, bans, and timeouts in full.
+  </Card>
+  <Card title="Channels and groups" icon="folder-tree" href="/guides/channels-and-groups">
+    Create, edit, and move channels and groups.
+  </Card>
+  <Card title="Message history" icon="clock-rotate-left" href="/guides/message-history">
+    Send and read messages in a channel.
+  </Card>
+  <Card title="Client reference" icon="book" href="/api-reference/client">
+    Every flat method the handle binds.
+  </Card>
+</CardGroup>

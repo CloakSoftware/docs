@@ -11,6 +11,10 @@ client.on('messageCreate', (msg) => {
 });
 ```
 
+<Warning>
+  The message, reaction, pin, and channel or group lifecycle events fire for the bot's **own** actions too. When you delete a message, your own `messageDelete` handler runs. Filter by author or actor id where that matters, exactly as you do for `messageCreate`.
+</Warning>
+
 ## Overview
 
 | Event | Payload | Fires when |
@@ -18,18 +22,34 @@ client.on('messageCreate', (msg) => {
 | `ready` | none | Login has completed and the bot is online. |
 | `messageCreate` | [`Message`](/api-reference/types#message) | A user message arrives from any visible channel. |
 | `systemMessage` | [`SystemMessageEvent`](/api-reference/types#systemmessageevent) | A system event happens, such as a member joining. |
+| `messageUpdate` | `{ messageId, content, serverId, channelId }` | A message was edited. |
+| `messageDelete` | `{ messageId, serverId, channelId }` | A message was deleted. |
+| `reactionUpdate` | `{ messageId, reactionId, count, userId, serverId, channelId }` | A reaction was added or removed. |
+| `pinUpdate` | `{ messageId, pinned, serverId, channelId }` | A message was pinned or unpinned. |
+| `channelCreate` | `{ channelId, name, groupId, type, serverId }` | A channel was created. |
+| `channelUpdate` | `{ channelId, name, serverId }` | A channel was renamed. |
+| `channelDelete` | `{ channelId, serverId }` | A channel was deleted. |
+| `groupCreate` | `{ groupId, name, serverId }` | A group was created. |
+| `groupUpdate` | `{ groupId, name, serverId }` | A group was renamed. |
+| `groupDelete` | `{ groupId, serverId }` | A group was deleted. |
+| `serverUpdate` | `{ serverId, name }` | The server was renamed by its owner. |
+| `serverDelete` | `{ serverId }` | The server was deleted by its owner. |
 | `guildCreate` | [`Guild`](/api-reference/types#guild) | The bot is added to a server, or is already in one at login. |
 | `guildDelete` | [`Guild`](/api-reference/types#guild) | The bot is removed from a server. |
-| `permissionsUpdate` | `{ serverId: string } & PermissionSet` | A server resolves or changes the bot's grant. |
+| `permissionsUpdate` | `{ serverId } & PermissionSet` | A server resolves or changes the bot's grant. |
 | `disconnect` | `unknown` | The connection drops. |
-| `reconnecting` | `{ attempt: number; delayMs: number }` | A reconnect attempt is scheduled. |
+| `reconnecting` | `{ attempt, delayMs }` | A reconnect attempt is scheduled. |
 | `reconnected` | none | A reconnect succeeds. |
 
-## Message events
+<Note>
+  On an older Cloak server, the `serverId` and `channelId` on the message, reaction, pin, and lifecycle events can fall back to the bot's currently selected server or channel. An up-to-date server carries them on every event.
+</Note>
+
+## Messages
 
 ### messageCreate
 
-Fires for every user message in a channel your bot can view. Because delivery is a [firehose](/concepts/message-delivery), this covers all visible channels across all servers, with no subscription.
+Fires for every user message in a channel your bot can view. Because delivery is a [firehose](/concepts/message-delivery), this covers all visible channels across all servers.
 
 ```ts
 client.on('messageCreate', (msg) => {
@@ -38,49 +58,101 @@ client.on('messageCreate', (msg) => {
 });
 ```
 
-<Note>
-  Your bot receives its own messages too. Guard with `msg.authorId === client.user?.id` so it does not respond to itself.
-</Note>
-
 ### systemMessage
 
-Fires for system events rather than user messages. The `type` field tells you which. Today that is `member_join` and `bot_add`.
+Fires for system events rather than user messages. The `type` field is `member_join`, `bot_add`, or `unknown`. See [SystemMessageEvent](/api-reference/types#systemmessageevent).
+
+### messageUpdate
+
+Fires when a message is edited. `content` is the decrypted new text, best-effort. It is `''` when the key is missing, never raw ciphertext.
 
 ```ts
-client.on('systemMessage', (evt) => {
-  if (evt.type === 'member_join') {
-    client.send(evt.serverId, evt.channelId, `Welcome!`, evt.groupId);
-  }
+client.on('messageUpdate', ({ messageId, content }) => {
+  console.log(`message ${messageId} is now: ${content}`);
 });
 ```
 
-See [SystemMessageEvent](/api-reference/types#systemmessageevent) for the full payload.
+### messageDelete
 
-## Lifecycle events
+Fires when a message is deleted.
+
+```ts
+client.on('messageDelete', ({ messageId, channelId }) => {
+  console.log(`message ${messageId} deleted in ${channelId}`);
+});
+```
+
+## Reactions and pins
+
+### reactionUpdate
+
+Fires when a reaction is added or removed on a visible message. `count` is the new total for that reaction. The event does not say whether it was an add or a remove. `userId` is the reactor, so filter with `userId === client.user?.id` to ignore your bot's own reactions. See [Reactions](/guides/reactions).
+
+```ts
+client.on('reactionUpdate', ({ messageId, reactionId, count }) => {
+  console.log(`${reactionId} on ${messageId} is now ${count}`);
+});
+```
+
+### pinUpdate
+
+Fires when a message is pinned or unpinned. `pinned` is a boolean.
+
+```ts
+client.on('pinUpdate', ({ messageId, pinned }) => {
+  console.log(`message ${messageId} ${pinned ? 'pinned' : 'unpinned'}`);
+});
+```
+
+## Channels, groups, and servers
+
+These fire as channels, groups, and the server itself change. See [Channels and groups](/guides/channels-and-groups).
+
+### channelCreate
+
+Payload `{ channelId, name, groupId, type, serverId }`.
+
+### channelUpdate
+
+Payload `{ channelId, name, serverId }`. Fires when a channel is renamed.
+
+### channelDelete
+
+Payload `{ channelId, serverId }`.
+
+### groupCreate
+
+Payload `{ groupId, name, serverId }`.
+
+### groupUpdate
+
+Payload `{ groupId, name, serverId }`. Fires when a group is renamed.
+
+### groupDelete
+
+Payload `{ groupId, serverId }`.
+
+### serverUpdate
+
+Payload `{ serverId, name }`. Fires when the server is renamed by its owner. There is no method to rename a server, so this is how you learn about it.
+
+### serverDelete
+
+Payload `{ serverId }`. Fires when the server is deleted by its owner.
+
+## Lifecycle
 
 ### ready
 
 Fires once, after `login()` finishes. Permission grants are already populated, so [`can()`](/api-reference/client#can) works inside this handler.
 
-```ts
-client.on('ready', () => console.log(`Online as ${client.user?.id}`));
-```
-
 ### guildCreate
 
-Fires when your bot is added to a server, and once per existing server during login.
-
-```ts
-client.on('guildCreate', (guild) => console.log(`in server ${guild.id}`));
-```
+Fires when your bot is added to a server, and once per existing server during login. Payload is a [`Guild`](/api-reference/types#guild).
 
 ### guildDelete
 
-Fires when your bot is removed from a server. The SDK drops that server's cached key. Reconnection and any other work continue.
-
-```ts
-client.on('guildDelete', (guild) => console.log(`removed from ${guild.id}`));
-```
+Fires when your bot is removed from a server. The SDK drops that server's cached key.
 
 ### permissionsUpdate
 
@@ -92,9 +164,9 @@ client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
 });
 ```
 
-## Connection events
+## Connection
 
-These three let you observe the automatic reconnect. You do not need to act on them. Reconnection is handled for you. See [Connection lifecycle](/concepts/connection-lifecycle).
+These three let you observe the automatic reconnect. You do not need to act on them. See [Connection lifecycle](/concepts/connection-lifecycle).
 
 ### disconnect
 

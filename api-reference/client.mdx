@@ -1,6 +1,6 @@
 ---
 title: "Client"
-description: "The Client is your bot. It connects to Cloak, emits events, and sends messages."
+description: "The Client is your bot. It connects to Cloak, emits events, sends messages, and drives every action."
 ---
 
 Everything starts with a `Client`. You construct it with your token, attach event listeners, and call `login()`.
@@ -11,9 +11,11 @@ import { Client } from '@cloak/bot-sdk';
 const client = new Client({
   token: process.env.CLOAK_TOKEN!,
   keystorePath: './bot.cloak-keystore.json',
-  requiredPermissions: ['message_send'],
+  requiredPermissions: ['message_send', 'reaction_add'],
 });
 ```
+
+Server-scoped methods take a `serverId` as their first argument. If a handler does several things in one server, [`guild(serverId)`](#guild) binds that id once so you can drop it from every call.
 
 ## Constructor options
 
@@ -22,11 +24,11 @@ const client = new Client({
 </ParamField>
 
 <ParamField path="keystorePath" type="string">
-  Path to a file where the SDK persists your bot's identity and its conversation keys. Strongly recommended for any bot you keep running. Without it, your bot cannot reuse its identity and keys across restarts. See [Keys and the keystore](/concepts/keys-and-keystore).
+  Path to a file where the SDK persists your bot's identity and its conversation keys. Strongly recommended for any bot you keep running. See [Keys and the keystore](/concepts/keys-and-keystore).
 </ParamField>
 
 <ParamField path="requiredPermissions" type="PermissionName[]">
-  The permissions your bot declares it needs. Sent to servers on login. Declaring is a request, not a grant. A human approves a subset per server. See [Permissions](/concepts/permissions).
+  The permissions your bot declares it needs. Sent to servers on login. Declaring is a request, not a grant. See [Permissions](/concepts/permissions).
 </ParamField>
 
 <ParamField path="deviceId" type="string">
@@ -34,7 +36,7 @@ const client = new Client({
 </ParamField>
 
 <ParamField path="debug" type="boolean" default="false">
-  Logs every frame the SDK sends and receives. Your bot token is redacted in the output. Useful while developing, noisy in production.
+  Logs every frame the SDK sends and receives, with your bot token redacted. Useful while developing, noisy in production.
 </ParamField>
 
 <Accordion title="Advanced: self-hosted and local dev options" icon="wrench">
@@ -45,7 +47,7 @@ const client = new Client({
   </ParamField>
 
   <ParamField path="serverCertificateHashes" type="{ algorithm: 'sha-256'; value: Uint8Array }[]">
-    Certificate pins for a self-hosted stack that uses a self-signed certificate. Not needed for the hosted service, which uses a standard CA-signed certificate.
+    Certificate pins for a self-hosted stack that uses a self-signed certificate. Not needed for the hosted service.
   </ParamField>
 </Accordion>
 
@@ -55,7 +57,7 @@ const client = new Client({
   Your bot's identity after login, or `null` before `login()` completes. Its `id` is a normalized value you can compare against `msg.authorId` to detect your bot's own messages. See [BotUser](/api-reference/types#botuser).
 </ResponseField>
 
-## Methods
+## Lifecycle and messaging
 
 ### login
 
@@ -65,28 +67,19 @@ login(): Promise<void>
 
 Connects, authenticates, publishes your bot's identity if needed, emits `guildCreate` for existing servers, then emits `ready`. Call this once, after attaching your listeners.
 
-```ts
-client.on('ready', () => console.log('online'));
-await client.login();
-```
-
 ### send
 
 ```ts
 send(serverId: string, channelId: string, text: string, groupId?: string): Promise<void>
 ```
 
-Sends an encrypted message to a channel. Sends are serialized internally so they never race each other.
+Sends an encrypted message to a channel. Sends are serialized internally so they never race each other. `groupId` is auto-resolved for any channel the bot has already seen, so you usually omit it.
 
-Most of the time you use [`msg.reply()`](/api-reference/types#message) instead, which already knows where the message came from. Reach for `send()` when you want to send somewhere other than where a message arrived, such as greeting a new member.
+Most of the time you use [`msg.reply()`](/api-reference/types#message) instead, which already knows where the message came from. See [Sending messages](/guides/sending-messages).
 
 <Warning>
-  `send()` throws if your bot does not hold the server's conversation key yet. This happens right after a first join, before the key handoff completes. See [first message takes a moment](/quickstart#first-message-takes-a-moment).
+  `send()` throws a plain `Error` if your bot does not hold the server's conversation key yet. This happens right after a first join, before the key handoff completes. See [first message takes a moment](/quickstart#first-message-takes-a-moment).
 </Warning>
-
-```ts
-await client.send(serverId, channelId, 'Welcome!', groupId);
-```
 
 ### watch
 
@@ -94,39 +87,7 @@ await client.send(serverId, channelId, 'Welcome!', groupId);
 watch(serverId: string, channelId: string, groupId?: string): Promise<void>
 ```
 
-Optionally pre-selects a channel, for example to warm its key before your first send. You rarely need this, because the [firehose](/concepts/message-delivery) already delivers every visible channel. The target is remembered and re-established after a reconnect.
-
-### can
-
-```ts
-can(permission: PermissionName, serverId: string): boolean
-```
-
-Advisory check of whether your bot holds `permission` in `serverId`, based on the last grant the server sent. `administrator` implies every permission. Returns `false` if no grant has arrived yet.
-
-Use it to pre-gate your own commands. The server re-checks every action and remains the authority. See [Permissions](/concepts/permissions).
-
-```ts
-if (client.can('message_send', msg.serverId)) {
-  await msg.reply('pong');
-}
-```
-
-### permissions
-
-```ts
-permissions(serverId: string): PermissionSet | undefined
-```
-
-Returns the full resolved capability set for a server, or `undefined` if no grant has arrived for it yet. See [PermissionSet](/api-reference/types#permissionset).
-
-### visibleChannelIds
-
-```ts
-visibleChannelIds(serverId: string): string[]
-```
-
-Returns the channel ids your bot is permitted to view in a server. This mirrors the [firehose read-gate](/concepts/message-delivery#delivery-is-view-gated): a channel absent from this list is one your bot will not receive `messageCreate` for. Returns an empty array if the grant is unknown.
+Optionally pre-selects a channel, for example to warm its key before your first send. You rarely need this, because the [firehose](/concepts/message-delivery) already delivers every visible channel. `groupId` is auto-resolved from the server's channel list when omitted. The target is remembered and re-established after a reconnect.
 
 ### destroy
 
@@ -136,6 +97,223 @@ destroy(): Promise<void>
 
 Closes the connection and stops reconnecting. The clean way to shut a bot down. See [Connection lifecycle](/concepts/connection-lifecycle#shutting-down).
 
+## History
+
+### fetchMessages
+
+```ts
+fetchMessages(
+  serverId: string,
+  channelId: string,
+  opts?: {
+    before?: Date | Message;
+    after?: Date | Message;
+    around?: Date | Message;
+    limit?: number;
+    groupId?: string;
+  },
+): Promise<Message[]>
+```
+
+Reads message history for a channel, returned oldest to newest and auto-paginated. Requires the `message_read_history` permission. Cursors are a `Date` or a `Message`, never a message id. The returned messages are fully actionable. See [Message history](/guides/message-history) for the cursor rules and examples.
+
+### messageLocation
+
+```ts
+messageLocation(messageId: string): MessageLocation | undefined
+```
+
+Returns where a message the bot has seen lives, or `undefined`. This is a bounded, best-effort cache. See [MessageLocation](/api-reference/types#messagelocation).
+
+### fetchEmojis
+
+```ts
+fetchEmojis(): Promise<{ emojis: unknown; category: unknown }>
+```
+
+Returns the global emoji catalog. Its ids are the custom-emoji ids that [`msg.react()`](/api-reference/types#message) accepts. See [Reactions](/guides/reactions).
+
+## Moderation
+
+All of these are server-scoped and reject with [`CloakActionError`](/api-reference/errors) on a server deny. See [Moderation](/guides/moderation).
+
+### kick
+
+```ts
+kick(serverId: string, userId: string): Promise<void>
+```
+
+Removes a member. Requires `member_kick`, a rank above the target, and the target not being the owner or the bot itself.
+
+### ban
+
+```ts
+ban(serverId: string, userId: string, reason?: string): Promise<void>
+```
+
+Kicks a member and records the ban. Requires `member_ban`. `reason` is capped at 256 characters.
+
+### unban
+
+```ts
+unban(serverId: string, userId: string): Promise<void>
+```
+
+Lifts a ban. Requires `member_ban`. Some older Cloak servers also require owner or admin standing.
+
+### timeout
+
+```ts
+timeout(serverId: string, userId: string, durationSeconds: number): Promise<void>
+```
+
+Times a member out for `durationSeconds`. A timed-out member cannot send or react. Passing `0` lifts the timeout. Requires `member_timeout`.
+
+<Note>
+  `timeout()` requires an up-to-date Cloak server. On an older server the call times out rather than resolving.
+</Note>
+
+### removeTimeout
+
+```ts
+removeTimeout(serverId: string, userId: string): Promise<void>
+```
+
+Lifts a member's timeout. Equivalent to `timeout()` with `0` seconds.
+
+### fetchBans
+
+```ts
+fetchBans(serverId: string): Promise<BanInfo[]>
+```
+
+Returns the server's ban list. Requires `member_ban` (older servers also require owner or admin). See [BanInfo](/api-reference/types#baninfo).
+
+## Channels and groups
+
+All of these require `manage_channels` and reject with [`CloakActionError`](/api-reference/errors) on a server deny. See [Channels and groups](/guides/channels-and-groups).
+
+### createChannel
+
+```ts
+createChannel(serverId: string, name: string, groupId: string, channelType?: number): Promise<string>
+```
+
+Creates a channel in a group and returns the new channel's id. `channelType` defaults to `0` (a text channel).
+
+### editChannel
+
+```ts
+editChannel(serverId: string, channelId: string, groupId: string, newName: string): Promise<void>
+```
+
+Renames a channel.
+
+### deleteChannel
+
+```ts
+deleteChannel(serverId: string, channelId: string, groupId: string): Promise<void>
+```
+
+Deletes a channel along with its messages and pins.
+
+### moveChannel
+
+```ts
+moveChannel(serverId: string, channelId: string, fromGroupId: string, toGroupId: string, newOrder: number): Promise<void>
+```
+
+Moves a channel to a group and position. `newOrder` is clamped to the range `0` to `126`. Moving to the same group and order is a no-op the server rejects.
+
+### createGroup
+
+```ts
+createGroup(serverId: string, name: string): Promise<string | undefined>
+```
+
+Creates a channel group. The new group's id is captured best-effort from the server's create broadcast, so it can be `undefined`. Handle that case.
+
+### editGroup
+
+```ts
+editGroup(serverId: string, groupId: string, newName: string): Promise<void>
+```
+
+Renames a group.
+
+### deleteGroup
+
+```ts
+deleteGroup(serverId: string, groupId: string): Promise<void>
+```
+
+Deletes a group and its channels.
+
+<Note>
+  There are no methods to edit or delete a server. Those actions are owner-level and surface only as the [`serverUpdate`](/api-reference/events#serverupdate) and [`serverDelete`](/api-reference/events#serverdelete) events.
+</Note>
+
+## Reads
+
+### fetchMembers
+
+```ts
+fetchMembers(serverId: string): Promise<Member[]>
+```
+
+Reads a server's members on demand, with no caching. See [Member](/api-reference/types#member) and [Members and roles](/guides/members-and-roles).
+
+### fetchRoles
+
+```ts
+fetchRoles(serverId: string): Promise<Role[]>
+```
+
+Reads a server's roles on demand, with no caching. See [Role](/api-reference/types#role).
+
+## Permissions
+
+These are advisory. They reflect the last grant the server sent, and the server re-checks every action. See [Permissions](/concepts/permissions).
+
+### can
+
+```ts
+can(permission: PermissionName, serverId: string): boolean
+```
+
+Whether your bot holds `permission` in `serverId` per the last grant. `administrator` implies every permission. Returns `false` if no grant has arrived yet.
+
+### permissions
+
+```ts
+permissions(serverId: string): PermissionSet | undefined
+```
+
+The full resolved capability set for a server, or `undefined` if no grant has arrived. See [PermissionSet](/api-reference/types#permissionset).
+
+### visibleChannelIds
+
+```ts
+visibleChannelIds(serverId: string): string[]
+```
+
+The channel ids your bot may view in a server. Mirrors the [firehose read-gate](/concepts/message-delivery#delivery-is-view-gated). Empty array if unknown.
+
+## guild
+
+```ts
+guild(serverId: string): GuildHandle
+```
+
+Returns a lightweight handle that binds `serverId` onto every server-scoped method. It is pure sugar over the flat methods, with no cache and no state. See [The guild() handle](/guides/guild-handle).
+
+```ts
+const g = client.guild(msg.serverId);
+await g.timeout(msg.authorId, 300);
+const members = await g.fetchMembers();
+const history = await g.fetchMessages(msg.channelId, { limit: 100 });
+```
+
 ## Next
 
 <CardGroup cols={2}>
@@ -143,6 +321,12 @@ Closes the connection and stops reconnecting. The clean way to shut a bot down. 
     Everything a Client emits.
   </Card>
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">
-    Message, SystemMessageEvent, and more.
+    Message, Member, Role, and more.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    The CloakActionError every action can throw.
+  </Card>
+  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
+    Bind a server id once.
   </Card>
 </CardGroup>
