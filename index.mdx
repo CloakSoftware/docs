@@ -8,7 +8,7 @@ The Cloak Bot SDK is the official TypeScript library for building bots on [Cloak
 The difference is what happens underneath. Your bot is a full end-to-end encrypted member of every server it joins. It holds its own identity, encrypts and decrypts messages inside your own process, and the Cloak service only ever relays ciphertext. Nobody in the middle can read what your bot sends or receives.
 
 ```ts
-import { Client } from '@cloak/bot-sdk';
+import { Client } from '@cloak-software/bot-sdk';
 
 const client = new Client({ token: process.env.CLOAK_TOKEN! });
 

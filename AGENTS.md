@@ -2,7 +2,7 @@
 
 ## About this project
 
-- This is the documentation site for the **Cloak Bot SDK** (`@cloak/bot-sdk`), the official TypeScript SDK for building end-to-end encrypted bots on [Cloak](https://cloak.chat).
+- This is the documentation site for the **Cloak Bot SDK** (`@cloak-software/bot-sdk`), the official TypeScript SDK for building end-to-end encrypted bots on [Cloak](https://cloak.chat). Package installs and code samples must use that scoped name.
 - Built on [Mintlify](https://mintlify.com). Pages are MDX files with YAML frontmatter. Configuration lives in `docs.json`.
 - The SDK source lives in a separate repo. When documenting an option, method, event, or type, verify it against the real SDK surface before writing. Do not invent API.
 

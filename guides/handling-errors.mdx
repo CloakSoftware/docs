@@ -10,7 +10,7 @@ Every action your bot awaits can be denied by the server. When that happens, the
 `CloakActionError` is the typed error every awaited action rejects with when the server denies it. Import it from the SDK:
 
 ```ts
-import { CloakActionError } from '@cloak/bot-sdk';
+import { CloakActionError } from '@cloak-software/bot-sdk';
 ```
 
 It carries four fields:
@@ -38,7 +38,7 @@ The stable surface for bots is `.message` and `.permission`. Treat `.opcode` and
 Wrap the awaited action in a `try/catch`, check for `CloakActionError` with `instanceof`, and re-throw anything else so you never swallow an unrelated bug.
 
 ```ts
-import { CloakActionError } from '@cloak/bot-sdk';
+import { CloakActionError } from '@cloak-software/bot-sdk';
 
 try {
   await msg.delete();

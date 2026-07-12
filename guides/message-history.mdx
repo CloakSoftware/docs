@@ -140,7 +140,7 @@ const readable = history.filter((msg) => msg.content !== '');
 `fetchMessages` requires the `message_read_history` permission. If the server has not granted it, the promise rejects with a `CloakActionError` whose `.permission` is `'message_read_history'`.
 
 ```ts
-import { CloakActionError } from '@cloak/bot-sdk';
+import { CloakActionError } from '@cloak-software/bot-sdk';
 
 try {
   const history = await client.fetchMessages(serverId, channelId);

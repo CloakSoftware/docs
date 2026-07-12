@@ -68,6 +68,12 @@
           "api-reference/errors",
           "api-reference/permissions"
         ]
+      },
+      {
+        "group": "Legal",
+        "pages": [
+          "legal/developer-terms"
+        ]
       }
     ]
   },
@@ -100,6 +106,13 @@
         "items": [
           { "label": "API reference", "href": "/api-reference/client" },
           { "label": "Permissions", "href": "/api-reference/permissions" }
+        ]
+      },
+      {
+        "header": "Legal",
+        "items": [
+          { "label": "Bot Developer Terms", "href": "/legal/developer-terms" },
+          { "label": "Privacy Policy", "href": "https://cloak.chat/privacy" }
         ]
       }
     ]

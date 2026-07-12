@@ -19,15 +19,15 @@ By the end of this guide you will have a running bot that answers `!ping` with `
 
     <CodeGroup>
     ```bash npm
-    npm install @cloak/bot-sdk
+    npm install @cloak-software/bot-sdk
     ```
 
     ```bash pnpm
-    pnpm add @cloak/bot-sdk
+    pnpm add @cloak-software/bot-sdk
     ```
 
     ```bash yarn
-    yarn add @cloak/bot-sdk
+    yarn add @cloak-software/bot-sdk
     ```
     </CodeGroup>
   </Step>
@@ -52,7 +52,7 @@ By the end of this guide you will have a running bot that answers `!ping` with `
     Create `bot.ts` with the following. Read the token from an environment variable so it stays out of your code.
 
     ```ts bot.ts
-    import { Client } from '@cloak/bot-sdk';
+    import { Client } from '@cloak-software/bot-sdk';
 
     const client = new Client({
       token: process.env.CLOAK_TOKEN!,
