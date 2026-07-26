@@ -1,0 +1,315 @@
+---
+title: "Joining voice"
+description: "The voice control plane: join and leave channels, read the roster, and handle the five voice events. No native dependency required."
+---
+
+The control plane puts your bot into a voice channel and tells you who else is there. It is pure JavaScript. You do not need the native audio engine, ffmpeg, or anything else on the host to use everything on this page.
+
+```ts
+const conn = await client.joinVoice(serverId, voiceChannelId);
+console.log(conn.url, conn.token.length); // never log the token itself
+
+console.log(client.voiceRoster(voiceChannelId).map((p) => p.userId));
+
+await client.setVoiceSelfState({ muted: true });
+await client.leaveVoice();
+```
+
+<Note>
+  `joinVoice()` mints a credential and stops. It sends and receives no media. Audio is the separate, opt-in layer described in [Publishing audio](/voice/audio), which takes `conn.url` and `conn.token` as its input.
+</Note>
+
+## Permissions
+
+Two grants get the bot in, and the second is not the one you would guess.
+
+<Steps>
+  <Step title="voice_connect, server-wide">
+    Checked across the whole server. `joinVoice()` pre-checks it locally when a verdict has already arrived and refuses early, but the server stays authoritative.
+  </Step>
+  <Step title="Channel-level view">
+    The view check for a voice channel runs through the backend's permission ladder, whose server baseline column is `view_text`, not `view_voice`. Declaring `view_voice` alone is not enough.
+  </Step>
+</Steps>
+
+Those two govern **joining**. Hearing is a separate third grant.
+
+<Warning>
+  **`voice_listen` (code 30) is what decides whether your bot can hear anything, and nothing else implies it.** Without it, the SFU forwards your bot no member media at all, and the key lane never seals it a key that could decrypt any member. Joining is never refused for lacking it: publishing works fine while deaf, and that is the normal configuration for a music or text-to-speech bot. With `debug: true` the SDK warns at join time when the permission is known to be absent. Read [Voice keys and scopes](/voice/keys) before you declare it.
+</Warning>
+
+## joinVoice
+
+```ts
+joinVoice(
+  serverId: string,
+  channelId: string,
+  opts?: { groupId?: string; muted?: boolean; deafened?: boolean },
+): Promise<VoiceConnection>
+```
+
+<ParamField path="serverId" type="string" required>
+  The server the voice channel belongs to. `joinVoice()` moves the server cursor for you.
+</ParamField>
+
+<ParamField path="channelId" type="string" required>
+  The voice channel to join.
+</ParamField>
+
+<ParamField path="opts.groupId" type="string">
+  The channel's group. Resolved from the server's channel list when omitted.
+</ParamField>
+
+<ParamField path="opts.muted" type="boolean" default="false">
+  Join with the self-mute flag set.
+</ParamField>
+
+<ParamField path="opts.deafened" type="boolean" default="false">
+  Join with the self-deafen flag set. Deafened implies muted, mirroring both shipped Cloak clients. Join deafened when the bot only publishes: the SFU then forwards it nothing at all.
+</ParamField>
+
+Rejects with a `CloakActionError` carrying the backend's code on any failure. See [Handling errors](/guides/handling-errors).
+
+<Warning>
+  **`groupId` must be the channel's real group, and must never equal the channel id.** A group reference equal to the channel id is Cloak's direct-message call shape, which the backend rejects. The SDK refuses it locally before anything reaches the wire.
+</Warning>
+
+### VoiceConnection
+
+```ts
+interface VoiceConnection {
+  serverId: string;
+  channelId: string;
+  groupId: string;
+  token: string;   // the LiveKit JWT the backend minted
+  url: string;     // LiveKit signalling url; the SDK never connects to it
+  selfMuted: boolean;
+  selfDeafened: boolean;
+  joinedAt: Date;
+}
+```
+
+<Warning>
+  **`token` is a live credential.** Never log it, never echo it into a channel, never put it in an error message. With `debug: true` the SDK redacts it on the wire log. Log its length if you need a signal that one arrived.
+</Warning>
+
+`url` defaults to the same host as the transport on port 7880, derived by the exported `livekitUrlFor()` helper. Override it with `ClientOptions.livekitUrl` when your deployment puts the SFU somewhere else.
+
+<Warning>
+  **`selfDeafened` is not the answer to "can this bot hear".** It is the self-flag the SDK put in the join frame, and it says nothing about the SFU grant. A bot that joins with `deafened: false` and no `voice_listen` reads `selfDeafened === false` and still hears nothing, because its credential carries no subscribe grant. To ask whether the bot may hear, call `client.can('voice_listen', serverId)` (advisory, and `false` also means "no verdict has arrived yet"), or read the bot's own entry in `voiceRoster(channelId)`.
+</Warning>
+
+## leaveVoice
+
+```ts
+leaveVoice(): Promise<void>
+```
+
+A safe no-op server-side when the bot is not in voice, so you can call it defensively.
+
+<Warning>
+  **Leave before you rejoin.** The backend holds a dropped session's voice membership open for 60 seconds and only completes the leave when the SFU confirms the media is gone, which never happens for a bot that publishes none. `leaveVoice()` is the escape hatch out of that grace window. The SDK's own reconnect path calls it before rejoining for exactly this reason. Do the same if you manage voice yourself.
+</Warning>
+
+## voiceConnection
+
+```ts
+voiceConnection(): VoiceConnection | null
+```
+
+The bot's own live voice membership, or `null`. A synchronous cache read.
+
+## setVoiceSelfState
+
+```ts
+setVoiceSelfState(state: { muted?: boolean; deafened?: boolean }): Promise<void>
+```
+
+Sets the bot's own mute and deafen flags. Requires a live join: it throws when `voiceConnection()` is null. The backend broadcasts this and never acknowledges it, so the local state updates optimistically. Deafening implies muting.
+
+## voiceRoster
+
+```ts
+voiceRoster(channelId: string): VoiceParticipant[]
+```
+
+The cached roster for one voice channel. Synchronous. Seeded by a snapshot the backend pushes on every server select, and kept current by the delta events below.
+
+<Warning>
+  **The roster is indexed by channel, not by user.** `voiceRoster(channelId)` answers "who is in this channel", never "which channel is this user in". Building the reverse index is about ten lines and every music bot needs it. See [Finding which channel a member is in](#finding-which-channel-a-member-is-in) below.
+</Warning>
+
+The returned array is a fresh copy, but its entries are the live cache objects. Copy an entry if you need a snapshot of it.
+
+### VoiceParticipant
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `userId` | `string` | |
+| `channelId` | `string` | |
+| `muted` | `boolean` | Self-mute. |
+| `deafened` | `boolean` | Self-deafen. |
+| `serverMuted` | `boolean` | Moderator-applied. Best-effort in the initial snapshot. |
+| `serverDeafened` | `boolean` | Moderator-applied. Best-effort in the initial snapshot. |
+| `webcam` | `boolean` | Camera, for human members. Bots never publish it. |
+| `stream` | `boolean` | Screenshare, for human members. Bots never publish it. |
+| `p2pWebcam` | `boolean` | **Deprecated. Permanently `false`.** |
+| `p2pStream` | `boolean` | **Deprecated. Permanently `false`.** |
+| `reconnecting` | `boolean` | True while the member's session is inside the backend's 60 second reconnect grace window. |
+
+<Warning>
+  **`p2pWebcam` and `p2pStream` are dead API.** Peer-to-peer video has been removed from the Cloak platform. The fields remain on the type so the wire column map stays stable, and they are permanently `false`. Do not branch on them and do not present peer-to-peer as a feature.
+</Warning>
+
+## refreshVoiceRoster
+
+```ts
+refreshVoiceRoster(serverId: string): Promise<void>
+```
+
+Re-seeds the roster for a server by re-selecting it, because the roster snapshot is a side effect of a server select. Use it after a reconnect, or when you need a known-good picture before acting.
+
+## The voice events
+
+Five events, all of which fire for the bot's **own** actions too.
+
+| Event | Payload | Fires when |
+| --- | --- | --- |
+| `voiceJoin` | `VoiceParticipant` | Someone joined a voice channel. |
+| `voiceLeave` | `{ channelId, userId }` | Someone left. |
+| `voiceStateUpdate` | `{ channelId, userId, state, value }` | A mute, deafen, webcam, or stream flag changed. `state` is a `VoiceStateFlag`. |
+| `voiceConnectionState` | `{ channelId, userId, reconnecting }` | A member's session entered or left the 60 second reconnect grace window. |
+| `voiceDisconnect` | `{ channelId, reason, toChannelId? }` | **This bot** was moved (`reason: 'moved'`, with `toChannelId`) or disconnected (`reason: 'forced'`) by a moderator. |
+
+<Note>
+  Filter the bot's own echo with `p.userId === client.user?.id` where it matters. The `voiceJoin` payload is the live roster entry, so later updates mutate it in place.
+</Note>
+
+<Warning>
+  **Roster events are cursor-gated, not a [firehose](/concepts/message-delivery).** Unlike `messageCreate`, these four reach a bot only for the server it currently has selected or is in voice in. Do not build a global cross-server picture on them.
+</Warning>
+
+When `voiceDisconnect` fires, `voiceConnection()` is already cleared and the SDK does **not** auto-rejoin. Decide for yourself whether rejoining is right.
+
+## Finding which channel a member is in
+
+Because the roster is keyed by channel, keep your own reverse index off `voiceJoin` and `voiceLeave`.
+
+```ts
+// userId -> channelId. The reverse of client.voiceRoster().
+const whereTheyAre = new Map<string, string>();
+client.on('voiceJoin', (p) => whereTheyAre.set(p.userId, p.channelId));
+client.on('voiceLeave', ({ userId }) => whereTheyAre.delete(userId));
+```
+
+The index is populated for the server the bot is actively watching and empty for the rest, which is a direct consequence of the cursor gating above. That is fine when the command that reads it also tells you the server, and it would bite a bot trying to hold a global picture.
+
+## A complete control-plane bot
+
+This bot runs with no native dependency at all. It answers commands in any text channel it can see.
+
+```ts
+import { Client } from '@cloak-software/bot-sdk';
+
+const token = process.env.CLOAK_TOKEN;
+if (!token) throw new Error('set CLOAK_TOKEN');
+
+const client = new Client({
+  token,
+  // Not optional. The bot's identity is published to the server once and can
+  // never be republished, so without a keystore the second run fails.
+  // See /concepts/keys-and-keystore.
+  keystorePath: './voice-bot.cloak-keystore.json',
+  requiredPermissions: ['view_text', 'message_send', 'voice_connect'],
+});
+
+client.on('ready', () => {
+  console.log(`logged in as bot ${client.user?.id}`);
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  // Voice is server-scoped, and a direct message arrives on this same event
+  // with a null serverId. Guard before anything server-scoped.
+  if (msg.isDM || !msg.serverId) return;
+
+  const [cmd, ...args] = msg.content.trim().split(/\s+/);
+  try {
+    if (cmd === '!join') {
+      const [channelId, groupId] = args;
+      if (!channelId) {
+        await msg.channel.send('usage: !join <voiceChannelId> [groupId]');
+        return;
+      }
+      const conn = await client.joinVoice(msg.serverId, channelId, { groupId });
+      // Log the LENGTH. The token itself is a live credential.
+      console.log(`joined ${conn.channelId}, token ${conn.token.length} chars`);
+      await msg.channel.send(`in voice ${conn.channelId} (control plane only)`);
+    } else if (cmd === '!leave') {
+      await client.leaveVoice();
+      await msg.channel.send('left voice');
+    } else if (cmd === '!roster') {
+      const channelId = args[0] ?? client.voiceConnection()?.channelId;
+      if (!channelId) {
+        await msg.channel.send('not in voice, pass a channel id');
+        return;
+      }
+      const roster = client.voiceRoster(channelId);
+      await msg.channel.send(
+        roster.length
+          ? roster.map((p) => `${p.userId}${p.muted ? ' (muted)' : ''}`).join(', ')
+          : 'nobody in that channel, per the cached roster',
+      );
+    } else if (cmd === '!mute' || cmd === '!unmute') {
+      await client.setVoiceSelfState({ muted: cmd === '!mute' });
+      await msg.channel.send(`self-muted: ${client.voiceConnection()?.selfMuted}`);
+    }
+  } catch (e) {
+    console.error(`${cmd} failed`, e);
+  }
+});
+
+client.on('voiceJoin', (p) => console.log(`voice join: ${p.userId} -> ${p.channelId}`));
+client.on('voiceLeave', (e) => console.log(`voice leave: ${e.userId} <- ${e.channelId}`));
+client.on('voiceDisconnect', (e) =>
+  console.warn(`removed from voice ${e.channelId} (${e.reason})`),
+);
+client.on('error', (e) => console.error('sdk error', e));
+
+await client.login();
+```
+
+Two things this sample does on purpose. It uses `msg.channel.send()` rather than `msg.reply()`, because these are plain answers and a true reply fires a mute-piercing "replied to you" notification. And it does not declare `voice_listen`, so it is deaf: it can publish (with the audio layer) and can hear nothing.
+
+<Note>
+  `send()` and `channel.send()` are fire-and-forget. A server-side denial does not reject the promise, it arrives on the `sendRejected` event. See [Sending messages](/guides/sending-messages).
+</Note>
+
+## Through the guild handle
+
+Both server-scoped voice methods are bound on `client.guild(serverId)`.
+
+```ts
+const g = client.guild(serverId);
+const conn = await g.joinVoice(voiceChannelId, { deafened: true });
+await g.refreshVoiceRoster();
+```
+
+`leaveVoice()`, `voiceConnection()`, `voiceRoster()`, and `setVoiceSelfState()` stay on the client, because a bot holds at most one voice membership at a time. See [The guild handle](/guides/guild-handle).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    Where the frame key comes from, and why installing the wrong one is silent.
+  </Card>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    Turn `conn.url` and `conn.token` into sound in the channel.
+  </Card>
+  <Card title="Voice reference" icon="book" href="/api-reference/voice">
+    Every voice export, type, and constant.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    The complete client event map.
+  </Card>
+</CardGroup>

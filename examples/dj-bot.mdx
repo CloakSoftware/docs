@@ -1,0 +1,302 @@
+---
+title: "DJ bot (voice audio)"
+description: "A slash-command music bot that joins the voice channel you are sitting in and publishes audio. Based on examples/dj-bot.ts."
+---
+
+`/play <source>` works out which voice channel the invoker is sitting in, joins that one, and publishes audio into it. There is no channel id to paste.
+
+The bot joins deafened and stays deafened. It publishes, and nothing arrives in the other direction. That is the recommended shape for a publisher, and this page explains how each half of it is enforced.
+
+<Warning>
+  This is the one example with real host requirements. Audio needs the optional native engine `@livekit/rtc-node`, pinned to an exact version and **patched**, plus `ffmpeg` (and `yt-dlp` for streaming sites) on `PATH`. An unpatched engine publishes audio nobody can decrypt, silently. Set that up first: see [Voice runtime](/voice/runtime).
+</Warning>
+
+## The full bot
+
+```ts dj-bot.ts
+import {
+  Client,
+  VoiceMediaSession,
+  ffmpegResource,
+  ytdlpResource,
+  probeVoiceRuntime,
+} from '@cloak-software/bot-sdk';
+import type { AudioResource, VoiceConnection } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Not optional, even for a toy. The bot's identity is published to the
+  // server once and can never be republished. Omit this and the identity
+  // lives only in this process: the first run works, and every restart after
+  // it fails permanently.
+  keystorePath: './dj-bot.cloak-keystore.json',
+  requiredPermissions: ['view_text', 'message_send', 'commands', 'voice_connect', 'voice_speak'],
+});
+
+// userId -> channelId. The reverse of client.voiceRoster().
+const whereTheyAre = new Map<string, string>();
+client.on('voiceJoin', (p) => whereTheyAre.set(p.userId, p.channelId));
+client.on('voiceLeave', ({ userId }) => whereTheyAre.delete(userId));
+
+let conn: VoiceConnection | undefined;
+let session: VoiceMediaSession | undefined;
+
+// Pick the right decoder for what the user typed. Any http(s) url goes
+// through yt-dlp: its generic extractor passes a direct media url straight
+// through, so there is no need to guess which kind it is. Local paths skip it.
+function resource(source: string): AudioResource | Promise<AudioResource> {
+  return /^https?:\/\//i.test(source) ? ytdlpResource(source) : ffmpegResource(source);
+}
+
+async function leave(): Promise<void> {
+  // Order matters: tear the media down before dropping the control-plane
+  // membership, or the SFU keeps a publisher for a member who has left.
+  try {
+    await session?.detach();
+  } finally {
+    session = undefined;
+    if (conn) {
+      await client.leaveVoice().catch(() => undefined);
+      conn = undefined;
+    }
+  }
+}
+
+client.commands.register(
+  {
+    name: 'play',
+    description: 'play something in the voice channel you are in',
+    options: [
+      {
+        name: 'source',
+        type: 'string',
+        description: 'a file path or a URL ffmpeg can read',
+        required: true,
+      },
+    ],
+  },
+  async (ctx) => {
+    const source = ctx.getString('source')!;
+
+    // 1. Where is the invoker? If the bot has not seen them join, say so
+    //    plainly rather than guessing. Joining the wrong channel is worse
+    //    than refusing.
+    const channelId = whereTheyAre.get(ctx.message.authorId);
+    if (!channelId) {
+      return void (await ctx.reply(
+        'join a voice channel first, I only see members join while I am watching this server.',
+      ));
+    }
+
+    // 2. Is the engine even installed? @livekit/rtc-node is an optional
+    //    dependency, and on a fresh `npm i --omit=optional` it is not on
+    //    disk. Probe rather than letting an import throw mid-join.
+    const probe = await probeVoiceRuntime();
+    if (!probe.available) {
+      return void (await ctx.reply(`voice engine unavailable: ${probe.remedy}`));
+    }
+
+    await leave();
+
+    // 3. Control plane. Deafened: the SFU then forwards this bot nothing.
+    //    Slash commands are never dispatched from a DM, so serverId is
+    //    non-null here.
+    conn = await client.joinVoice(ctx.message.serverId!, channelId, { deafened: true });
+
+    // 4. Key lane. A bot never derives a voice key, a human member seals one
+    //    to it. This waits for that, and it is the step that hangs if nobody
+    //    holding the server key is online.
+    const voiceKey = await client.voiceKeys.acquireVoiceKey(ctx.message.serverId!);
+
+    // 5. The scope is not this bot's choice: it is an authenticated tag
+    //    inside the sealed blob. Publish-only means participant scope. Room
+    //    scope would mean the server granted voice_listen and this bot could
+    //    hear everyone, which is not what it advertises. Bail loudly instead
+    //    of silently becoming a listening bot.
+    if (voiceKey.scope !== 'participant') {
+      await leave();
+      return void (await ctx.reply(
+        `this server granted me voice_listen (scope "${voiceKey.scope}") and I am deliberately ` +
+          'publish-only. Revoke it, or run a bot that means to listen.',
+      ));
+    }
+
+    // 6. Media. attach() installs the key BEFORE publishing. That order is
+    //    load-bearing: publish first and the frame cryptor is created without
+    //    a key, so the bot transmits audio nobody can decrypt, silently.
+    session = await VoiceMediaSession.attach({
+      url: conn.url,
+      token: conn.token, // a live credential, never log it
+      botId: client.user!.id,
+      serverId: ctx.message.serverId!,
+      voiceKey,
+      keys: client.voiceKeys,
+      deafened: conn.selfDeafened,
+    });
+
+    await ctx.reply(`playing in <#${channelId}>, I cannot hear any of you.`);
+    try {
+      // Resolves when the source ends. The awaited captureFrame inside is the
+      // only pacer. There is no scheduler to add.
+      await session.player.play(await resource(source));
+    } catch (e) {
+      // Report it in channel. A decoder failure is the most likely thing to
+      // go wrong in a music bot, and it is the invoker, not the log, who
+      // needs to know. CloakEnvironmentError carries a `remedy` for this.
+      const err = e as Error & { remedy?: string };
+      await leave();
+      return void (await ctx.reply(
+        `could not play that: ${err.message}${err.remedy ? `\n\n${err.remedy}` : ''}`,
+      ));
+    }
+    await ctx.reply('finished');
+  },
+);
+
+client.commands.register(
+  { name: 'stop', description: 'stop playing and leave voice' },
+  async (ctx) => {
+    await leave();
+    await ctx.reply('stopped');
+  },
+);
+
+client.on('error', (e) => console.error('[dj-bot] error event:', e.message));
+
+// A scope flip (voice_listen granted or revoked mid-call) re-pins at the SAME
+// key version, so a handler keyed only on version would miss it. There is no
+// key-removal API in the engine, so the only honest response to a scope change
+// is to tear the session down.
+client.on('voiceKeyUpdate', ({ scope }) => {
+  if (session && scope !== 'participant') {
+    console.warn('[dj-bot] scope changed to', scope, ', dropping the session');
+    void leave();
+  }
+});
+
+process.on('SIGINT', () => {
+  void leave().finally(() => process.exit(0));
+});
+
+await client.login();
+console.log('[dj-bot] ready, /play <source> in a text channel while sitting in voice');
+```
+
+## Run it
+
+There is no `npm run example:dj` script. From a checkout of the SDK, put `CLOAK_TOKEN` in a `.env` file and run the file directly:
+
+```bash
+npx tsx --env-file=.env examples/dj-bot.ts
+```
+
+Or pass the token inline:
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx examples/dj-bot.ts
+```
+
+Before either, install and patch the voice engine in the project you are running from:
+
+```bash
+npm i @livekit/rtc-node@0.13.31 && npm i -D patch-package
+mkdir -p patches
+cp node_modules/@cloak-software/bot-sdk/patches/@livekit+rtc-node+0.13.31.patch patches/
+npm pkg set scripts.postinstall="patch-package"
+npm install
+```
+
+Then sit in a voice channel and run `/play` in any text channel the bot can see. `/stop` leaves.
+
+<Note>
+  **Which example to start from.** `examples/music-bot.ts` (`npm run example:music`) is the close relative: same publish-only shape, but you paste the voice channel id into a `!play` command instead of the bot finding you. It also predates `client.voiceKeys` and reaches the key lane through `internals.keyManagerFactory`, a seam that is explicitly not part of the stable API. Copy `dj-bot.ts`. Read `music-bot.ts` only for the text-command variant.
+</Note>
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="Finding the invoker's voice channel" icon="magnifying-glass-location">
+    The SDK keeps a per-channel voice roster, but it is indexed **by channel**. `client.voiceRoster(channelId)` answers "who is in this channel", not "which channel is this user in".
+
+    So the bot builds the reverse index itself off `voiceJoin` and `voiceLeave`. That is about ten lines and it is the only bookkeeping the feature needs.
+
+    The catch: those events are cursor-gated. A bot receives them only for the server it currently has selected, or the one it is in voice on. The reverse index is therefore populated for the server the bot is actively talking to and empty for the rest. That is fine here, because the invocation tells the bot which server it is in, but it would break a bot trying to keep a global picture.
+
+    When the invoker is not in the map, the bot says so rather than guessing a channel.
+  </Accordion>
+
+  <Accordion title="Probing the engine before joining" icon="stethoscope">
+    `probeVoiceRuntime()` tries to load the native engine and reports what happened. It never throws, because a text-only bot must not be failed by an absent voice engine.
+
+    On failure it returns `{ available: false, error, remedy }`, where `remedy` is an actionable paragraph naming what to change on the machine (install it at the pin, apply the patch, move off Alpine, and so on). The bot echoes that straight into the channel.
+
+    Probing beats letting an import throw halfway through a join, which would leave the bot holding a control-plane membership it cannot use.
+  </Accordion>
+
+  <Accordion title="Joining deafened, and why both halves matter" icon="ear-deaf">
+    The bot joins with `{ deafened: true }`, so the SFU forwards it nothing. Separately, it holds only its own participant-scoped frame key, so it is cryptographically unable to decrypt any member. Transport and crypto both say no.
+
+    Two sentences, and you need both of them. A bot **without** `voice_listen` holds only its own frame key and cannot decrypt any member. A bot **granted** `voice_listen` can decrypt everyone in the channel, by design. Never quote the first without the second: a server owner who installs a `voice_listen` bot because "bots cannot hear you" has been misled.
+  </Accordion>
+
+  <Accordion title="A bot is handed its voice key, never derives one" icon="key">
+    `client.voiceKeys` is the supported handle on the voice-key lane, and nothing else. It exposes `acquireVoiceKey`, `getVoiceKey`, `voiceFrameKeyFor`, and `forgetVoiceKey`. It deliberately cannot reach conversation keys, which is what keeps a media session structurally out of message content.
+
+    `acquireVoiceKey(serverId)` waits for a human member to seal a key to this bot's identity. If nobody holding the server key is online, this is the step that waits.
+
+    The returned `scope` (`'participant'` or `'room'`) is read from inside the sealed blob, as an authenticated tag. The bot does not choose it, cannot override it, and here it refuses to continue if the answer is `'room'` rather than quietly becoming a listening bot.
+
+    Always install what `voiceFrameKeyFor(serverId, identity)` returns, never `getVoiceKey().key`. `attach()` does this for you. In room scope the held value is the room key, and installing that as your own frame key publishes audio nobody can decrypt.
+  </Accordion>
+
+  <Accordion title="attach() installs the key before publishing" icon="lock">
+    `VoiceMediaSession.attach()` connects, installs the frame key under the identity LiveKit reported, and only then publishes. Reverse that order and the frame cryptor is created without a key, so the bot transmits audio nobody can decrypt.
+
+    `voiceKey` is passed for the scope and the length check. The bytes actually installed come from `keys`, the `voiceFrameKeyFor()` seam. `deafened` is diagnostic: `can_subscribe` is baked into the LiveKit token at join time and cannot be loosened here, but passing it lets `attach()` say the one useful thing when a listening bot hears nothing.
+
+    <Warning>
+      **The blind spot.** The engine surfaces no per-participant end-to-end encryption failure state. A successful `attach()` and a successful `play()` prove the bytes reached the encoder, and nothing about whether any member decrypted them. There is no event to subscribe to and no counter to read, which is why the SDK ships no voice health check. If members hear silence, suspect the key or the identity, not the network, and check a real client rather than these logs.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="play() is paced by the engine, not by you" icon="play">
+    `session.player.play(resource)` resolves when the source ends. The awaited `captureFrame` inside it is the only pacer.
+
+    Do not add a 20 ms timer, a ring buffer, or an Opus encoder. The engine encodes internally. Any `AsyncIterable<Int16Array>` works as a resource, and `pcmChunks()` adapts a byte stream while handling the two silent corruption cases (odd-byte splits and misaligned buffers).
+
+    A failed decode is an error, not a short song. An unreadable input makes `ffmpeg` write nothing and exit non-zero, which to a naive pump looks exactly like a clean end of stream. `play()` checks the exit code and throws a `CloakEnvironmentError` carrying the head of ffmpeg's own stderr, plus a `remedy`. A deliberate `stop()` is exempt.
+  </Accordion>
+
+  <Accordion title="ffmpeg for files, yt-dlp for pages" icon="link">
+    `ffmpegResource()` takes a file path or a **direct media URL**. It has no site extractors. Hand it a YouTube, SoundCloud, or Bandcamp watch **page** and ffmpeg dutifully decodes the HTML, finds no audio, and exits non-zero. That is the commonest voice-bot mistake, and it is named by the SDK's own remedy text.
+
+    `ytdlpResource()` shells out to `yt-dlp` to turn the page into a real stream url first. It is async, unlike `ffmpegResource`. Its generic extractor passes a direct media url straight through, which is why the helper above routes every `http(s)` source through it and only sends local paths to ffmpeg.
+
+    The resolved url is signed, expiring, and usually bound to this host's IP. Resolve at play time. Never persist it, and never hand it to another machine. `--no-playlist` is passed by default; use the `ytdlpArgs` option for things like `['--cookies', 'cookies.txt']`.
+  </Accordion>
+
+  <Accordion title="Leaving in the right order" icon="right-from-bracket">
+    `leave()` detaches the media session first, then drops the control-plane membership. Reverse that and the SFU keeps a publisher for a member who has left.
+
+    `voiceKeyUpdate` fires when the bot's voice key is reprovisioned: a new version, a new scope, or both. A scope flip re-pins at the **same** version, so a handler keyed only on the version would miss it.
+
+    A scope change is not a re-pin. `session.setVoiceKey()` detaches and throws when the scope differs from the one it attached with, because subscription is fixed at connect time and the engine has no key-removal API. This bot handles that by tearing the session down. Rejoin to honor the new scope.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
+    Installing the engine at the pin, applying the patch, and the symptom-to-cause table for silence.
+  </Card>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    `VoiceMediaSession`, `VoicePlayer`, and audio resources in full.
+  </Card>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    Participant scope, room scope, and re-pinning.
+  </Card>
+  <Card title="Slash commands" icon="terminal" href="/guides/slash-commands">
+    Declaring commands and reading their arguments.
+  </Card>
+</CardGroup>

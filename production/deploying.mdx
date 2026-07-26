@@ -1,0 +1,237 @@
+---
+title: "Deploying a bot"
+description: "A Cloak bot is an ordinary Node process. What to run, what to keep secret, and the one thing that has to survive a restart."
+---
+
+A Cloak bot is a long-lived Node process that holds an outbound WebSocket. There is no inbound port to expose, no webhook endpoint to route, and no server for you to host. If your platform can run `node bot.js` and keep it running, it can run a Cloak bot.
+
+## The whole deployment
+
+```bash
+npm install && node bot.js
+```
+
+That is it, on any host with Node `^20.19.0 || >=22.12.0`. Nothing compiles at install time, so you need no Dockerfile, no compiler, no native addon and no glibc floor. The default wire is a plain `wss://` WebSocket over the pure-JS `ws` package, and every dependency the SDK actually loads is pure JavaScript.
+
+<Note>
+  `npm install` does download two optional native extras (the WebTransport lane and the voice media engine) because they are declared as `optionalDependencies`. Nothing imports either one unless you opt in, so they cost disk, not compatibility. Use `npm install --omit=optional` to skip them.
+</Note>
+
+## The host
+
+| Requirement | Value |
+| --- | --- |
+| Node | `^20.19.0 \|\| >=22.12.0` |
+| Inbound ports | none |
+| Outbound | `wss://` to Cloak's hosted service |
+| Build step | none |
+| Native toolchain | none |
+
+Node 21.x never qualifies, and neither does Node 18. The HPKE crypto stack draws randomness from `globalThis.crypto.getRandomValues`, which Node 18 leaves undefined in ESM. `login()` checks the runtime before it opens a socket and throws a `CloakEnvironmentError` with a remedy rather than letting you discover it in production. See [When a bot will not start](/production/troubleshooting).
+
+## The token
+
+The bot token has the shape `botid.tokenid.secret` and grants full end-to-end encrypted membership of every server your bot is in. Anyone holding it can read those servers.
+
+Read it from the environment, never from source:
+
+<CodeGroup>
+
+```bash Platform secret
+# Set CLOAK_TOKEN in your host's secret or environment configuration,
+# then just run the process.
+node bot.js
+```
+
+```bash Local file
+# --env-file is built into Node. Keep .env out of git.
+node --env-file=.env bot.js
+```
+
+</CodeGroup>
+
+Do not bake the token into a container image layer. A layer is readable by anyone who can pull the image, and deleting the file in a later layer does not remove it.
+
+## The keystore has to survive restarts
+
+This is the one deployment decision that can permanently break a bot. Your bot's identity is published **write-once** on the server. If the keystore is lost after that publication, a restarted bot generates an identity the server will not accept, while members keep wrapping conversation keys to the old one. Decryption then fails forever until the bot's identity is reset server-side.
+
+<Warning>
+  A bot with no keystore at all works on its first run and fails permanently on its second. Configure a keystore before the first `login()`, not after the first restart. The full explanation is on [Keys and the keystore](/concepts/keys-and-keystore).
+</Warning>
+
+Two shapes are supported, and the deployment rule is the same for both: something durable has to hold it.
+
+- **Writable disk.** Point `keystorePath` at a **mounted volume**, not at a container's ephemeral filesystem. A redeploy destroys the ephemeral one.
+- **No writable disk.** Use `envKeystore({ onWrite })` and persist the blob it hands you into your platform's secret store. See [Keystore backends](/production/keystore-backends).
+
+Add this to your `.gitignore` either way:
+
+```bash .gitignore
+*.cloak-keystore.json
+```
+
+## A production-shaped bot
+
+Everything below is deployment plumbing rather than bot logic: a keystore on a durable path, an `error` listener so nothing fails silently, a `sendRejected` listener because sends are fire-and-forget, and a signal handler that flushes the keystore on the way out.
+
+```ts bot.ts
+import { Client, type CloakClientError } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // A mounted volume, not the container filesystem.
+  keystorePath: process.env.KEYSTORE_PATH ?? '/data/bot.cloak-keystore.json',
+  requiredPermissions: ['message_send'],
+  debug: process.env.CLOAK_DEBUG === '1',
+});
+
+// The single funnel for failures the SDK catches and keeps going from.
+// With no listener these stay silent by design.
+client.on('error', (e: CloakClientError) => {
+  console.error('[cloak] error', e.source, e.context ?? '', e.message);
+});
+
+// send() is fire-and-forget: a server-side denial arrives here, not as a
+// rejected promise.
+client.on('sendRejected', (r) => {
+  console.error('[cloak] send rejected', r.code, r.message, r.permission ?? '');
+});
+
+client.on('disconnect', (e) => console.warn('[cloak] disconnected', e));
+client.on('reconnecting', ({ attempt, delayMs }) =>
+  console.warn(`[cloak] reconnecting (attempt ${attempt}) in ${delayMs}ms`),
+);
+client.on('reconnected', () => console.log('[cloak] reconnected'));
+client.on('ready', () => console.log(`[cloak] ready as ${client.user?.id}`));
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  // serverId is null in a DM, so guard before anything server-scoped.
+  if (msg.isDM || !msg.serverId) return;
+  if (msg.content.trim() !== '!ping') return;
+  if (!client.can('message_send', msg.serverId)) return;
+  // channel.send() is a plain message. msg.reply() would fire a
+  // mute-piercing "replied to you" notification.
+  msg.channel.send('pong').catch((e) => console.error('[cloak] send failed', e));
+});
+
+// destroy() closes the transport and flushes queued keystore writes.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    client.destroy().finally(() => process.exit(0));
+  });
+}
+
+client.login().catch((e: unknown) => {
+  console.error('[cloak] login failed', e);
+  process.exit(1);
+});
+```
+
+## Process management
+
+The SDK owns reconnection. On an unexpected disconnect it recreates the transport, re-authenticates, and restores its last `watch()` target, backing off exponentially with jitter up to 30 seconds. Your supervisor does not need to help with that, and restarting the process to "fix" a disconnect only throws away warm keys.
+
+What your supervisor is for:
+
+- **Restart on exit.** `login()` calls `process.exit(1)` in the sample above when the initial connect fails. A restart policy of `always` or `on-failure` covers that.
+- **Know that two failures stop the loop.** A revoked token (`-2`) and an SDK below the backend's minimum wire version (`-12`) are terminal: the SDK emits `disconnect` and stops retrying, and the process stays alive doing nothing. Restarting will not help either one. If you would rather the supervisor notice, exit from the `disconnect` handler when the error carries one of those codes. See [When a bot will not start](/production/troubleshooting).
+- **Deliver `SIGTERM` before `SIGKILL`.** `destroy()` flushes queued keystore writes. A hard kill can drop a key that just landed, which costs a re-acquire on the next start.
+- **One instance per token.** Two processes on the same token fight over the same session. If you need a rolling deploy, let the old instance exit before the new one logs in.
+- **Capture stdout.** The SDK returns strings and never prints on its own, apart from two deliberate warnings about an unrecoverable keystore misconfiguration. Your logging is whatever your handlers write.
+
+### A systemd unit
+
+```ini /etc/systemd/system/cloak-bot.service
+[Unit]
+Description=Cloak bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloakbot
+WorkingDirectory=/srv/cloak-bot
+Environment=KEYSTORE_PATH=/var/lib/cloak-bot/bot.cloak-keystore.json
+EnvironmentFile=/etc/cloak-bot.env
+ExecStart=/usr/bin/node bot.js
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StateDirectory=cloak-bot
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`StateDirectory=cloak-bot` gives you `/var/lib/cloak-bot` owned by the service user and surviving restarts, which is exactly what the keystore needs. `/etc/cloak-bot.env` holds `CLOAK_TOKEN=...` and should be mode `0600`.
+
+## Platform notes
+
+| Platform | Run command | Keystore |
+| --- | --- | --- |
+| VPS with systemd | `node bot.js` | `StateDirectory`, or any path on the disk. |
+| Railway | `node bot.js` as the start command | Attach a volume and point `keystorePath` into it. |
+| Fly.io | a `[processes]` entry, no `[[services]]` block (nothing listens) | Attach a Fly volume, mount it, point `keystorePath` at the mount. |
+| Render | a **background worker**, not a web service | A persistent disk, or `envKeystore`. |
+| Serverless or scale-to-zero | not suitable | A bot needs a live socket, so a function that sleeps drops it. |
+
+Anywhere without a writable volume, reach for [`envKeystore`](/production/keystore-backends) instead of hoping the filesystem persists.
+
+## When Docker is worth it
+
+For a text bot, Docker buys you nothing the platform's stock Node image does not already give you. It is worth reaching for when you opt into one of the two native extras, because then the base image matters:
+
+| Extra | Host constraint |
+| --- | --- |
+| WebTransport lane (`transport: 'webtransport'`) | The Quiche prebuild needs glibc >= 2.38. Ubuntu 24.04 ships 2.39 and works. Debian bookworm ships 2.36 and fails at addon load with `GLIBC_2.38' not found`, which is the family most stock Node images use. |
+| Voice media (`@livekit/rtc-node`) | No musl build, so Alpine is out. Also needs a patch applied to publish audio at all. |
+
+The SDK ships a `deploy/Dockerfile` template for exactly those two cases. If you are not using either, deploy the Node process directly.
+
+Two things any image you write has to get right:
+
+```dockerfile
+# The keystore MUST outlive the container.
+VOLUME ["/data"]
+
+# Run unprivileged: the keystore holds live conversation keys.
+RUN useradd --create-home --uid 10001 bot && mkdir -p /data && chown -R bot:bot /data
+USER bot
+```
+
+## Before you call it deployed
+
+<Steps>
+  <Step title="Confirm the keystore path is durable">
+    Restart the process and check that the keystore file is still there with the same contents. If the second start logs a warning about a new identity, the path is ephemeral and you must fix it before the bot gets any real use.
+  </Step>
+  <Step title="Run the dependency report on the host">
+    One command tells you the Node version the process really got, whether it satisfies `engines`, and whether a secure RNG is reachable. See [When a bot will not start](/production/troubleshooting).
+  </Step>
+  <Step title="Attach an error listener">
+    Without one, a handler that throws disappears. It changes no control flow, it only makes failures visible.
+  </Step>
+  <Step title="Check the token is not in the image or the repo">
+    `git log -p` and `docker history` both remember.
+  </Step>
+</Steps>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Keystore backends" icon="database" href="/production/keystore-backends">
+    Files, environment variables, and writing your own adapter.
+  </Card>
+  <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
+    The dependency report, symptom by symptom.
+  </Card>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why publication is write-once, and what the keystore holds.
+  </Card>
+  <Card title="Known limitations" icon="triangle-exclamation" href="/production/known-limitations">
+    What does not work yet, and what will not.
+  </Card>
+</CardGroup>

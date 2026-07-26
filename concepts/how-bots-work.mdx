@@ -11,11 +11,27 @@ On many platforms, a bot is a privileged client of a server that can read messag
 
 That means:
 
-- Your bot holds its own cryptographic identity.
-- Your bot receives each server's encryption key through Cloak's normal key exchange.
+- Your bot holds its own cryptographic identity, published to Cloak once and reused forever.
+- Your bot receives each server's conversation key from a human member who already holds it.
 - All encryption and decryption happen inside your process.
 
 The Cloak service relays encrypted bytes between members. It never sees plaintext message content, and it never sees an unwrapped key.
+
+### The primitives, by name
+
+You do not implement any of this, but knowing the names makes the failure modes readable.
+
+| Layer | What it is |
+| --- | --- |
+| Message content | AES-256-GCM with the server's conversation key |
+| Key wrapping | RFC 9180 HPKE: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM, Auth mode, single-shot |
+| Bot identity | An HPKE identity, published write-once to Cloak on the first login |
+
+<Note>
+  The class that does the wrapping is still exported as `SignalSession`, for compatibility with code written before the SDK moved off libsignal. The primitive underneath it is HPKE, not the Signal Protocol. You will not normally touch it.
+</Note>
+
+This matters for one practical reason. Your bot never generates a server's conversation key, so a human member's client has to wrap one for it, and that client must be on a build that ships the HPKE wrap format. Against a peer on an older build, the key acquire fails and the SDK names the offending peer in a warning.
 
 <Note>
   Because your bot does the crypto itself, it needs to hold real keys. Persisting those keys safely is the single most important operational detail. See [Keys and the keystore](/concepts/keys-and-keystore).
@@ -26,6 +42,9 @@ The Cloak service relays encrypted bytes between members. It never sees plaintex
 When someone sends a message your bot can see:
 
 <Steps>
+  <Step title="A human hands your bot the server's key">
+    The first time your bot joins a server, a member who already holds that server's conversation key wraps it to the bot's published identity and uploads it. The SDK unwraps it and pins that member's identity key on first use, so a later wrap from the same peer that does not match the pin is rejected. Until this happens, the bot can connect but cannot decrypt or send in that server.
+  </Step>
   <Step title="A member sends an encrypted message">
     Their app encrypts the content with the server's key and sends the ciphertext to Cloak.
   </Step>
@@ -35,12 +54,18 @@ When someone sends a message your bot can see:
   <Step title="Your bot decrypts it locally">
     The SDK decrypts the content with the key your bot holds and hands you a `Message` with readable `content`.
   </Step>
-  <Step title="Your bot replies">
-    When you call `msg.reply()`, the SDK encrypts your text in the process and sends the ciphertext back through Cloak.
+  <Step title="Your bot answers">
+    When you call `msg.channel.send()` or `msg.reply()`, the SDK encrypts your text in the process and sends the ciphertext back through Cloak.
   </Step>
 </Steps>
 
-At no point does the plaintext leave your machine unencrypted.
+Message bodies never leave your process in the clear. Several lanes are deliberately different: mention targets ride the wire in plaintext as routing metadata, the slash-command menu your bot publishes is readable server-side, and the webhook embed lane is not end-to-end encrypted at all. Read [What is encrypted, and what is not](/concepts/encryption-lanes) before you pick a lane.
+
+## Conversation keys are versioned
+
+A server's conversation key is not one key forever. It carries an epoch, and the SDK stores one key per epoch. When a message names an epoch your bot does not hold, the SDK pulls that epoch's key and decrypts once it lands.
+
+You do not manage this. It is worth knowing because it explains why a message can arrive slightly before it becomes readable, and why the keystore holds more than one key per server.
 
 ## What you are responsible for
 
@@ -51,7 +76,7 @@ Because your bot is a real member holding real keys, a few responsibilities sit 
     The bot token grants full encrypted membership. Keep it in an environment variable or secret manager, never in code.
   </Card>
   <Card title="Keep the keystore" icon="database">
-    The keystore file holds your bot's identity and its live keys. Persist it and protect it. See [Keys and the keystore](/concepts/keys-and-keystore).
+    The keystore holds a write-once identity. Lose it after the first login and the bot can never decrypt again without a server-side identity reset. See [Keys and the keystore](/concepts/keys-and-keystore).
   </Card>
   <Card title="Host the process" icon="server">
     Your bot is a program you run and keep running. Cloak does not host it for you.
@@ -61,19 +86,45 @@ Because your bot is a real member holding real keys, a few responsibilities sit 
   </Card>
 </CardGroup>
 
+The keystore can be a file (`keystorePath`) or any adapter you supply (`keystore`), so a host with no writable volume is still serviceable. What is not optional is that something durable holds it.
+
+## A bot is a member, with a few carve-outs
+
+Treating a bot as an ordinary member is the design, and most of the API follows from it. Three places where it does not:
+
+- `react()`, `unreact()`, `edit()`, `delete()`, `pin()`, and `unpin()` all reject on a direct message. `reply()` and `channel.send()` work normally there.
+- A bot session is structurally Free tier, so its voice credential is microphone-only. Camera and screenshare are not granted.
+- Hearing other members in voice is a separate permission (`voice_listen`) from joining one. Without it the bot joins and publishes normally and receives nothing, silently.
+
 ## The API is familiar on purpose
 
 The SDK is shaped like [discord.js](https://discord.js.org). You get a `Client`, you attach listeners for events like `messageCreate` and `guildCreate`, and messages carry a `reply()` method. If you have built a Discord bot, porting it is mostly mechanical.
 
-Keep one thing in mind: the resemblance is in the shape of the code, not the wire protocol. A Cloak bot talks to Cloak. It cannot connect to Discord, and a Discord bot cannot connect to Cloak.
+Two differences to hold onto. The resemblance is in the shape of the code, not the wire protocol: a Cloak bot talks to Cloak, and cannot connect to Discord. And `Message.serverId` is `string | null`, because the same `messageCreate` event delivers direct messages, which have no server.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return; // guard before anything server-scoped
+  // server-scoped work goes here
+});
+```
+
+The SDK types call a server a `Guild`, following discord.js naming. The product calls it a server, and so do these docs.
 
 ## Next
 
 <CardGroup cols={2}>
+  <Card title="What is encrypted, and what is not" icon="shield-halved" href="/concepts/encryption-lanes">
+    The honest map of every lane your bot can send on.
+  </Card>
   <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
     How your bot hears from every channel at once.
   </Card>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     Declaring, granting, and checking capabilities.
+  </Card>
+  <Card title="Keys and the keystore" icon="database" href="/concepts/keys-and-keystore">
+    The write-once identity, and how not to lose it.
   </Card>
 </CardGroup>

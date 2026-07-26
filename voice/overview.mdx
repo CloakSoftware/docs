@@ -1,0 +1,89 @@
+---
+title: "Voice overview"
+description: "What a Cloak bot can and cannot do in a voice channel, and how the control plane and the audio layer differ."
+---
+
+A Cloak bot can sit in a voice channel, see who else is there, and publish audio. Voice splits into two layers, and you can use the first without ever touching the second.
+
+<Warning>
+  **Video is not available to bots, and will not be.** The backend restricts a bot's publish sources to `["microphone"]` when it mints the voice credential, regardless of subscription tier. Camera and screenshare are denied at the credential, not by the SDK, so there is no option to enable and no workaround. Peer-to-peer video has been removed from the platform entirely.
+</Warning>
+
+## The two layers
+
+<CardGroup cols={2}>
+  <Card title="Control plane" icon="signal" href="/voice/joining">
+    Join and leave voice channels, read the roster, react to members coming and going, set the bot's own mute flag. Pure JavaScript. No native dependency, no extra install, works on any supported Node host including Alpine.
+  </Card>
+  <Card title="Audio media layer" icon="waveform" href="/voice/audio">
+    Publish sound into the channel, and (with the right grant) decrypt what members say. Opt-in. Needs an optional native engine at an exact version, plus a patch you apply in your own app.
+  </Card>
+</CardGroup>
+
+`joinVoice()` returns a credential and stops. It sends no media of any kind. If all your bot needs is presence and roster awareness, you are done at the control plane and you can skip everything native.
+
+## The security model, in two clauses
+
+Read both. Quoting either one alone misleads whoever reads it.
+
+<Info>
+  A bot **without** `voice_listen` holds only its own frame key and is cryptographically unable to decrypt any member. A bot **granted** `voice_listen` is given the room key and can decrypt everyone in the channel, by design.
+</Info>
+
+The first clause is a real property of the material, not a policy the SDK enforces. A publish-only bot holds one one-way derivative, and the bytes needed to compute anyone else's key are simply not in the process.
+
+The second clause is a consented capability. Granting `voice_listen` means "give this process the ability to decrypt us". A server owner who installs a listening bot on the strength of "bots cannot hear you" has been misled. See [Voice keys and scopes](/voice/keys) for what per-participant keys do and do not buy.
+
+## The permission ladder
+
+Three separate grants, and they do three different things.
+
+| Permission | Code | What it gets you |
+| --- | --- | --- |
+| `voice_connect` | 22 | Checked server-wide. Without it, `joinVoice()` is refused. |
+| Channel-level view | 1 (`view_text` baseline) | The channel view check for a voice channel runs through the server's `view_text` column, not `view_voice`. |
+| `voice_speak` | 23 | Publishing audio into the channel. |
+| `voice_listen` | 30 | Being sent other members' media, and being sealed a key that can decrypt it. Not implied by anything else. |
+
+`voice_connect` plus channel view gets the bot **in**. Hearing is a separate, third decision. A bot is deaf by default and publishing is unaffected by that: a music or text-to-speech bot works perfectly while deaf, and that is the intended configuration rather than a degraded one.
+
+<Note>
+  `voice_listen` (code 30) and `event_invite` (code 29) are the two newest permissions. See [Permission names](/api-reference/permissions) for the complete list.
+</Note>
+
+## What a voice bot can do
+
+- Join and leave a voice channel, and know when a moderator moves or removes it.
+- Read the per-channel roster, including mute, deafen, and server-mute flags.
+- Set its own mute and deafen flags.
+- Publish microphone audio from a file, a direct media URL, a streaming-site page, or raw PCM you generate.
+- With `voice_listen` granted, subscribe to and decrypt every member in the channel.
+
+## What a voice bot cannot do
+
+- Publish video or screenshare. Denied at the credential.
+- Detect that nobody can decrypt its audio. The engine surfaces no per-participant encryption failure state, so silence is the only symptom. See [Voice runtime](/voice/runtime).
+- Hear anyone without `voice_listen`, no matter what flags it sets locally.
+- Hear anyone while joined deafened, even holding the room key. The subscribe grant is baked into the credential when the bot joins.
+
+## What the SDK deliberately does not ship
+
+- **No recorder, no file sink, no transcription helper.** Subscribing is in scope. What a bot does with decrypted member audio is your business and your users' consent problem.
+- **No voice health check and no retry-on-decrypt-failure path.** Both would be theatre, because the engine reports nothing to build them on. The defence is to be correct by construction, which is what `VoiceMediaSession.attach()` enforces.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Joining voice" icon="phone" href="/voice/joining">
+    The control plane: join, leave, roster, events. No native dependency.
+  </Card>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    Where the frame key comes from, and the one line of code that produces silence.
+  </Card>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    `VoiceMediaSession`, the player, and the resource helpers.
+  </Card>
+  <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
+    The mandatory engine patch, host requirements, and a symptom-to-cause table.
+  </Card>
+</CardGroup>

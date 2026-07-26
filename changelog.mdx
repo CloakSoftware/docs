@@ -1,0 +1,161 @@
+---
+title: "Changelog and migration"
+description: "What changed in 0.2.0, what it breaks in a 0.1.x bot, and the checklist for moving across."
+---
+
+The current version is `0.2.0`. Check what you have with `npm ls @cloak-software/bot-sdk`.
+
+## 0.2.0
+
+<Warning>
+  Three breaking changes land in this release. A bot written against 0.1.x either fails to compile or misbehaves at runtime until you work through the [migration checklist](#migration-checklist).
+</Warning>
+
+### Breaking: `send()` takes an options object
+
+The fourth argument used to be a positional `groupId`. It is now a `SendOptions` object, and the positional form is gone.
+
+```diff
+- await client.send(serverId, channelId, 'hello', groupId);
++ await client.send(serverId, channelId, 'hello', { groupId });
+```
+
+Every send surface moved together:
+
+| Surface | 0.2.0 signature |
+| --- | --- |
+| `client.send` | `send(serverId, channelId, text, opts?: SendOptions)` |
+| `client.sendDM` | `sendDM(userId, text, opts?: SendOptions)` |
+| `guild(serverId).send` | `send(channelId, text, opts?: SendOptions)` |
+| `msg.reply` | `reply(text, opts?: SendOptions)` |
+| `msg.channel.send` | `send(text, opts?: SendOptions)` |
+| `ctx.reply` (command handler) | `reply(text, opts?: SendOptions)` |
+
+`SendOptions` carries three fields, two of them new:
+
+<ParamField path="groupId" type="string">
+  The channel's group, for the case where the SDK has not already cached it from an inbound frame. This is the value that used to be positional.
+</ParamField>
+
+<ParamField path="mentions" type="MentionTarget[]">
+  Who to notify. New in 0.2.0. Mention targets ride the wire in plaintext, because the server routes notification fanout without decrypting the body. See [Mentions and replies](/guides/mentions-and-replies).
+</ParamField>
+
+<ParamField path="replyTo" type="ReplyTarget">
+  Makes the message a true reply. New in 0.2.0.
+</ParamField>
+
+TypeScript catches the old call sites for you: a `string` is not assignable to `SendOptions`. Run `tsc --noEmit` and fix everything it flags.
+
+<Note>
+  Sending is fire-and-forget in every version. A resolved promise means the frame is on the wire, not that the server accepted it. A server-side denial arrives later on the `sendRejected` event. If your 0.1.x bot never listened for it, add a listener while you are in here.
+</Note>
+
+### Breaking: `msg.reply()` is now a true reply
+
+In 0.1.x, `msg.reply()` was a plain send into the same channel. In 0.2.0 it posts a real reply: the client renders a quote header, and the author gets a "replied to you" notification that pierces their mute settings.
+
+For a bot that is simply answering, that notification is usually wrong. Use `msg.channel.send()`, which is the old behavior under a new name.
+
+```diff
+  client.on('messageCreate', async (msg) => {
+    if (msg.content !== '!ping') return;
+-   await msg.reply('pong');
++   await msg.channel.send('pong');
+  });
+```
+
+Keep `msg.reply()` for the cases where a quote header genuinely helps, such as an answer that arrives long after the question, or a moderation notice aimed at one person. `ctx.reply()` inside a command handler follows the same rule.
+
+### Breaking: `Message.serverId` is `string | null`
+
+A direct message has no server, so `Message.serverId` (and `MessageLocation.serverId`) are now nullable. Inbound DMs arrive on the same `messageCreate` event as channel messages, which means any handler you already have will start seeing them.
+
+Guard before you pass `msg.serverId` to anything server-scoped:
+
+```diff
+  client.on('messageCreate', async (msg) => {
++   if (msg.isDM || !msg.serverId) return;
+    const roles = await client.fetchRoles(msg.serverId);
+    // ...
+  });
+```
+
+Under `strictNullChecks`, TypeScript flags these too. `msg.reply()` and `msg.channel.send()` need no guard: they route themselves at the DM when the message is one. Six actions do reject on a DM message: `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin`. See [Direct messages](/guides/direct-messages).
+
+### Migration checklist
+
+<Steps>
+  <Step title="Run the type checker first">
+    `tsc --noEmit` finds both the positional `groupId` calls and the `serverId` nullability. Start from its output rather than reading every file.
+  </Step>
+  <Step title="Rewrite positional groupId calls">
+    `send(s, c, text, groupId)` becomes `send(s, c, text, { groupId })`. Same for `guild().send()`.
+  </Step>
+  <Step title="Decide reply or channel.send at every call site">
+    Ask whether the author should get a mute-piercing notification. If not, switch to `msg.channel.send()`.
+  </Step>
+  <Step title="Add a DM guard to every messageCreate handler">
+    `if (msg.isDM || !msg.serverId) return;` at the top, unless the handler is meant to answer DMs.
+  </Step>
+  <Step title="Remove any call to fetchMembers()">
+    It cannot work against a current backend. See [Known broken](#known-broken) below.
+  </Step>
+  <Step title="Check your Node version">
+    `^20.19.0 || >=22.12.0`. Node 21.x does not qualify. See [Install and requirements](/install).
+  </Step>
+</Steps>
+
+### Added
+
+- **Direct messages.** `client.sendDM()`, `Message.isDM`, `Message.dmId`, and inbound DMs on the unified `messageCreate`. 1:1 only. See [Direct messages](/guides/direct-messages).
+- **Mentions and replies.** `SendOptions.mentions` and `SendOptions.replyTo`, the `userMention()`, `roleMention()`, `EVERYONE`, `HERE`, `mentionPairs()` and `parseMentions()` helpers, and `Message.mentions` / `Message.mentionsMe`. See [Mentions and replies](/guides/mentions-and-replies).
+- **Slash commands.** A typed command registry declared before `login()`, dispatched through one handler whether the invocation arrives as an encrypted sidecar or as parsed message text. See [Slash commands](/guides/slash-commands).
+- **Rich cards.** `sendCard()`, the encrypted embed lane. Same conversation key and epoch as a normal message, posted under the bot's own identity. See [Rich cards](/guides/rich-cards).
+- **Webhook embeds.** `sendEmbed()`, `client.webhooks`, and `postToWebhook()`. This lane is not end-to-end encrypted, which is why the payload type is named `UnencryptedWebhookPost`. See [Webhook embeds](/guides/webhook-embeds).
+- **Voice control plane.** `joinVoice()` and `leaveVoice()`, the roster and its events, and `client.voiceKeys`. See [Voice overview](/voice/overview).
+- **Voice audio.** The opt-in media layer: `VoiceMediaSession`, `VoicePlayer`, `ffmpegResource()`, and the `ytdlpResource()` / `resolveMediaUrl()` extractor. See [Playing audio](/voice/audio).
+- **Typing and presence.** `sendTyping()`, `setStatus()`, and the `typing` event. See [Typing, presence, and profile](/guides/typing-presence-and-profile).
+- **REST surfaces.** `client.rest`, off by default and gated server-side. See [The REST API](/guides/rest-api).
+- **Environment doctor.** `generateDependencyReport()` and friends, which report what your host actually resolved. See [Troubleshooting](/production/troubleshooting).
+- **HPKE key wrap.** The key-wrap format cut over to RFC 9180 HPKE. Both ends of a key handover must speak it, so a human handing your bot a server key needs a current client build. The SDK names the offending peer in a warning if it receives an older wrap.
+
+### Known broken
+
+<Warning>
+  **`fetchMembers()` and `guild().fetchMembers()` do not work against any current backend.** They await op-30, which a backend change made DM-only: a server-scoped request produces no reply frame at all, not even an error code. The promise does not resolve. It stalls until the SDK's transport timeout and then fails with a generic timeout, never with a permission error, so a `try`/`catch` tells you nothing useful and the wait blocks the client's action queue while it runs. There is no workaround in this SDK. Server rosters moved to opcodes it does not yet speak.
+
+  `fetchRoles()` is unaffected and works normally. The `fetchMembers()` signature will survive the fix, so code written against it stays valid. It just cannot run today.
+</Warning>
+
+## Status
+
+The SDK is validated live end to end against a real Cloak stack. A bot logged in, published its identity, received and unwrapped a server key wrapped by a real desktop client, decrypted an incoming message, and sent an encrypted reply the client displayed. Both crypto directions are wire-compatible with the shipped clients. Auto-reconnect is validated by bouncing the service under a live bot.
+
+The default WebSocket lane is live-verified too, through an integration harness that drives a real `Client` over `ws://` against the whole stack in Docker.
+
+<Note>
+  A green harness run is not evidence that voice media works. The harness publishes no audio, subscribes to none, and decrypts no frame. `@livekit/rtc-node` is deliberately absent from its image, so frame-key interop between the SDK and the shipped clients is not covered by it.
+</Note>
+
+## Not implemented
+
+- **Group DMs.** 1:1 DMs ship in 0.2.0. The group-DM lane uses a different, versioned key model and is not implemented.
+- **DM history, reactions, edits, and pins.** The backend implements them. None of their hooks reach a bot, so the SDK does not pretend to.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    The current send surface, options object and all.
+  </Card>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Why `serverId` went nullable, and what a DM message can and cannot do.
+  </Card>
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    Pills, pings, and when a true reply is the right call.
+  </Card>
+  <Card title="Install and requirements" icon="download" href="/install">
+    The supported Node range and why it is what it is.
+  </Card>
+</CardGroup>

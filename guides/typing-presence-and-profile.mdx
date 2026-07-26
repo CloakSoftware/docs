@@ -1,0 +1,193 @@
+---
+title: "Typing, presence, and profile"
+description: "Show typing dots, set the bot's status, and change its avatar."
+---
+
+Three small surfaces that make a bot feel like a participant rather than a script: the typing indicator, the presence dot, and the avatar.
+
+## Typing
+
+`client.sendTyping(serverId, channelId, isTyping?, groupId?)` broadcasts the "is typing..." indicator into a channel.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.isDM || !msg.serverId) return;
+  if (msg.content !== '!report') return;
+
+  await client.sendTyping(msg.serverId, msg.channelId);
+  const report = await buildSlowReport();
+  await client.sendTyping(msg.serverId, msg.channelId, false);
+  await msg.channel.send(report);
+});
+```
+
+<ParamField path="serverId" type="string" required>
+  The server. `sendTyping` is server-channel only, so guard against a DM message before you pass `msg.serverId`.
+</ParamField>
+
+<ParamField path="channelId" type="string" required>
+  The channel to type in.
+</ParamField>
+
+<ParamField path="isTyping" type="boolean" default="true">
+  `true` starts the indicator, `false` clears it.
+</ParamField>
+
+<ParamField path="groupId" type="string">
+  The channel's group, where you already know it.
+</ParamField>
+
+The SDK **never types on your behalf**. Nothing appears around `send()`, and nothing appears around a command handler. The indicator shows only when you call `sendTyping()`.
+
+### Lifetime
+
+Receiving clients clear the indicator on their own about 10 seconds after the last `true`. For work that runs longer than that, re-send `true` every few seconds.
+
+Sending `false` clears it immediately. That is politeness, not a requirement.
+
+### The throttle
+
+A repeat of the **same** boolean for the same channel inside about one second resolves without touching the wire. Repeats are free, so you can call `sendTyping(s, c)` on a loop without worrying about flooding.
+
+Flipping the boolean always goes out. The window is an SDK-side courtesy, not a wire constant.
+
+### It moves the selection cursor
+
+Op 24 names no target. The server relays the indicator to whoever is watching the **sender's** currently selected channel. `sendTyping()` therefore runs the same select-then-send sequence a `send()` does, on the same serialized chain, and moves the selection cursor exactly as a send to that channel would.
+
+No permission is checked server-side. A bot that can reach the channel can type in it.
+
+<Note>
+  `sendTyping()` is fire-and-forget. A resolved promise means the frame is on the wire, not that the indicator is showing anywhere.
+</Note>
+
+## The typing event
+
+```ts
+client.on('typing', (e) => {
+  if (e.userId === client.user?.id) return; // your own echo
+  console.log(`${e.userId} is ${e.isTyping ? 'typing' : 'done'}`);
+});
+```
+
+<ResponseField name="userId" type="string">
+  Who started or stopped typing.
+</ResponseField>
+
+<ResponseField name="isTyping" type="boolean">
+  `true` for started, `false` for stopped.
+</ResponseField>
+
+<ResponseField name="serverId" type="string | null">
+  Always `null` today. See the warning below.
+</ResponseField>
+
+<ResponseField name="channelId" type="string | null">
+  Always `null` today. See the warning below.
+</ResponseField>
+
+Two things to design around.
+
+<Warning>
+  **`serverId` and `channelId` are always `null`.** This is a wire fact, not a decode gap. The relay frame carries the user and the boolean only, and the source channel travels in the server's internal routing envelope, which never reaches the client. **A bot cannot currently tell which channel a typing event came from.**
+
+  Do not substitute your own selection cursor. It points wherever the bot last sent, which has nothing to do with who is typing. The fields are typed nullable so that a future backend appending routing is an additive change.
+</Warning>
+
+Your own `sendTyping()` echoes back to you. The relay includes the sender, so filter on `client.user?.id` if that matters.
+
+The event arrives on the firehose, for every channel the bot can see, exactly like `messageCreate`. It is raw and un-debounced: no aggregation, no expiry timer. A bot that wants "who is typing right now" keeps its own map and drops an entry about 10 seconds after that user's last `true`, which is what the shipped clients do.
+
+## Presence
+
+`client.setStatus(status)` writes the bot's presence.
+
+```ts
+client.on('ready', () => {
+  client.setStatus('online');
+});
+```
+
+The five values, and what each one actually does:
+
+| Value | Shown as | Notes |
+| --- | --- | --- |
+| `invisible` | offline | Indistinguishable from really being offline. |
+| `online` | online | The only value that defers to liveness. See below. |
+| `away` | away | |
+| `busy` | busy | Notifications are still delivered. |
+| `dnd` | do not disturb | Also suppresses push notifications on every device. |
+
+The accepted values are the keys of `USER_STATUS_CODES`, and the type is `BotStatus`. Both are exported.
+
+```ts
+import { USER_STATUS_CODES, type BotStatus } from '@cloak-software/bot-sdk';
+```
+
+### It persists
+
+`setStatus` writes the account-level status to the server's database, so it survives reconnects, restarts, and redeploys.
+
+<Tip>
+  Set it once on `ready`. Do not put it on a timer, and do not re-send it after a reconnect.
+</Tip>
+
+### online is not a promise of a green dot
+
+Setting `online` means "defer to liveness". The displayed status is computed from the session, and a bot with no live session reads as offline no matter what its stored status says. The other four values pin the display outright.
+
+### Failures
+
+`setStatus` is awaited, unlike `sendTyping()`. It rejects with a `CloakActionError` if the server refuses. Passing a value that is not one of the five rejects with a plain `Error` before anything reaches the wire, which matters for bots written in plain JavaScript where the type does not catch it.
+
+```ts
+try {
+  await client.setStatus('dnd');
+} catch (err) {
+  console.error('could not set status:', (err as Error).message);
+}
+```
+
+## Avatar
+
+`client.setAvatar(iconUrl, miniIconUrl?)` sets the bot's avatar, the same way `setAvatar` works in discord.js. The change is pushed to every server the bot is in.
+
+```ts
+client.on('ready', async () => {
+  await client.setAvatar('https://example.com/bot-avatar.png');
+});
+```
+
+<ParamField path="iconUrl" type="string | null" required>
+  The full-size avatar image URL, or `null` to clear.
+</ParamField>
+
+<ParamField path="miniIconUrl" type="string | null" default="iconUrl">
+  The small avatar used in compact surfaces. Defaults to `iconUrl` when you omit it.
+</ParamField>
+
+Points worth knowing:
+
+- **Any already-hosted image URL works.** This is unlike `sendCard()` media, which must be Cloak-hosted. `setAvatar` takes whatever URL you give it, and the SDK does not upload anything for you.
+- **The URL is capped at 512 characters server-side.** Long signed URLs from an object store can exceed that.
+- **`null` clears both slots.** Passing `null` as `iconUrl` clears the mini icon too, whatever the second argument says.
+- **The call is fire-and-forget.** It is serialized through the same action chain as every other write, but a resolved promise means the frame is on the wire, not that the avatar has changed.
+
+Set it once when you need to change it, not on every `ready`. It is stored server-side, so it persists across restarts.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    send(), SendOptions, and the send chain typing shares.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    Every event a client emits, including typing.
+  </Card>
+  <Card title="Connection lifecycle" icon="plug" href="/concepts/connection-lifecycle">
+    Where ready fits, and what survives a reconnect.
+  </Card>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Why msg.serverId needs a guard before sendTyping.
+  </Card>
+</CardGroup>

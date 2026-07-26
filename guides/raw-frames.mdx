@@ -1,0 +1,182 @@
+---
+title: "Raw frames"
+description: "client.raw reaches opcodes the SDK does not map, and the raw event exposes every inbound frame."
+---
+
+Cloak's backend exposes more opcodes than this SDK maps. `client.raw` lets you reach them without vendoring the SDK, and the `raw` event lets you read every inbound frame, including the ones the SDK consumes itself.
+
+Reach for this when a newer backend grows an opcode before a release maps it, or when your bot needs a subsystem the SDK does not cover (calendar channels are the usual example).
+
+```ts
+// op-698: list the calendar channels this bot can view in a server
+const channels = await client.raw.request([698], 698, { serverId });
+
+// op-694: create a calendar event, with an end-to-end encrypted description
+await client.raw.send(
+  [694, channelId, title, client.encryptFor(serverId, description), startsAt],
+  { serverId, channelId },
+);
+
+// read the firehose
+client.on('raw', (frame) => console.log(frame[0], frame));
+```
+
+## The surface
+
+```ts
+client.raw.send(frame: unknown[], opts?: RawTarget): Promise<void>
+
+client.raw.request(
+  frame: unknown[],
+  replyOpcode: number,
+  opts?: RawTarget & {
+    timeoutMs?: number;
+    match?: (payload: unknown) => boolean;
+    allowReserved?: boolean;
+  },
+): Promise<unknown>
+
+interface RawTarget {
+  serverId?: string;
+  channelId?: string;
+  groupId?: string;
+}
+```
+
+`RawApi` and `RawTarget` are exported types. The frame parameter is typed `Frame` in the source, which is an alias for `unknown[]`.
+
+<Warning>
+  `Frame` is **not exported** from the package. Do not write `import type { Frame } from '@cloak-software/bot-sdk'`, it will not resolve. Write `unknown[]` in your own signatures, or let inference do it.
+</Warning>
+
+## Aiming a frame
+
+Cloak's protocol has a server-side selection cursor: many opcodes act on "the currently selected server and channel" rather than taking ids. `RawTarget` moves that cursor the same way every mapped method does.
+
+| `opts` | Effect |
+| --- | --- |
+| `{ serverId }` | selects the server |
+| `{ serverId, channelId }` | selects both, with `groupId` when the channel's group is not already cached |
+| `{}` or omitted | sends on whatever the cursor already points at |
+
+Everything runs on the same serialized action chain as `send()` and every mapped method, so a raw frame can never interleave with another action's select and execute pair.
+
+<Warning>
+  A long `timeoutMs` blocks that shared chain for its whole duration. Every other action your bot tries during the wait queues behind it.
+</Warning>
+
+## The unwrapping rule
+
+`request()` resolves the payload the way the protocol layer produces it: the opcode is stripped, and when exactly one element remains it is unwrapped to that scalar.
+
+| Frame on the wire | What `request()` resolves with |
+| --- | --- |
+| `[694, 1]` | `1` |
+| `[694, 1, "id"]` | `[1, "id"]` |
+| `[694, -3]` | `-3` |
+
+This is the single most surprising thing about the surface. A handler that always returns an array will still hand you a bare number on the one-element case, so normalize before you index:
+
+```ts
+const payload = await client.raw.request([698], 698, { serverId });
+const rows: unknown[] = Array.isArray(payload) ? payload : [payload];
+```
+
+## Reserved reply opcodes
+
+Reply correlation is positional by opcode. The protocol has no request ids, so a waiter on an opcode the SDK correlates itself can claim, or lose, the SDK's own reply.
+
+`raw.request` refuses those opcodes before anything touches the cursor or the wire:
+
+```
+[cloak-sdk] opcode 45 is correlated by the SDK itself; awaiting it from
+raw.request can claim (or lose) the SDK's own reply. Use the mapped method
+for it, or pass { allowReserved: true } to take that risk deliberately.
+```
+
+The refused set is exported as `RESERVED_REPLY_OPCODES`, a `ReadonlySet<number>`. Check it before you write a request:
+
+```ts
+import { RESERVED_REPLY_OPCODES } from '@cloak-software/bot-sdk';
+
+function canAwait(replyOpcode: number): boolean {
+  return !RESERVED_REPLY_OPCODES.has(replyOpcode);
+}
+
+canAwait(698); // true, the SDK maps nothing on 698
+canAwait(45);  // false, reactions are correlated by the SDK
+```
+
+`raw.send` is unrestricted, because a send registers no waiter.
+
+Passing `allowReserved: true` is a deliberate risk transfer, not a workaround. You own the correlation from that point on.
+
+## The raw event
+
+```ts
+client.on('raw', (frame) => {
+  if (frame[0] === 622) console.log('key epoch bumped', frame);
+});
+```
+
+Every inbound frame, verbatim, including the frames the SDK consumes itself. It is a firehose and is emitted only when something is listening, so an idle listener costs nothing.
+
+Use it to discover the shape of an opcode you are about to write against, and to read server pushes that have no mapped event.
+
+## Carrying encrypted content
+
+Message bodies on Cloak are end-to-end encrypted, so a raw frame that carries user-visible text has to encrypt it the same way `send()` does. Two helpers wrap the exact same lanes, with no separate crypto:
+
+<ParamField path="encryptFor(serverId, text)" type="string">
+  The same wire form `send()` produces, tagged with the server's current key epoch. Throws when the bot holds no key for that server.
+</ParamField>
+
+<ParamField path="decryptFrom(serverId, wire)" type="string">
+  Decrypts with the key for the ciphertext's own epoch. Returns `''`, never raw ciphertext, when that key is missing or stale.
+</ParamField>
+
+```ts
+// Your backend's opcode, not one the SDK maps. You own this constant.
+const CALENDAR_EVENT_HOOK = 695;
+
+client.on('raw', (frame) => {
+  if (frame[0] !== CALENDAR_EVENT_HOOK) return;
+  const serverId = String(frame[1]);
+  const text = client.decryptFrom(serverId, String(frame[3]));
+  if (text) console.log('event description:', text);
+});
+```
+
+<Warning>
+  `decryptFrom` deliberately does not trigger the key self-heal that the live message path owns. An empty string means "no usable key right now", not "empty message".
+</Warning>
+
+## You own the frame
+
+`client.raw` is not covered by the SDK's compatibility promises. The frame shape, the opcode constant, and any encryption of the payload are yours. Nothing is validated on the way out.
+
+That is the trade. A mapped method survives a backend change because the SDK updates with it. A raw frame is your contract with a specific backend version, and it breaks silently when that version moves.
+
+Practical hygiene:
+
+- Keep opcode numbers in one constant block in your bot, not scattered through handlers.
+- Prefer `Op` from the SDK for any opcode that is already named there, so you inherit the SDK's own audit of it.
+- Treat every payload as hostile input. Validate arity and types before you index.
+- If the SDK later maps the opcode, move to the mapped method.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Protocol constants" icon="table-list" href="/api-reference/protocol">
+    `Op`, the exported column maps, and the reserved set.
+  </Card>
+  <Card title="The REST lane" icon="server" href="/guides/rest-api">
+    The other escape hatch, over HTTP.
+  </Card>
+  <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
+    Why the cursor exists and what the firehose sends you.
+  </Card>
+  <Card title="Encryption lanes" icon="lock" href="/concepts/encryption-lanes">
+    What is encrypted, and what rides in plaintext.
+  </Card>
+</CardGroup>

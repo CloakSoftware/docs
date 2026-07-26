@@ -1,41 +1,66 @@
 ---
 title: "Handling errors"
-description: "Catch CloakActionError and report exactly what an action was denied for."
+description: "Every error class the SDK raises, which surface raises which, and the pattern for catching each one."
 ---
 
-Every action your bot awaits can be denied by the server. When that happens, the promise rejects with a `CloakActionError`, a typed error that tells you what went wrong and, when the denial maps to a named permission, which permission the bot was missing. This guide shows you how to catch it and report exactly what an action was denied for.
+Failures reach your bot through three different doors: a rejected promise, an event, or a local throw before anything hits the wire. Which door depends on what failed. This guide covers all of them.
 
-## What CloakActionError is
+## Which failure gets which class
 
-`CloakActionError` is the typed error every awaited action rejects with when the server denies it. Import it from the SDK:
+| What failed | Class | Where it reaches you |
+| --- | --- | --- |
+| The server denied an action you awaited | `CloakActionError` | the rejected promise |
+| The server denied a `send()` | no error object, the promise already resolved | the `sendRejected` event |
+| The SDK's own plumbing failed | `CloakClientError` | the `error` event |
+| The host is wrong (Node version, missing native, missing executable) | `CloakEnvironmentError` | a rejected `login()` on the first connect, or the audio calls |
+| A REST request failed over HTTP | `CloakRestError` | the rejected promise |
+| A card was invalid | `CloakEmbedError` | a rejected `sendCard()`, raised locally |
+| A webhook POST failed | `CloakWebhookError` | a rejected `sendEmbed()` or `webhooks.post()` |
+| A message action was called on a DM, or without a `createdAt` | plain `Error` | the rejected promise |
+
+All six classes are exported from the package root:
 
 ```ts
-import { CloakActionError } from '@cloak-software/bot-sdk';
+import {
+  CloakActionError,
+  CloakClientError,
+  CloakEnvironmentError,
+  CloakRestError,
+  CloakEmbedError,
+  CloakWebhookError,
+  describeActionError,
+} from '@cloak-software/bot-sdk';
 ```
 
-It carries four fields:
+## CloakActionError
+
+`CloakActionError` is what an awaited action rejects with when the server denies it. It carries four fields.
 
 <ParamField path="message" type="string">
-  A human-readable explanation of the denial. This is always present and is the field to show in logs or relay to a user.
+  A human-readable explanation of the denial. Always present, and the field to log or relay.
 </ParamField>
 
 <ParamField path="permission" type="PermissionName | undefined">
-  The named permission the bot was missing, when the denial maps to one. Undefined for denials that have no named permission.
+  The named permission the bot was missing, when the denial maps to one of the [31 permissions](/api-reference/permissions). Undefined otherwise.
 </ParamField>
 
 <ParamField path="opcode" type="number">
-  A raw numeric diagnostic. For logging only.
+  A raw numeric diagnostic naming the action. For logging only.
 </ParamField>
 
 <ParamField path="code" type="number">
-  A raw numeric diagnostic. For logging only.
+  A raw numeric diagnostic for the specific failure. For logging only.
 </ParamField>
 
-The stable surface for bots is `.message` and `.permission`. Treat `.opcode` and `.code` as raw diagnostics for logging: do not branch business logic on their exact values.
+The stable surface for a bot is `.message` and `.permission`.
 
-## The canonical pattern
+<Warning>
+  Never branch business logic on `.code`. Three success conventions coexist on the wire: the messaging handlers reply with negative codes, the moderation handlers use positive codes 2 through 9, and the webhook, DM and REST-mint handlers use `0` as success. A number that means "denied" for one action means "fine" for another.
+</Warning>
 
-Wrap the awaited action in a `try/catch`, check for `CloakActionError` with `instanceof`, and re-throw anything else so you never swallow an unrelated bug.
+### The canonical pattern
+
+Catch, check with `instanceof`, and re-throw anything else so you never swallow an unrelated bug.
 
 ```ts
 import { CloakActionError } from '@cloak-software/bot-sdk';
@@ -44,70 +69,230 @@ try {
   await msg.delete();
 } catch (e) {
   if (e instanceof CloakActionError) {
-    const missing = e.permission ? ' (missing ' + e.permission + ')' : '';
-    console.log('denied: ' + e.message + missing);
+    const missing = e.permission ? ` (missing ${e.permission})` : '';
+    console.log(`denied: ${e.message}${missing}`);
   } else {
     throw e;
   }
 }
 ```
 
-The `missing` string is only appended when `.permission` is set. That keeps the message useful for permission-style denials while still reading cleanly for denials that have no named permission.
+The `missing` suffix is appended only when `.permission` is set, which keeps the line readable for denials that have no named permission.
 
-## Why .permission can be undefined
+<Warning>
+  That `else { throw e; }` branch is real. `react`, `unreact`, `edit`, `delete`, `pin` and `unpin` also reject with a **plain `Error`**, not a `CloakActionError`, in two cases: the message is a direct message (none of those six have a working DM path), and the message has no `createdAt`. Re-throwing from a hot `messageCreate` handler crashes the handler unless you have an `error` listener. Guard DMs first: `if (msg.isDM || !msg.serverId) return;`
+</Warning>
 
-`.permission` is set only when the denial maps to one of the named permissions. Deleting another member's message without `message_manage`, for example, sets `.permission` to `'message_manage'`.
+### Why .permission can be undefined
 
-Some denials have no named permission. A pin denial uses a channel-level permission that has no name, so `.permission` comes back undefined even though the failure is permission-style. Always fall back to `.message`, which is always present.
+`.permission` is set only when the denial maps to a named permission. Deleting another member's message without `message_manage` sets it to `'message_manage'`.
+
+Some denials are permission-style but have no name. A pin denial is gated on a channel-level pin permission that does not exist in the `PermissionName` vocabulary, so `.permission` comes back undefined even though the failure is a permission failure. Always fall back to `.message`.
 
 <Note>
-  `.message` is the field you can always rely on. Read `.permission` when it is set, but never assume it is set.
+  `.message` is the field you can always rely on. Read `.permission` when it is set, and never assume it is set.
 </Note>
 
-## Which calls reject with CloakActionError
+### Which calls reject with it
 
-Any action the server can deny rejects with `CloakActionError` when it does. That covers:
+Any action the server can deny rejects with `CloakActionError` when it does:
 
-- Message actions: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
-- Moderation: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
-- Channel and group management: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
-- Reads: `fetchMembers`, `fetchRoles`, and `fetchMessages` when read history is denied.
+- **Message actions**: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
+- **Moderation**: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
+- **Channels and groups**: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
+- **Reads**: `fetchMessages` when read history is denied, `fetchRoles`, `fetchEmojis`.
+- **Direct messages**: `sendDM`, from the create step when the server refuses the DM.
+- **Presence and voice**: `setStatus`, `joinVoice`, `leaveVoice`.
+- **Webhook management**: `webhooks.list`, `webhooks.create`, `webhooks.edit`, `webhooks.regenerate`, `webhooks.delete`.
+- **The REST lane**: `client.rest.*`, when the credential mint itself is refused (opcode 638). The HTTP legs raise `CloakRestError` instead.
 
-Each of these returns a promise, so wrap the ones you call in the pattern above.
+<Note>
+  `setVoiceSelfState()` and `refreshVoiceRoster()` reject with a plain `Error`, not a `CloakActionError`: the first when the bot is not in voice, the second when the server select behind it fails. `sendCommand()` rides the same fire-and-forget send lane as `send()`, so it throws locally or not at all.
+</Note>
 
-## Sending is different
+<Warning>
+  `fetchMembers()` is broken against every current backend. It awaits a frame the backend no longer sends, so it neither resolves nor rejects. A `try/catch` cannot save you and the `await` hangs until the transport gives up. Use `fetchRoles()`, which works, and treat `fetchMembers()` as unavailable until the SDK rebuilds it. See [Members and roles](/guides/members-and-roles).
+</Warning>
 
-`client.send()` and `msg.reply()` are fire-and-forget for delivery. They do **not** reject with `CloakActionError`. The only local throw from `send()` is a plain `Error`, raised when the bot has no conversation key yet.
+## Sending is fire-and-forget
+
+`send()`, `sendDM()`, `msg.reply()` and `msg.channel.send()` do not reject when the server refuses delivery. Opcode 1 has no success acknowledgement, so the promise resolves once the frame goes out. A denial can only arrive later, as an event.
 
 ```ts
-client.on('messageCreate', (msg) => {
-  if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() !== '!ping') return;
-  msg.reply('pong').catch((e) => console.error('reply failed', e));
+client.on('sendRejected', (r) => {
+  console.warn(`send denied (${r.code}): ${r.message}`);
+  if (r.permission) console.warn(`missing ${r.permission}`);
 });
 ```
 
+The payload is `{ code, message, permission?, serverId, channelId, frame }`.
+
 <Warning>
-  Do not wrap `send()` or `reply()` in a `CloakActionError` check expecting a delivery denial. There is none. Catch the plain `Error` from `send()` if you want to handle the no-key case, and treat everything else as fire-and-forget.
+  `serverId` and `channelId` are attributed **best-effort** from the most recent send inside a 30 second window, and are `null` otherwise. The deny frame carries no routing of its own. Treat them as a hint, never as a fact.
 </Warning>
 
-## Describing an error from its diagnostics
+Every op-1 deny code now reaches the wire, including the rate limit, the timeout, the oversize sidecar and the missing attach-files denial. Two paths still answer with nothing at all, both on the DM side, so silence is not proof of delivery.
 
-The SDK also exports a helper, `describeActionError(opcode, code)`, that returns `{ message, permission? }`. Reach for it only when you have a raw `opcode` and `code` in hand (for example from a log line) and want the same human-readable description without a live error object. For normal handling, the `CloakActionError` you catch already carries `.message` and `.permission`, so you rarely need the helper.
+<Note>
+  `sendRejected` does not also fire `error`. A backend denial is an expected outcome, not a plumbing failure. Forward it yourself if you want one funnel.
+</Note>
+
+### The two local throws from send()
+
+`send()` has exactly two ways to throw synchronously, both before anything reaches the wire, and both a plain `Error`:
+
+1. The bot holds no conversation key for that server yet.
+2. You passed `replyTo` with a target that has no `createdAt`. The server re-reads the original row keyed on its exact send time, so the reply cannot resolve without it.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.isDM || !msg.serverId) return;
+  if (msg.authorId === client.user?.id) return;
+  if (msg.content.trim() !== '!ping') return;
+  // A plain response, not a true reply: msg.reply() would fire a
+  // mute-piercing "replied to you" notification.
+  msg.channel.send('pong').catch((e) => console.error('send failed', e));
+});
+```
+
+## CloakClientError and the error event
+
+`CloakClientError` is the funnel for failures inside the SDK's own plumbing: one of your handlers threw, a key pull died, an inbound frame could not be dispatched. It arrives on the `error` event.
+
+```ts
+import { CloakClientError } from '@cloak-software/bot-sdk';
+
+client.on('error', (e: CloakClientError) => {
+  console.error(e.source, e.context, e.message);
+  console.error(e.cause); // the original failure, unwrapped
+});
+```
+
+| `.source` | What failed |
+| --- | --- |
+| `listener` | One of your handlers threw or returned a rejecting promise. `.context` is the event name. |
+| `frame` | An inbound frame could not be dispatched. |
+| `keys` | A key fetch or an unwrap failed. |
+| `transport` | Reserved for the wire path. |
+| `reconnect` | Reserved for the reconnect path. |
+
+Three things worth knowing:
+
+- **An `async` handler that throws no longer disappears.** The SDK wraps every listener at registration, so a rejected promise surfaces here instead of vanishing. Dispatch continues either way, and a throwing handler never stops the next frame.
+- **Registering the listener changes no control flow.** It only makes failures visible. With no `error` listener the behavior is what it was before the event existed: silent, plus a debug warning.
+- **Because listeners are wrapped, `client.listeners(event)` returns the wrappers, not your original functions.** `off()`, `removeListener()` and `removeAllListeners()` all work normally. Pass the same function you registered.
+
+Backend denials never come through here. An awaited action rejects with `CloakActionError`, and a refused send fires `sendRejected`.
+
+## CloakEnvironmentError
+
+`CloakEnvironmentError` says the host is wrong, not the bot. An unsupported Node version, an optional native the image cannot load, an executable the audio path expected on `PATH`. Nothing about your code, token or permissions is at fault, which is why it carries a `remedy`: one actionable paragraph about the machine.
+
+```ts
+import { CloakEnvironmentError, generateDependencyReport } from '@cloak-software/bot-sdk';
+
+try {
+  await client.login();
+} catch (e) {
+  if (e instanceof CloakEnvironmentError) {
+    console.error(e.message);
+    console.error(e.remedy);
+    console.error(generateDependencyReport());
+  }
+  throw e;
+}
+```
+
+<ParamField path="remedy" type="string">
+  One paragraph naming what to change on the host. The underlying failure also rides as `cause`, and its text is quoted into `message`, because the two travel through different logs.
+</ParamField>
+
+`login()` raises one on the **first** connect only, and only for a failure it recognizes. The most common is an unsupported Node runtime: the SDK requires `^20.19.0 || >=22.12.0`, and 21.x never qualifies. Node 18 imports fine, sometimes even logs in, then dies at the first key generation with `crypto.getRandomValues must be defined`.
+
+Reconnects keep their normal backoff and log the remedy under `debug: true`. The audio path raises the same class from somewhere else entirely, for a missing `ffmpeg` or `yt-dlp`, and those surface from `player.play()` and `ytdlpResource()`.
+
+## CloakRestError
+
+`CloakRestError` covers the HTTP legs of [the REST lane](/guides/rest-api).
+
+<ParamField path="status" type="number">
+  The HTTP status, or `0` when the request never left the host (DNS, TLS, timeout, no `fetch`).
+</ParamField>
+
+<ParamField path="path" type="string">
+  The request path with the query string stripped. Ids ride query strings, and an error object is a thing people paste into issues.
+</ParamField>
+
+<ParamField path="errorCode" type="string | undefined">
+  The server's machine-readable `error_code` when the body carried one, for example `file_too_large` or `storage_exceeded`.
+</ParamField>
+
+<Note>
+  No credential material is ever quoted into this error. Neither the verification header nor the one-time mint secret appears in `message`, in a field, or in `toString()`.
+</Note>
+
+It is deliberately not a `CloakActionError`. A refused credential mint is an opcode failure and still rejects as `CloakActionError` with opcode 638. Everything after that is HTTP.
+
+## CloakEmbedError and CloakWebhookError
+
+The two embed lanes have their own classes.
+
+`sendCard()` validates locally and throws `CloakEmbedError` before anything reaches the wire. The server never reads the encrypted embed payload and the renderer strips a bad card silently, so this class is the only place you can be told.
+
+```ts
+import { CloakEmbedError } from '@cloak-software/bot-sdk';
+
+try {
+  await client.sendCard(serverId, channelId, card);
+} catch (e) {
+  if (e instanceof CloakEmbedError) {
+    console.error(`card refused (${e.reason}) at ${e.field ?? 'the whole payload'}`);
+  } else {
+    throw e;
+  }
+}
+```
+
+`.reason` is one of `'shape'`, `'content'`, `'cap'`, `'media-host'`, `'empty'` or `'wire-cap'`. `.field` names the exact offending path, for example `'embed.image.url'`, and is absent when the whole payload is at fault.
+
+`sendEmbed()` and `webhooks.post()` reject with `CloakWebhookError`, which carries `.status` (or `0` for a transport failure), `.detail` (the ingress' own body text) and `.webhookId` when known. The delivery url never appears in the error, because it embeds the token secret.
+
+<Warning>
+  The webhook lane is not end-to-end encrypted. Anything you post through `sendEmbed()` or `webhooks.post()` is stored server-side as plaintext. See [Webhook embeds](/guides/webhook-embeds).
+</Warning>
+
+## Failures that do not throw at all
+
+Two login refusals stop the reconnect loop instead of rejecting. Both emit `disconnect`:
+
+- `-2`, the token was revoked or regenerated.
+- `-12`, this SDK is below the backend's minimum wire version. Redeploy on a newer `@cloak-software/bot-sdk`.
+
+`-8` is a transient backend error and keeps retrying with the normal backoff. See [Connection lifecycle](/concepts/connection-lifecycle).
+
+## describeActionError
+
+```ts
+describeActionError(opcode: number, code: number): { message: string; permission?: PermissionName }
+```
+
+Maps a raw `(opcode, code)` pair to the same message and optional permission a `CloakActionError` carries. Reach for it when you have raw numbers in hand, for example from a log line, and want the human-readable description without a live error object. Unknown codes get a generic message rather than throwing.
+
+For normal handling you rarely need it: the error you caught already carries both fields.
 
 ## Next
 
 <CardGroup cols={2}>
-  <Card title="CloakActionError reference" icon="triangle-exclamation" href="/api-reference/errors">
-    Every field on the typed error.
+  <Card title="Errors reference" icon="triangle-exclamation" href="/api-reference/errors">
+    Every field on every error class.
   </Card>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     What decides whether an action is allowed.
   </Card>
-  <Card title="Moderation" icon="gavel" href="/guides/moderation">
-    Actions that commonly reject when a grant is missing.
+  <Card title="Events" icon="tower-broadcast" href="/api-reference/events">
+    The full payload of `error` and `sendRejected`.
   </Card>
-  <Card title="Message history" icon="clock-rotate-left" href="/guides/message-history">
-    Where fetchMessages can be denied.
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    Why delivery has no acknowledgement.
   </Card>
 </CardGroup>

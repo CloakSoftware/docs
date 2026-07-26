@@ -9,7 +9,7 @@
 ## Audience and scope
 
 - Write for a **developer building a bot**. Assume they can write TypeScript and may have built a Discord bot before.
-- Document only what a bot author needs. Do **not** document SDK internals: transport and QUIC framing, crypto wire formats, libsignal revision pinning, the `src/` file layout, the test suite, or contributor workflows.
+- Document only what a bot author needs. Do **not** document SDK internals: transport and QUIC framing, crypto wire formats, HPKE ciphersuite details, the `src/` file layout, the test suite, or contributor workflows.
 - The encryption model is in scope at a conceptual level, because it shapes how bots behave (keystore, first-join key handoff, view-gated delivery).
 
 ## Terminology

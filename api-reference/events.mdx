@@ -1,6 +1,6 @@
 ---
 title: "Events"
-description: "Every event a Client emits, when it fires, and what it carries."
+description: "All 32 events a Client emits, when they fire, and what they carry."
 ---
 
 The `Client` is an event emitter. You subscribe with `client.on(event, listener)`. The event map is fully typed, so your listener's arguments are inferred.
@@ -12,7 +12,15 @@ client.on('messageCreate', (msg) => {
 ```
 
 <Warning>
-  The message, reaction, pin, and channel or group lifecycle events fire for the bot's **own** actions too. When you delete a message, your own `messageDelete` handler runs. Filter by author or actor id where that matters, exactly as you do for `messageCreate`.
+  Most events fire for your bot's **own** actions too. When your bot deletes a message, your own `messageDelete` handler runs. The same is true of `messageCreate`, `reactionUpdate`, `pinUpdate`, the channel and group lifecycle events, `typing` (your own `sendTyping()` echoes back), and `voiceJoin` / `voiceLeave`.
+
+  Filter with the actor id:
+
+  ```ts
+  client.on('typing', (e) => {
+    if (e.userId === client.user?.id) return; // our own indicator
+  });
+  ```
 </Warning>
 
 ## Overview
@@ -20,12 +28,15 @@ client.on('messageCreate', (msg) => {
 | Event | Payload | Fires when |
 | --- | --- | --- |
 | `ready` | none | Login has completed and the bot is online. |
-| `messageCreate` | [`Message`](/api-reference/types#message) | A user message arrives from any visible channel. |
+| `error` | [`CloakClientError`](/api-reference/errors#cloakclienterror) | The SDK caught a failure that would otherwise be silent. |
+| `messageCreate` | [`Message`](/api-reference/types#message) | A message arrives, from a channel **or a DM**. |
 | `systemMessage` | [`SystemMessageEvent`](/api-reference/types#systemmessageevent) | A system event happens, such as a member joining. |
 | `messageUpdate` | `{ messageId, content, serverId, channelId }` | A message was edited. |
 | `messageDelete` | `{ messageId, serverId, channelId }` | A message was deleted. |
 | `reactionUpdate` | `{ messageId, reactionId, count, userId, serverId, channelId }` | A reaction was added or removed. |
 | `pinUpdate` | `{ messageId, pinned, serverId, channelId }` | A message was pinned or unpinned. |
+| `typing` | `{ userId, isTyping, serverId, channelId }` | Someone started or stopped typing. |
+| `sendRejected` | `{ code, message, permission?, serverId, channelId, frame }` | The server denied a `send()`. |
 | `channelCreate` | `{ channelId, name, groupId, type, serverId }` | A channel was created. |
 | `channelUpdate` | `{ channelId, name, serverId }` | A channel was renamed. |
 | `channelDelete` | `{ channelId, serverId }` | A channel was deleted. |
@@ -37,9 +48,17 @@ client.on('messageCreate', (msg) => {
 | `guildCreate` | [`Guild`](/api-reference/types#guild) | The bot is added to a server, or is already in one at login. |
 | `guildDelete` | [`Guild`](/api-reference/types#guild) | The bot is removed from a server. |
 | `permissionsUpdate` | `{ serverId } & PermissionSet` | A server resolves or changes the bot's grant. |
+| `commandError` | `{ name, error, message, reason }` | A slash command could not be run. |
+| `voiceKeyUpdate` | `{ serverId, version, scope }` | The bot's voice key was provisioned again. |
+| `voiceJoin` | [`VoiceParticipant`](/api-reference/types#voiceparticipant) | Someone joined a voice channel. |
+| `voiceLeave` | `{ channelId, userId }` | Someone left a voice channel. |
+| `voiceStateUpdate` | `{ channelId, userId, state, value }` | A member's mute, deafen, webcam, or stream flag changed. |
+| `voiceConnectionState` | `{ channelId, userId, reconnecting }` | A member's voice session entered or left the reconnect grace window. |
+| `voiceDisconnect` | `{ channelId, reason, toChannelId? }` | A moderator moved or disconnected **this bot**. |
 | `disconnect` | `unknown` | The connection drops. |
 | `reconnecting` | `{ attempt, delayMs }` | A reconnect attempt is scheduled. |
 | `reconnected` | none | A reconnect succeeds. |
+| `raw` | `unknown[]` | Any frame arrives, verbatim. |
 
 <Note>
   On an older Cloak server, the `serverId` and `channelId` on the message, reaction, pin, and lifecycle events can fall back to the bot's currently selected server or channel. An up-to-date server carries them on every event.
@@ -49,14 +68,32 @@ client.on('messageCreate', (msg) => {
 
 ### messageCreate
 
-Fires for every user message in a channel your bot can view. Because delivery is a [firehose](/concepts/message-delivery), this covers all visible channels across all servers.
+Fires for every message your bot can see. Because delivery is a [firehose](/concepts/message-delivery), that covers all visible channels across all servers.
+
+**It also fires for direct messages.** A DM arrives on this same event with `isDM: true` and a **null** `serverId`, and its `channelId` holds the dm id.
 
 ```ts
-client.on('messageCreate', (msg) => {
+client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() === '!ping') msg.reply('pong');
+
+  if (msg.isDM || !msg.serverId) {
+    await msg.channel.send('thanks, I got that');
+    return;
+  }
+
+  // server-scoped work is safe from here on
+  if (!client.can('message_send', msg.serverId)) return;
+  if (msg.content.trim() === '!ping') await msg.channel.send('pong');
 });
 ```
+
+<Warning>
+  Guard before anything server-scoped. Passing a null `msg.serverId` into `client.can()`, `client.guild()`, or `client.send()` is the single most common bug in Cloak bots. See [Direct messages](/guides/direct-messages).
+</Warning>
+
+<Note>
+  `msg.reply()` is a **true reply**. It renders a quote header and fires a "replied to you" notification that pierces mutes. For a plain answer, like a ping bot, use `msg.channel.send()`. See [Mentions and replies](/guides/mentions-and-replies).
+</Note>
 
 ### systemMessage
 
@@ -82,6 +119,25 @@ client.on('messageDelete', ({ messageId, channelId }) => {
 });
 ```
 
+### sendRejected
+
+Fires when the server denies a `send()`. This is the only way a denied send becomes visible: `send()` is fire-and-forget, so its promise already resolved when the frame went out.
+
+```ts
+client.on('sendRejected', (r) => {
+  console.warn(`send denied (${r.code}): ${r.message}`);
+  if (r.permission) console.warn(`missing ${r.permission}`);
+});
+```
+
+<Warning>
+  The deny frame carries no routing, so `serverId` and `channelId` are attributed best-effort from the most recent send inside a 30 second window and are `null` otherwise. Treat them as a hint, not a fact.
+
+  This is also **not** an acknowledgement channel. Silence does not mean delivered.
+</Warning>
+
+`sendRejected` does not also fire `error`. A backend denial is an expected outcome, not a plumbing failure. If you want one funnel, forward it yourself.
+
 ## Reactions and pins
 
 ### reactionUpdate
@@ -104,9 +160,30 @@ client.on('pinUpdate', ({ messageId, pinned }) => {
 });
 ```
 
+## Typing
+
+### typing
+
+Fires when someone starts or stops typing. A firehose across every channel your bot can see, exactly like `messageCreate`.
+
+```ts
+client.on('typing', ({ userId, isTyping }) => {
+  if (userId === client.user?.id) return; // our own sendTyping() echoes back
+  console.log(`${userId} is ${isTyping ? 'typing' : 'done'}`);
+});
+```
+
+<Warning>
+  `serverId` and `channelId` on this event are **always `null`**. That is a wire fact, not a decode gap: the relay frame carries no routing tail, so there is nothing to read. They are typed nullable so filling them in later stays additive.
+
+  Never substitute your bot's own selection cursor for them. It points wherever the bot last sent, which has nothing to do with who is typing.
+</Warning>
+
+The event is raw and un-debounced by design, with no aggregation and no expiry timer. A bot that wants "who is typing right now" should hold its own map and expire an entry about ten seconds after its last `true`, which is what the shipped Cloak clients do. See [Typing, presence, and profile](/guides/typing-presence-and-profile).
+
 ## Channels, groups, and servers
 
-These fire as channels, groups, and the server itself change. See [Channels and groups](/guides/channels-and-groups).
+These fire as channels, groups, and the server itself change, and they fire for your bot's own mutations too. See [Channels and groups](/guides/channels-and-groups).
 
 ### channelCreate
 
@@ -152,11 +229,11 @@ Fires when your bot is added to a server, and once per existing server during lo
 
 ### guildDelete
 
-Fires when your bot is removed from a server. The SDK drops that server's cached key.
+Fires when your bot is removed from a server. The SDK drops that server's cached conversation key, its voice key, and its permission state.
 
 ### permissionsUpdate
 
-Fires when a server resolves or changes your bot's grant. The payload is the `serverId` plus the full [PermissionSet](/api-reference/types#permissionset), spread flat.
+Fires when a server resolves or changes your bot's grant. The payload is the `serverId` plus the full [PermissionSet](/api-reference/permissions#permissionset), spread flat.
 
 ```ts
 client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
@@ -164,15 +241,83 @@ client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
 });
 ```
 
+## Commands
+
+### commandError
+
+Fires when a slash command could not be run.
+
+```ts
+client.on('commandError', ({ name, reason, error }) => {
+  console.error(`/${name} failed (${reason})`, error);
+});
+```
+
+`reason: 'parse'` means the readable text matched a **registered** command but did not fit its declaration, for example a missing required option or an uncoercible number. The handler is not invoked, and the SDK does not auto-reply, because it never speaks unprompted.
+
+`reason: 'handler'` means your own handler threw or rejected.
+
+An unregistered command emits nothing at all. See [Slash commands](/api-reference/commands).
+
+## Voice
+
+<Warning>
+  `voiceJoin`, `voiceLeave`, `voiceStateUpdate`, and `voiceConnectionState` are **cursor-gated, not firehose**. Your bot receives them only for the server it currently has selected or is in voice in. Do not build on them as a firehose. The same applies to the roster snapshot behind [`voiceRoster()`](/api-reference/client#voiceroster).
+</Warning>
+
+### voiceKeyUpdate
+
+Fires when the bot's voice key for a server is provisioned again: a new key version, a new scope, or both.
+
+```ts
+client.on('voiceKeyUpdate', ({ serverId, version, scope }) => {
+  console.log(`voice key for ${serverId} is now v${version}, scope ${scope}`);
+});
+```
+
+A live media session must re-pin on either change. A scope change matters as much as a version change: a bot that just gained `voice_listen` can now hear everyone, and one that lost it cannot. Never poll for this. See [Voice keys](/voice/keys).
+
+### voiceJoin
+
+Fires when someone joins a voice channel, including your own bot. Filter with `p.userId === client.user?.id`.
+
+The payload is the **live** roster entry, so later updates mutate it in place. Copy it if you need a snapshot.
+
+### voiceLeave
+
+Payload `{ channelId, userId }`. Fires for your bot's own leave too.
+
+### voiceStateUpdate
+
+Payload `{ channelId, userId, state, value }`. Fires when a member's mute, deafen, webcam, or stream flag changes. `state` is a `VoiceStateFlag`.
+
+<Note>
+  The `VoiceStateFlag` union still lists `'p2pWebcam'` and `'p2pStream'`. Peer-to-peer video is deleted from the Cloak platform, so those two values can no longer arrive. Ignore them.
+</Note>
+
+### voiceConnectionState
+
+Payload `{ channelId, userId, reconnecting }`. Fires when a member's voice session enters or leaves the backend's 60 second reconnect grace window.
+
+### voiceDisconnect
+
+Payload `{ channelId, reason: 'moved' | 'forced', toChannelId? }`. Fires when a moderator moves or disconnects **your bot**. `toChannelId` is set only for a move.
+
+[`voiceConnection()`](/api-reference/client#voiceconnection) is already cleared when this fires, and the SDK does not auto-rejoin. Rejoin yourself if that is what you want.
+
 ## Connection
 
-These three let you observe the automatic reconnect. You do not need to act on them. See [Connection lifecycle](/concepts/connection-lifecycle).
+These let you observe the automatic reconnect. You do not usually need to act on them. See [Connection lifecycle](/concepts/connection-lifecycle).
 
 ### disconnect
 
 ```ts
 client.on('disconnect', (err) => console.warn('connection dropped', err));
 ```
+
+<Warning>
+  Two login failures are terminal and **stop** the reconnect loop, and both arrive here rather than throwing: code `-2` (the token was revoked or regenerated) and code `-12` (this SDK is below the backend's minimum wire version). If your bot goes quiet and no `reconnecting` follows a `disconnect`, that is why. Code `-8` is transient and keeps retrying.
+</Warning>
 
 ### reconnecting
 
@@ -188,6 +333,39 @@ client.on('reconnecting', ({ attempt, delayMs }) =>
 client.on('reconnected', () => console.log('back online'));
 ```
 
+## Diagnostics
+
+### error
+
+Fires when the SDK catches a failure that would otherwise have been silent: one of your handlers threw or returned a rejecting promise, a key pull failed, or an inbound frame could not be dispatched. The payload is a [`CloakClientError`](/api-reference/errors#cloakclienterror).
+
+```ts
+import type { CloakClientError } from '@cloak-software/bot-sdk';
+
+client.on('error', (e: CloakClientError) => {
+  console.error(e.source, e.context, e.message);
+  console.error(e.cause); // the original failure
+});
+```
+
+Registering this listener changes nothing about control flow. It only makes failures visible. Dispatch continues either way, and a throwing handler never stops the next frame.
+
+<Note>
+  Server denials do not come through here. An awaited action rejects with [`CloakActionError`](/api-reference/errors#cloakactionerror), and a denied send fires [`sendRejected`](#sendrejected).
+</Note>
+
+### raw
+
+Every inbound frame, verbatim, including the ones the SDK consumes itself. A frame is a positional array, typed as `unknown[]`.
+
+```ts
+client.on('raw', (frame) => {
+  console.log('opcode', frame[0]);
+});
+```
+
+This is a firehose and it is emitted only when something is listening, so it costs nothing if you never subscribe. It is the read side of [`client.raw`](/guides/raw-frames).
+
 ## Next
 
 <CardGroup cols={2}>
@@ -196,5 +374,11 @@ client.on('reconnected', () => console.log('back online'));
   </Card>
   <Card title="Client" icon="book" href="/api-reference/client">
     The methods you call in response.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    Every error class, and what reaches which channel.
+  </Card>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Why messageCreate needs a guard.
   </Card>
 </CardGroup>

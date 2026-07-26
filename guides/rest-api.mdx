@@ -1,0 +1,138 @@
+---
+title: "The REST lane"
+description: "client.rest reaches Cloak's HTTP API with a short-lived scoped credential, and it is off by default server-side."
+---
+
+<Warning>
+  **This is disabled on the server today.** cloak-backend ships the `BOT_REST_CREDENTIALS` flag unset, so the first `client.rest` call rejects with a `CloakActionError` saying so. Nothing is wrong with your bot. Read the rest of this page before you plan work around it.
+</Warning>
+
+Everything Cloak keeps behind its HTTP API (private file storage, custom emoji, the audit log) is invisible to a bot that speaks only the opcode wire. That is structural, not an oversight: the REST middleware authenticates by looking up session rows for the caller, and a bot has no rows in that table. The bot and human auth flows are disjoint by design.
+
+`client.rest` is the narrow relaxation of that rule.
+
+## What it does
+
+The bot mints a short-lived, scoped credential over its already-authenticated realtime session and uses that credential for HTTP. The long-lived bot token stays where it is used once, at login. It never rides an HTTP header, never reaches a proxy log, never reaches a crash dump.
+
+```ts
+// The generic escape hatch. Paths are origin-relative and include their prefix.
+const files = await client.rest.json<{ files: unknown[] }>('GET', '/api/files/list');
+
+// Bytes plus response headers (the attachment-download shape).
+const { bytes, header } = await client.rest.binary(
+  'GET',
+  `/api/files/abc123/download?roomIds=${serverId}`,
+);
+const iv = header('X-File-IV');
+```
+
+Three methods, and no named route wrappers:
+
+| Method | Resolves with |
+| --- | --- |
+| `request(method, path, init?)` | the raw response on 2xx |
+| `json<T>(method, path, init?)` | the parsed JSON body |
+| `binary(method, path, init?)` | `{ bytes, header(name) }` |
+
+The credential is minted, cached and refreshed for you. There is **no accessor for it**. It is never logged, not even under `debug: true`, and never written to the keystore.
+
+## Why the mint takes two round trips
+
+Getting the credential is two phases, and the second one cannot be collapsed into the first.
+
+<Steps>
+  <Step title="Opcode 638 over the realtime session">
+    The backend answers with a one-time secret plus the row ids it belongs to. The secret leaves the server exactly once, and the server stores only its hash.
+  </Step>
+  <Step title="POST /auth/verify-session">
+    That exchanges the one-time secret for the `verification` header every later request carries. This endpoint is deliberately not behind the auth middleware, which is what makes it usable as the bootstrap.
+  </Step>
+</Steps>
+
+<Note>
+  The second phase is not overhead you can optimize away. The REST service accepts a request when the `verification` header equals a digest that hashes a JavaScript `Date`'s `toString()`, rendered in the REST process's own timezone. Neither the SDK nor the backend can reproduce that string. Any "optimization" that derives the digest locally is a timezone-dependent, silently wrong bug.
+</Note>
+
+The credential is a 15 minute session row with its own expiry, so a realtime reconnect does not invalidate it. Only one mint is ever in flight at a time: reply correlation is positional by opcode with no request ids, so two concurrent mints would have their replies crossed, and N concurrent callers minting N rows would trip the rate limit.
+
+## Not every route is reachable when it is on
+
+The credential is scoped, behind a default-deny allowlist. The backend's route classification marks file upload, delete and permissions as intended for bots. It marks both obvious read surfaces, `GET /api/emoji/rooms` (custom emoji) and `GET /api/audit-log/:roomId`, as unauthorized: neither route does per-resource authorization today, so a scoped credential must be refused them.
+
+That is why the SDK ships **no `fetchCustomEmojis()` and no `fetchAuditLog()`**. Named methods that always fail would be worse than none. If the allowlist opens those routes, they get real wrappers then.
+
+<Note>
+  `client.fetchEmojis()` is unrelated and works fine. It rides opcode 240 and returns the static unicode catalog, never per-server custom emoji.
+</Note>
+
+## Errors
+
+| Failure | Class | Notes |
+| --- | --- | --- |
+| The mint was refused | `CloakActionError` | opcode 638. `-7` is the flag being off, `-1` is not a bot session, `-9` is rate limited, `-2` is a server error. |
+| HTTP non-2xx | `CloakRestError` | carries `status`, `path` (query stripped) and the server's `error_code` when present. |
+| Network, DNS or TLS | `CloakRestError` | `status: 0`. |
+
+```ts
+import { CloakActionError, CloakRestError } from '@cloak-software/bot-sdk';
+
+try {
+  const files = await client.rest.json<{ files: unknown[] }>('GET', '/api/files/list');
+  console.log(files);
+} catch (e) {
+  if (e instanceof CloakActionError && e.opcode === 638) {
+    console.warn('bot REST is turned off on this server:', e.message);
+  } else if (e instanceof CloakRestError) {
+    console.warn(`REST ${e.status} on ${e.path}`, e.errorCode);
+  } else {
+    throw e;
+  }
+}
+```
+
+A `401` mid-session is expected and handled. Revoking a bot purges its credential rows, so the lane drops the credential, re-mints **once**, and retries **once**. A second `401` throws rather than looping: an unconditional retry against a revoked bot burns the mint rate limit and wedges.
+
+## A -7 is not your bug
+
+The message the SDK raises says it plainly:
+
+```
+bot REST credentials are DISABLED on this server: the backend env flag
+BOT_REST_CREDENTIALS is unset. Nothing is wrong with your bot ...
+```
+
+The flag is off on purpose. The credential is only safe once the REST service enforces the `bot-rest` token scope, and that middleware is not built yet. If you need file storage or the audit log today, the answer is that a bot cannot reach them, not that your configuration is wrong.
+
+## Pointing at another stack
+
+```ts
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot-keys.json',
+  restUrl: 'https://api.example.com',
+});
+```
+
+`restUrl` defaults to `DEFAULT_REST_URL` (`https://api.cloak.chat`). That is a **different service** from the opcode wire, so `url` and `restUrl` are set independently.
+
+<Warning>
+  `https` is required except for `localhost`, `127.0.0.1` and `::1`. Anything else throws on first use, because the derived verification header is a live session credential and plain http would put it on the wire in cleartext.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="REST client reference" icon="code" href="/api-reference/rest">
+    Every type and constant on the lane.
+  </Card>
+  <Card title="Handling errors" icon="shield-halved" href="/guides/handling-errors">
+    `CloakRestError` next to the other four classes.
+  </Card>
+  <Card title="Raw frames" icon="terminal" href="/guides/raw-frames">
+    The other escape hatch, on the opcode wire.
+  </Card>
+  <Card title="Known limitations" icon="circle-exclamation" href="/production/known-limitations">
+    What a bot cannot do today, and why.
+  </Card>
+</CardGroup>

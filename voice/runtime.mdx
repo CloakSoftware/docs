@@ -1,0 +1,158 @@
+---
+title: "Voice runtime"
+description: "Installing and patching the media engine, host requirements, and how to diagnose a silent voice bot."
+---
+
+Everything on this page applies only to bots that publish or receive **audio**. The [voice control plane](/voice/joining) is pure JavaScript and needs none of it.
+
+## Install the engine
+
+<Steps>
+  <Step title="Install at the exact pin">
+    ```bash
+    npm i @livekit/rtc-node@0.13.31 && npm i -D patch-package
+    ```
+    The exact version matters. See [why the pin is exact](#why-the-pin-is-exact).
+  </Step>
+  <Step title="Copy the patch out of the SDK">
+    ```bash
+    mkdir -p patches
+    cp node_modules/@cloak-software/bot-sdk/patches/@livekit+rtc-node+0.13.31.patch patches/
+    ```
+    The patch file ships inside the SDK package for exactly this.
+  </Step>
+  <Step title="Apply it on every install">
+    ```bash
+    npm pkg set scripts.postinstall="patch-package"
+    npm install
+    ```
+  </Step>
+</Steps>
+
+The constants `VOICE_ENGINE_PIN` and `VOICE_ENGINE_PATCH_FILE` are exported so your own setup scripts can read the version and filename rather than hardcoding them.
+
+## Why the patch is mandatory
+
+The engine's only per-participant key setter takes no key argument, at any published version, while its wire protocol marks that field required. Every call throws. Under per-participant encryption a publisher must install a key under its own identity, so an **unpatched engine cannot publish audio anyone can decrypt**.
+
+The SDK repo carries a one-line fix. Patches are repo-local: the engine installs into **your** `node_modules` unpatched, so a bot that publishes audio has to apply the same patch in its own app. The patch retires when upstream lands the fix.
+
+<Warning>
+  **`npm install --ignore-scripts` silently skips the patch.** `patch-package` runs as a postinstall script. If your CI, Docker build, or lockfile-install step uses `--ignore-scripts`, the engine ends up unpatched and the bot publishes undecryptable audio with no error anywhere. Run `npx patch-package` explicitly in that case.
+</Warning>
+
+### Why the pin is exact
+
+A `patch-package` patch is named for one version. A floating range resolves to a version the patch does not name, `patch-package` skips it with a warning, and the bot publishes audio nobody can decrypt. The frame-key parameters the engine sends are also a cross-platform contract with the Cloak desktop, web, and mobile apps, and a minor version bump can change a default.
+
+## Host requirements
+
+| | |
+| --- | --- |
+| Node | `^20.19.0 \|\| >=22.12.0`. 21.x never qualifies. |
+| glibc | 2.28 or newer. |
+| musl / Alpine | **No build, at any version.** Prebuilt binaries cover macOS arm64 and x64, Linux gnu x64 and arm64, and Windows x64. |
+| Disk | About 15 MiB of native code beside the SDK's own JavaScript. |
+
+<Note>
+  The Node floor is a **crypto** requirement, not a transport or voice one. The HPKE stack needs `globalThis.crypto.getRandomValues`, which Node 18 does not define in ESM. The default wire is a plain `wss://` WebSocket over the pure-JS `ws` package, and installing the SDK itself compiles nothing. The voice engine ships prebuilt binaries, so it does not compile either.
+</Note>
+
+The engine sits in `optionalDependencies` specifically because npm tolerates platform and install-script failures there. A musl host or a prebuild miss still gets a working text bot.
+
+## Optional executables
+
+Neither is a dependency of correctness. Feeding the player raw PCM needs neither.
+
+| Executable | Needed by | Reported by the dependency report? |
+| --- | --- | --- |
+| `ffmpeg` | `ffmpegResource()` | Yes, under "Voice (optional)". |
+| `yt-dlp` | `ytdlpResource()`, `resolveMediaUrl()` | **No.** Nothing probes it, so its absence shows up as a `CloakEnvironmentError` at play time. |
+
+## Checking the host
+
+Two different questions, two different tools.
+
+```ts
+import { probeVoiceRuntime, generateDependencyReport } from '@cloak-software/bot-sdk';
+
+// Does the engine actually LOAD? This is where glibc and musl show up.
+const probe = await probeVoiceRuntime();
+if (!probe.available) console.error(probe.error, '\n', probe.remedy);
+
+// Is it INSTALLED, and is ffmpeg on PATH?
+console.log(generateDependencyReport());
+```
+
+`probeVoiceRuntime()` never throws. A text-only bot must not be failed by an absent voice engine, so it is a diagnostic rather than a gate.
+
+```ts
+interface VoiceRuntimeProbe {
+  available: boolean;
+  version?: string;
+  error?: string;   // present when it did not load
+  remedy?: string;  // an actionable fix, present when it did not load
+}
+```
+
+Probe before joining, and report `probe.remedy` to whoever invoked the command. It is written to be shown to a human.
+
+<Tip>
+  Run the dependency report from a **file**, not from `node -e`. The `-e` form fabricates a `crypto` global that no module in the process can see, so the secure-random row would lie on exactly the hosts it exists to diagnose.
+</Tip>
+
+`voiceEnvError(cause)` is the same mapping the SDK uses internally: hand it a load failure and it returns a `CloakEnvironmentError` with a remedy naming what to change on the machine. It recognises old glibc, musl hosts, and a missing package.
+
+## The blind spot
+
+<Warning>
+  **The media engine surfaces no per-participant encryption failure state, so a bot cannot detect that nobody can decrypt it.** Decryption failures and missing keys are dropped rather than reported. The one per-participant event that does exist reports that a participant's frames are *marked* encrypted, which stays true through exactly the key and identity mismatches that matter. The failure tolerance is set to never give up, so a frame decryptor with no key retries quietly forever.
+
+  There is no event to subscribe to and no counter to read. **Silence is the only symptom.**
+</Warning>
+
+Because of that, the SDK ships **no** voice health check and **no** retry-on-decrypt-failure path. Both would be theatre. Do not build one.
+
+| A bot cannot detect | So the SDK ships |
+| --- | --- |
+| "I am publishing and nobody can decrypt me" | No publish health check |
+| "I am subscribed and cannot decrypt member X" | No per-participant decrypt monitor |
+| A key or identity mismatch of any kind | No retry-on-decrypt-failure path |
+
+The only defence is to be correct by construction, which is what `VoiceMediaSession.attach()` does: install exactly what `voiceFrameKeyFor()` returns, under the identity the SFU reported, before publishing, and fail closed on every precondition. The real acceptance test is a live call with a human on the other end.
+
+## Symptom to cause
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Bot joins and publishes, members hear nothing, no errors anywhere | The engine is unpatched | Copy and apply the patch, and check `--ignore-scripts` is not in your install step |
+| Same, and the patch is applied | Installed `getVoiceKey().key` instead of `voiceFrameKeyFor()` | Let `attach()` install keys, or install only what `voiceFrameKeyFor(serverId, identity)` returns |
+| Same, and both of those are right | The installed engine version does not match the patch filename | Pin `0.13.31` exactly and re-run `patch-package` |
+| `attach()` throws an identity mismatch | `botId` is not the bot's own user id | Pass `client.user.id` |
+| Bot holds `voice_listen` and still hears nothing | It joined deafened | Rejoin with `deafened: false`. The subscribe grant is fixed at join time |
+| Bot hears some members but not others | One identity's key install failed, or the bot never saw half the roster | Check the per-identity warnings in the log, and re-attach |
+| `play()` finished instantly and the track never sounded | The decoder exited non-zero | Read the thrown `CloakEnvironmentError`, it carries ffmpeg's own first error line |
+| ffmpeg reports invalid data for an `http` URL | You handed it a watch page | Use `ytdlpResource()` instead of `ffmpegResource()` |
+| `yt-dlp` not found | Not installed, and nothing probes it | `brew install yt-dlp`, `pipx install yt-dlp`, or pass `ytdlpPath` |
+| Environment error mentioning GLIBC | Host glibc is older than the prebuild needs | Run on an image with glibc 2.28 or newer |
+| Error loading shared library on Alpine | There is no musl build | Move to a glibc base image |
+| `setVoiceKey()` threw and the session detached | The scope changed, meaning `voice_listen` was granted or revoked | Rejoin voice and `attach()` again |
+| `acquireVoiceKey()` timed out | No online human member sealed a key in the window | Have a member open the server, then retry |
+| `acquireVoiceKey()` was denied | Not a member, or missing `voice_connect`, or holds neither `voice_speak` nor `voice_listen` | Fix the grant on the server |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    The media session, the player, and the resource helpers.
+  </Card>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    The other half of every silence bug.
+  </Card>
+  <Card title="Voice reference" icon="book" href="/api-reference/voice">
+    `probeVoiceRuntime`, `voiceEnvError`, and the voice constants.
+  </Card>
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    `CloakEnvironmentError` and the rest of the error model.
+  </Card>
+</CardGroup>

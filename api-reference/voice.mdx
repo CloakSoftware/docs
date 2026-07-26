@@ -1,0 +1,421 @@
+---
+title: "Voice"
+description: "Reference for every voice export in the Cloak Bot SDK: the media session, the player, the resource helpers, the runtime probe, and the encryption constants."
+---
+
+Everything exported from `@cloak-software/bot-sdk` for voice. For the concepts behind these, start at [Voice overview](/voice/overview).
+
+<Note>
+  The interface behind `client.voiceKeys` is called `VoiceKeyAccess` in the source and is **not exported**. Do not write an import for it. Reach the lane through `client.voiceKeys`.
+</Note>
+
+## Client surface
+
+These live on `Client`, not in the voice modules. Documented in full on [Joining voice](/voice/joining).
+
+| Member | Signature |
+| --- | --- |
+| `joinVoice` | `(serverId: string, channelId: string, opts?: { groupId?: string; muted?: boolean; deafened?: boolean }) => Promise<VoiceConnection>` |
+| `leaveVoice` | `() => Promise<void>` |
+| `voiceConnection` | `() => VoiceConnection \| null` |
+| `setVoiceSelfState` | `(state: { muted?: boolean; deafened?: boolean }) => Promise<void>` |
+| `voiceRoster` | `(channelId: string) => VoiceParticipant[]` |
+| `refreshVoiceRoster` | `(serverId: string) => Promise<void>` |
+| `voiceKeys` | `VoiceKeyAccess` (getter) |
+
+`client.guild(serverId)` binds `joinVoice(channelId, opts?)` and `refreshVoiceRoster()`.
+
+Events: `voiceJoin`, `voiceLeave`, `voiceStateUpdate`, `voiceConnectionState`, `voiceDisconnect`, `voiceKeyUpdate`. See [Events](/api-reference/events).
+
+### livekitUrlFor
+
+```ts
+livekitUrlFor(transportUrl: string): string
+```
+
+The media signalling URL for a Cloak deployment, derived from the transport URL: same host, port 7880, `wss:` (or `ws:` when the transport itself is insecure). Returns `''` for an unparseable URL. This is what `VoiceConnection.url` defaults to. Override it with `ClientOptions.livekitUrl`.
+
+The SDK never connects to that URL. It is passed through for the media layer.
+
+## Types
+
+### VoiceConnection
+
+```ts
+interface VoiceConnection {
+  serverId: string;
+  channelId: string;
+  groupId: string;
+  token: string;
+  url: string;
+  selfMuted: boolean;
+  selfDeafened: boolean;
+  joinedAt: Date;
+}
+```
+
+<Warning>
+  `token` is a live credential. Never log it or put it in an error message.
+</Warning>
+
+### VoiceParticipant
+
+```ts
+interface VoiceParticipant {
+  userId: string;
+  channelId: string;
+  muted: boolean;
+  deafened: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
+  webcam: boolean;
+  stream: boolean;
+  // Deprecated. P2P was removed from the platform, so both are always false.
+  p2pWebcam: boolean;
+  p2pStream: boolean;
+  reconnecting: boolean;
+}
+```
+
+<Warning>
+  `p2pWebcam` and `p2pStream` are dead API. Peer-to-peer video has been removed from the platform. The fields remain so the wire column map stays stable, and they are permanently `false`.
+</Warning>
+
+`serverMuted` and `serverDeafened` are best-effort in the initial roster snapshot: the backend appends them from a separate query whose row order is not guaranteed to line up. The delta events correct them.
+
+### VoiceKey
+
+```ts
+interface VoiceKey {
+  scope: VoiceKeyScope;
+  key: Buffer;      // exactly 32 bytes
+  version: number;
+  fromId: string;
+}
+```
+
+### VoiceKeyScope
+
+```ts
+type VoiceKeyScope = 'participant' | 'room';
+```
+
+Read from an authenticated tag inside the sealed key, never computed and never defaulted. See [Voice keys and scopes](/voice/keys).
+
+### VoiceStateFlag
+
+```ts
+type VoiceStateFlag = 'muted' | 'deafened' | 'webcam' | 'stream' | 'p2pWebcam' | 'p2pStream';
+```
+
+The `state` field on `voiceStateUpdate`. The last two are deprecated and never change.
+
+## VoiceMediaSession
+
+```ts
+class VoiceMediaSession {
+  static attach(options: VoiceMediaOptions): Promise<VoiceMediaSession>;
+  readonly player: VoicePlayer;
+  readonly identity: string;
+  readonly scope: 'participant' | 'room';
+  get installedIdentities(): readonly string[];
+  setVoiceKey(next: VoiceKeyValue): Promise<void>;
+  detach(): Promise<void>;
+}
+```
+
+Requires the optional native engine. See [Voice runtime](/voice/runtime).
+
+<ResponseField name="attach(options)" type="Promise<VoiceMediaSession>">
+  Connects, installs frame keys, and publishes one microphone track. Fails closed on every precondition. Full walkthrough on [Publishing audio](/voice/audio).
+</ResponseField>
+
+<ResponseField name="identity" type="string">
+  The identity the SFU knows this bot by. Asserted equal to the normalized bot id at attach time.
+</ResponseField>
+
+<ResponseField name="scope" type="'participant' | 'room'">
+  The scope the key arrived with. Read-only.
+</ResponseField>
+
+<ResponseField name="installedIdentities" type="readonly string[]">
+  Every identity this session has filed a key for. In participant scope this is exactly one, the bot's own.
+</ResponseField>
+
+<ResponseField name="setVoiceKey(next)" type="Promise<void>">
+  Re-pin after a `voiceKeyUpdate`. **Detaches the session and throws** when the new scope differs from the attached one.
+</ResponseField>
+
+<ResponseField name="detach()" type="Promise<void>">
+  Stops the player, unpublishes, and disconnects. Idempotent.
+</ResponseField>
+
+### VoiceMediaOptions
+
+```ts
+interface VoiceMediaOptions {
+  url: string;
+  token: string;
+  botId: string;
+  serverId: string;
+  voiceKey: VoiceKeyValue;
+  keys: VoiceFrameKeySource;
+  deafened?: boolean;
+  sampleRate?: number;  // default 48000
+  channels?: number;    // default 2
+  debug?: boolean;
+  engine?: RtcNodeModule; // test seam
+}
+```
+
+### VoiceKeyValue
+
+```ts
+interface VoiceKeyValue {
+  key: Uint8Array;
+  scope: 'participant' | 'room';
+  version?: number;
+}
+```
+
+A voice key exactly as the key lane hands it over. `VoiceKey` satisfies it structurally.
+
+### VoiceFrameKeySource
+
+```ts
+interface VoiceFrameKeySource {
+  voiceFrameKeyFor(serverIdHex: string, identity: string): Uint8Array;
+}
+```
+
+The one seam the media session gets frame keys from. `client.voiceKeys` satisfies it. It exists so the publish path never sees a scope.
+
+## VoicePlayer
+
+```ts
+class VoicePlayer extends EventEmitter {
+  constructor(deps: VoicePlayerDeps);
+  get playing(): boolean;
+  play(resource: AudioResource): Promise<void>;
+  stop(): void;
+}
+```
+
+You get one on `session.player`. Constructing your own is only for testing.
+
+<ResponseField name="play(resource)" type="Promise<void>">
+  Pumps a resource to completion. Resolves when the resource ends or `stop()` is called. Rejects when the source throws, including a non-zero decoder exit. Throws immediately if a resource is already playing.
+</ResponseField>
+
+<ResponseField name="stop()" type="void">
+  Ends the current resource. The in-flight frame is still awaited.
+</ResponseField>
+
+### VoicePlayerEvents
+
+```ts
+interface VoicePlayerEvents {
+  start: [];
+  end: [];
+  error: [Error];
+}
+```
+
+### VoicePlayerDeps
+
+```ts
+interface VoicePlayerDeps {
+  source: RtcAudioSource;
+  makeFrame: (
+    data: Int16Array,
+    sampleRate: number,
+    channels: number,
+    samplesPerChannel: number,
+  ) => unknown;
+  sampleRate: number;
+  channels: number;
+}
+```
+
+Injected rather than imported, so the player is testable with no native code on disk.
+
+## Audio resources
+
+### AudioResource
+
+```ts
+interface AudioResource {
+  pcm: AsyncIterable<Int16Array>;
+  sampleRate?: number;  // default 48000
+  channels?: number;    // default 2
+  close?(): void;
+}
+```
+
+Interleaved signed 16-bit PCM. Each chunk must contain a whole number of frames. `close()` is called once when the pump ends for any reason, including `stop()` and errors.
+
+### pcmChunks
+
+```ts
+pcmChunks(bytes: AsyncIterable<Uint8Array>, channels?: number): AsyncIterable<Int16Array>
+```
+
+Adapts a byte stream to frame-aligned chunks. Handles chunks that end mid-sample and buffers whose offset is not two-byte aligned. A trailing partial frame is dropped.
+
+### ffmpegResource
+
+```ts
+ffmpegResource(input: string, opts?: FfmpegResourceOptions): AudioResource
+```
+
+Decodes a file path or a **direct media URL**. Synchronous. Throws a `CloakEnvironmentError` at play time when the decoder cannot start or exits non-zero.
+
+```ts
+interface FfmpegResourceOptions {
+  ffmpegPath?: string;
+  sampleRate?: number;
+  channels?: number;
+  internals?: { spawn?: DecoderSpawn };  // test seam, not version-stable
+}
+```
+
+### ytdlpResource
+
+```ts
+ytdlpResource(url: string, opts?: YtdlpResourceOptions): Promise<AudioResource>
+```
+
+Resolves a streaming-site page URL with yt-dlp, then decodes it with ffmpeg. Async, unlike `ffmpegResource`.
+
+```ts
+interface YtdlpResourceOptions extends FfmpegResourceOptions {
+  ytdlpPath?: string;
+  format?: string;      // default 'bestaudio*/best'
+  ytdlpArgs?: string[];
+  internals?: { spawn?: DecoderSpawn; run?: ExtractorRun };
+}
+```
+
+`--no-playlist` is always passed.
+
+### resolveMediaUrl
+
+```ts
+resolveMediaUrl(url: string, opts?: YtdlpResourceOptions): Promise<string>
+```
+
+Resolves a page URL to a direct media URL and returns it, so you can log, cache, or inspect it yourself.
+
+<Warning>
+  The result is signed, expiring, and usually bound to this host's IP address. Resolve at play time. Do not persist it and do not hand it to another machine.
+</Warning>
+
+### DecoderChild, DecoderSpawn, ExtractorRun
+
+```ts
+type DecoderSpawn = (exe: string, args: string[]) => DecoderChild;
+type ExtractorRun = (
+  exe: string,
+  args: string[],
+) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+```
+
+Test seams for the decoder and extractor plumbing, exported so the failure paths are reachable offline. `DecoderChild` is a narrow structural view of a spawned process. Not version-stable.
+
+## Runtime
+
+### probeVoiceRuntime
+
+```ts
+probeVoiceRuntime(): Promise<VoiceRuntimeProbe>
+```
+
+Tries to load the engine and reports what happened. **Never throws.**
+
+```ts
+interface VoiceRuntimeProbe {
+  available: boolean;
+  version?: string;
+  error?: string;
+  remedy?: string;
+}
+```
+
+### voiceEnvError
+
+```ts
+voiceEnvError(cause: unknown): CloakEnvironmentError
+```
+
+Maps an engine load failure onto an actionable error. Recognises old glibc, musl hosts, and a missing package, and attaches a remedy naming what to change on the machine.
+
+### Runtime constants
+
+| Constant | Value | Notes |
+| --- | --- | --- |
+| `VOICE_ENGINE_PIN` | `'0.13.31'` | The exact engine version the SDK is pinned to and patched against. |
+| `VOICE_ENGINE_PATCH_FILE` | `'@livekit+rtc-node+0.13.31.patch'` | The patch filename to copy out of the SDK package. |
+| `VOICE_OPTIONAL_PACKAGES` | `['@livekit/rtc-node']` | What the dependency report probes under "Voice (optional)". |
+| `VOICE_DECODER_EXECUTABLE` | `'ffmpeg'` | Probed by the dependency report. |
+| `VOICE_EXTRACTOR_EXECUTABLE` | `'yt-dlp'` | **Not** probed by anything. |
+
+## Encryption
+
+These are a cross-platform contract shared with the Cloak desktop, web, and mobile clients. Treat them like a wire format, not like configuration.
+
+### deriveParticipantVoiceKey
+
+```ts
+deriveParticipantVoiceKey(roomKey: Buffer, serverId: string, identity: string): Buffer
+```
+
+Derives one participant's key from the room key. Throws unless `roomKey` is exactly 32 bytes. Derives downward only: there is no inverse, and that absence is what makes a publish-only bot structurally deaf. Pinned by a golden test vector shared across repos.
+
+### voiceKeyMaterial
+
+```ts
+voiceKeyMaterial(key: Uint8Array): Uint8Array
+```
+
+Asserts a key is exactly 32 bytes and returns it. A 33-byte value gets its own error message: the sealed plaintext is a 1-byte scope tag followed by 32 key bytes, and a 33-byte value here means the tag was never stripped. Slicing it off at this point would install a byte-shifted key that the provider accepts without complaint and that no peer can decrypt.
+
+### voiceKeyProviderOptions
+
+```ts
+voiceKeyProviderOptions(): Record<string, unknown>
+```
+
+The frame-key provider options the SDK configures the engine with. Exported so the contract is inspectable. There is deliberately no shared key and no shared-key field: per-participant mode **is** the absence of that field.
+
+### Constants
+
+| Constant | Value | Notes |
+| --- | --- | --- |
+| `VOICE_KEY_BYTES` | `32` | Exact length of the material handed to the provider. |
+| `VOICE_KEY_INDEX` | `0` | Every participant's key lives at ring index 0, on every platform. |
+| `VOICE_RATCHET_SALT` | `'LKFrameEncryptionKey'` | The engine's own second-stage salt. |
+| `VOICE_RATCHET_WINDOW_SIZE` | `0` | The engine's own default is 16. The fleet pins 0. |
+| `VOICE_FAILURE_TOLERANCE` | `-1` | Never give up, which is exactly why a missing key is silence and not an error. |
+| `VOICE_KEY_RING_SIZE` | `16` | |
+| `KDF_HKDF` | `1` | HKDF. The engine's native default is PBKDF2, which reproduces a known interop bug. |
+| `VOICE_SEALED_PLAINTEXT_BYTES` | `33` | The 1-byte scope tag plus the 32-byte key. Exactly 33, never sliced from the front. |
+| `VoiceScopeTag` | `{ PARTICIPANT: 0x00, ROOM: 0x01 }` | Byte 0 of the sealed plaintext. Any other value is an error, never a default. |
+| `VOICE_STATE_NAMES` | `['muted', 'deafened', 'webcam', 'stream', 'p2pWebcam', 'p2pStream']` | The `VoiceStateFlag` values, in wire order. The last two are deprecated. |
+| `RetrieveVoiceKeyIdx` | `{ CODE: 0, FROM_ID: 1, SEALED_KEY: 2, SERVER_ID: 3, KEY_VERSION: 4 }` | Column map for the voice-key reply frame, for raw-frame authors. |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voice overview" icon="microphone" href="/voice/overview">
+    What a voice bot can and cannot do.
+  </Card>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    The media session in practice.
+  </Card>
+  <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
+    Engine setup and the symptom-to-cause table.
+  </Card>
+  <Card title="Client" icon="code" href="/api-reference/client">
+    The rest of the client surface.
+  </Card>
+</CardGroup>

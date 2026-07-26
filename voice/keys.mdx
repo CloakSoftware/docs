@@ -1,0 +1,152 @@
+---
+title: "Voice keys and scopes"
+description: "Voice frame keys are delivered to your bot, not derived by it. The scope inside the sealed key decides what your bot can hear."
+---
+
+Voice media is end-to-end encrypted, and the key that encrypts audio frames is not the key that encrypts messages. The SDK keeps it in a slot of its own, and the message path cannot reach it.
+
+## Keys are delivered, never derived
+
+Your bot is never given a server's root key, so it cannot compute a voice key at all. A human member seals one to the bot's identity and the bot fetches it. That is the whole model, and two practical consequences follow from it:
+
+- **A key can take a moment to arrive.** On a cold server the first ask returns "not yet" and the backend arms an online human member to seal one. There is no push notification when that happens. The bot re-asking is the wake path, which `acquireVoiceKey()` does for you on a timer.
+- **If nobody with the server key is online, no key arrives.** `acquireVoiceKey()` rejects after its timeout rather than hanging.
+
+## client.voiceKeys
+
+`client.voiceKeys` is the supported handle on the voice key lane, and it exposes the voice lane and nothing else. That narrow surface is what keeps a media session structurally unable to reach your bot's message keys.
+
+```ts
+const keys = client.voiceKeys;
+```
+
+<Note>
+  The interface is named `VoiceKeyAccess` in the source, but it is **not exported** from the package. Do not write an import for it. Reach it through `client.voiceKeys` and let TypeScript infer the type, or pass it straight into `VoiceMediaSession.attach({ keys })`.
+</Note>
+
+| Method | Signature | What it does |
+| --- | --- | --- |
+| `acquireVoiceKey` | `(serverId: string, timeoutMs?: number) => Promise<VoiceKey>` | Returns the held key, or fetches and waits for one. Default timeout 20000 ms. |
+| `getVoiceKey` | `(serverId: string) => VoiceKey \| undefined` | Synchronous. Never fetches. |
+| `voiceFrameKeyFor` | `(serverId: string, identity: string) => Buffer` | The 32 bytes to **install** for one participant identity. |
+| `forgetVoiceKey` | `(serverId: string) => void` | Drops the held key and cancels any in-flight acquire. |
+
+### VoiceKey
+
+```ts
+interface VoiceKey {
+  scope: 'participant' | 'room';
+  key: Buffer;      // exactly 32 bytes
+  version: number;  // the server's voice key version
+  fromId: string;   // the member who sealed it
+}
+```
+
+`version` is not a message epoch. The voice key descends from the server root, so it survives a bot message-key rotation and changes only when the server owner cycles the root.
+
+### acquireVoiceKey failures
+
+`acquireVoiceKey()` rejects, rather than resolving with an empty key, in two cases:
+
+- **Denied.** The bot is not a member, or lacks `voice_connect`, or holds neither `voice_speak` nor `voice_listen`. A denial mid-wait (someone revoked the permission while you were waiting) fails the same way.
+- **Timed out.** No online human member sealed a key within the window.
+
+## The two scopes
+
+Which key your bot gets is the server's decision, and it decides what the bot can hear. The scope travels **with** the key: it is an authenticated tag inside the sealed blob, so neither the server nor a relay can lie about it. The SDK never computes a scope, never infers one from a permission verdict, and never defaults one.
+
+| | `participant` scope | `room` scope (`voice_listen` granted) |
+| --- | --- | --- |
+| What the bot holds | Its own frame key | The room key |
+| Can it decrypt a member? | **No, structurally.** The key derivation is one-way, so no other participant's key can be computed from what it holds. | Yes, every member in the channel, by design. |
+| Keys installed | One, under the bot's own identity | One derived key per participant identity, including its own |
+| Subscribes to media | No | Yes |
+
+<Warning>
+  Never quote the first column without the second. A server owner who installs a `voice_listen` bot on the strength of "bots cannot hear you" has been misled. Granting `voice_listen` means "give this process the ability to decrypt us", and it is a deliberate, per-bot, server-side decision.
+</Warning>
+
+## Always install what voiceFrameKeyFor returns
+
+<Warning>
+  **Install `keys.voiceFrameKeyFor(serverId, identity)`. Never install `keys.getVoiceKey(serverId).key`.**
+
+  In room scope the held value is the room key, which is key **material** and never a frame key. Installing it as your own frame key publishes audio that no member can decrypt, silently, with no error anywhere. Every human derives a per-identity key for your bot and gets different bytes.
+</Warning>
+
+`voiceFrameKeyFor()` resolves the scope internally, which is the point: the one place a scope mistake would be silent is the publish path, and scope does not appear there.
+
+- In room scope it derives the per-identity key for any identity, including the bot's own.
+- In participant scope only the bot's own identity resolves. Asking for anyone else throws, not because a check said no but because there is no material to derive from.
+
+`VoiceMediaSession.attach()` does this for you correctly. You only touch `voiceFrameKeyFor()` directly if you are driving a key provider yourself.
+
+## Re-pinning: voiceKeyUpdate, never polling
+
+```ts
+client.on('voiceKeyUpdate', async ({ serverId, version, scope }) => {
+  // The bot's voice key was reprovisioned: a new version, a new scope, or both.
+  await session.setVoiceKey(client.voiceKeys.getVoiceKey(serverId)!);
+});
+```
+
+Two independent things fire this event, and a handler keyed only on the version misses one of them:
+
+- **A root-key cycle** replaces the key at a **higher version**.
+- **A `voice_listen` grant or revoke** replaces the **scope at the same version**, because the backend purges the stored wrap and a member re-seals at the new scope without the version moving.
+
+Do not poll `getVoiceKey()` on a timer. The event is the signal.
+
+<Warning>
+  **A scope change is not a re-pin.** `setVoiceKey()` detaches the session and throws when the new scope differs from the one it attached with. It has to: the subscribe grant is fixed when the room connects, and the engine has no key-removal call, so a revoked session that stayed up would keep decrypting members. Rejoin voice and call `attach()` again. The reconnect costs about a second.
+</Warning>
+
+## What per-participant keys do not buy
+
+The accurate list, not the flattering one.
+
+- **No isolation among humans.** Every member holds the room key, so any human client compromise exposes everyone's audio.
+- **No sender authentication.** Anyone who can decrypt a participant's frames can also produce frames under that participant's key. Identity is bound in the voice credential, not in the frame key.
+- **No traffic-analysis protection.** A bot in the channel still learns who speaks, when, and for how long, even holding no usable key.
+- **Revocation is delivery-gated, not cryptographic.** Removing a bot, or revoking its `voice_listen`, stops the **next** delivery. A bot that already unwrapped a key keeps it until the server owner cycles the root key. Do not treat a permission change as a key change.
+
+`forgetVoiceKey()` is hygiene, not revocation. It drops what this process holds so a rejoin reprovisions rather than reusing a possibly-stale scope.
+
+## When a server grants voice_listen
+
+The bot is sealed the room key and derives every participant's frame key, exactly as a human client does. `VoiceMediaSession.attach()` then subscribes, installs a derived key for everyone already in the channel **and** for everyone who arrives later, and reinstalls the whole set on a re-pin. The room key itself is never installed as a frame key, including under the bot's own identity.
+
+<Warning>
+  **A listening bot must join non-deafened.** The subscribe grant is baked into the voice credential when the bot joins, so a deafened `voice_listen` bot hears silence no matter how many keys it holds. `attach()` warns loudly about exactly that combination, and it is the diagnosis operators need most often.
+</Warning>
+
+The SDK ships no recorder, no file sink, and no transcription helper. Subscribing is in scope. What your bot does with decrypted member audio is your responsibility and your users' consent problem.
+
+## deriveParticipantVoiceKey
+
+```ts
+import { deriveParticipantVoiceKey } from '@cloak-software/bot-sdk';
+
+deriveParticipantVoiceKey(roomKey: Buffer, serverId: string, identity: string): Buffer
+```
+
+The one derivation the SDK performs over voice material: the room key down to one participant's key. It is exported because it is a normative, cross-platform key derivation pinned by a golden test vector shared with the Cloak apps, and a vector nobody can reach is a vector nobody can check.
+
+You almost certainly do not need to call it. `voiceFrameKeyFor()` calls it for you in room scope, and it is the only caller. The derivation runs one way only, downward from the room key. There is no function that walks back up, and that absence is exactly what makes a publish-only bot structurally deaf.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Publishing audio" icon="music" href="/voice/audio">
+    Hand the key to a media session and pump sound into the channel.
+  </Card>
+  <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
+    Why a wrong key produces silence and nothing else.
+  </Card>
+  <Card title="Keys and the keystore" icon="database" href="/concepts/keys-and-keystore">
+    Where your bot's identity and keys live between runs.
+  </Card>
+  <Card title="Permission names" icon="shield" href="/api-reference/permissions">
+    All 31 permissions, including `voice_listen`.
+  </Card>
+</CardGroup>

@@ -5,24 +5,36 @@ description: "Build end-to-end encrypted bots for Cloak with a familiar, discord
 
 The Cloak Bot SDK is the official TypeScript library for building bots on [Cloak](https://cloak.chat), the end-to-end encrypted chat platform. If you have written a Discord bot, you already know the shape of this API. You create a `Client`, listen for events like `messageCreate`, and call `msg.reply()`.
 
-The difference is what happens underneath. Your bot is a full end-to-end encrypted member of every server it joins. It holds its own identity, encrypts and decrypts messages inside your own process, and the Cloak service only ever relays ciphertext. Nobody in the middle can read what your bot sends or receives.
+Your bot is a full encrypted member of every server it joins. It holds its own identity, and it encrypts and decrypts message bodies inside your own process. The Cloak service relays ciphertext it cannot read.
+
+A few lanes sit outside that guarantee, by design. Mention targets travel in plaintext, because the server routes notification fanout without decrypting the body. The slash-command menu you publish is readable server-side. The webhook embed lane is not end-to-end encrypted at all. Read [What is encrypted, and what is not](/concepts/encryption-lanes) before you put anything sensitive in one of them.
 
 ```ts
 import { Client } from '@cloak-software/bot-sdk';
 
-const client = new Client({ token: process.env.CLOAK_TOKEN! });
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json', // identity and keys, across restarts
+  requiredPermissions: ['view_text', 'message_send'],
+});
 
 client.on('ready', () => console.log(`Logged in as ${client.user?.id}`));
 
 client.on('messageCreate', (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() === '!ping') msg.reply('pong');
+  if (msg.content.trim() === '!ping') {
+    msg.channel.send('pong').catch(console.error);
+  }
 });
 
 await client.login();
 ```
 
-That is a complete, working bot. It answers `!ping` in every channel it can see, across every server it belongs to.
+That is a complete, working bot. It answers `!ping` in every channel it is permitted to view, across every server it belongs to.
+
+<Warning>
+  `keystorePath` is not optional for a bot you will restart. Your bot's identity is published write-once on the server. A first run with no keystore looks like a complete success, and then the second run can never decrypt anything. See [Keys and the keystore](/concepts/keys-and-keystore).
+</Warning>
 
 ## Start here
 
@@ -30,11 +42,11 @@ That is a complete, working bot. It answers `!ping` in every channel it can see,
   <Card title="Quickstart" icon="rocket" href="/quickstart">
     Go from zero to a live bot answering messages in about five minutes.
   </Card>
-  <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
-    Understand the encryption model and what makes a Cloak bot different.
+  <Card title="Install and requirements" icon="box-open" href="/install">
+    Node versions, what `npm install` actually pulls, and the two optional extras.
   </Card>
-  <Card title="Examples" icon="code" href="/examples/welcome-bot">
-    Read annotated bots you can copy and run.
+  <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
+    The delivery model, the key handoff, and what makes a Cloak bot different.
   </Card>
   <Card title="API reference" icon="book" href="/api-reference/client">
     Every option, method, event, and type the SDK exposes.
@@ -44,54 +56,56 @@ That is a complete, working bot. It answers `!ping` in every channel it can see,
 ## What you get
 
 <CardGroup cols={2}>
-  <Card title="End-to-end encrypted" icon="shield-halved">
-    Message content and keys are encrypted in your process. The service relays ciphertext and never sees plaintext.
+  <Card title="Encrypted message bodies" icon="shield-halved" href="/concepts/encryption-lanes">
+    Content is AES-256-GCM, keys are wrapped with RFC 9180 HPKE, and both happen in your process. Mention targets and webhook embeds are the two stated exceptions.
   </Card>
   <Card title="Familiar API" icon="discord">
-    `Client`, events, and `msg.reply()`. Porting a Discord bot feels mechanical.
+    `Client`, events, and `msg.reply()`. Porting a Discord bot feels mechanical. The wire is Cloak's own, so a Cloak bot is not wire-compatible with Discord.
   </Card>
-  <Card title="Hear everything at once" icon="tower-broadcast">
-    Your bot receives messages from every channel it can view, with no per-channel setup.
+  <Card title="Hear everything at once" icon="tower-broadcast" href="/concepts/message-delivery">
+    Your bot receives messages from every channel it is permitted to view, with no per-channel subscription. Delivery is view-gated by the server.
   </Card>
-  <Card title="Resilient by default" icon="arrows-rotate">
-    Automatic reconnect with backoff. Identity and keys persist across restarts.
+  <Card title="Resilient by default" icon="arrows-rotate" href="/concepts/connection-lifecycle">
+    Automatic reconnect with exponential backoff and jitter. Identity and conversation keys survive restarts when you configure a keystore.
   </Card>
 </CardGroup>
 
 ## Build with the SDK
 
-The SDK covers the full surface a bot needs, from replying to messages to running moderation.
-
 <CardGroup cols={2}>
-  <Card title="Messages" icon="message" href="/guides/sending-messages">
-    Send, reply, react, edit, delete, and pin.
+  <Card title="Messaging" icon="message" href="/guides/sending-messages">
+    Send, reply, react, edit, delete, and pin. Mention users and roles.
   </Card>
-  <Card title="History" icon="clock-rotate-left" href="/guides/message-history">
-    Page through past messages with date or message cursors.
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    `sendDM()` opens the DM and exchanges its key for you. Inbound DMs arrive on `messageCreate` with a null `serverId`.
+  </Card>
+  <Card title="Slash commands" icon="terminal" href="/guides/slash-commands">
+    Register typed commands with options and choices, published to the server's command menu on login.
+  </Card>
+  <Card title="Rich cards" icon="image" href="/guides/rich-cards">
+    `sendCard()` posts an embed under your bot's own identity, encrypted with the same key as the message body.
+  </Card>
+  <Card title="Voice" icon="microphone" href="/voice/overview">
+    Join channels, read the roster, and publish end-to-end encrypted audio through the opt-in media layer.
   </Card>
   <Card title="Moderation" icon="gavel" href="/guides/moderation">
-    Kick, ban, time out members, and read the ban list.
-  </Card>
-  <Card title="Channels and groups" icon="folder-tree" href="/guides/channels-and-groups">
-    Create, rename, move, and delete channels and groups.
-  </Card>
-  <Card title="Members and roles" icon="users" href="/guides/members-and-roles">
-    Read a server's members and roles on demand.
-  </Card>
-  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
-    Catch `CloakActionError` and report what was denied.
+    Kick, ban, and time out members, read the ban list, and manage channels and roles.
   </Card>
 </CardGroup>
 
+There is more beyond those six: [message history](/guides/message-history), [typing and presence](/guides/typing-presence-and-profile), [webhook embeds](/guides/webhook-embeds) (the lane that is not encrypted), [raw frames](/guides/raw-frames), and the [REST lane](/guides/rest-api).
+
 ## Requirements
 
-- **Node.js** `20.19+` or `22.12+`. The SDK uses a modern transport that needs a recent Node runtime.
+- **Node.js** `^20.19.0 || >=22.12.0`. Node 21.x never qualifies. The floor exists because the crypto stack draws randomness from `globalThis.crypto.getRandomValues`, which Node 18 does not define in ESM.
 - A **Cloak account** and a **bot token**, both created in the Cloak app.
 
-There is no server for you to run or host. Your bot connects directly to Cloak's hosted service.
+Nothing else. The default connection is a plain `wss://` WebSocket over a pure-JavaScript dependency, so `npm install` compiles nothing: no Dockerfile, no compiler, no native addon in the import graph, no glibc floor. `npm i && node bot.js` is the whole deployment. There is no server for you to run or host, and `url` is optional because it defaults to Cloak's hosted service.
+
+[Install and requirements](/install) has the full picture, including the two optional extras that npm downloads by default and that nothing imports unless you opt in.
 
 <Note>
-  A Cloak bot is not wire-compatible with Discord. The API mirrors discord.js so the code feels familiar, but a Cloak bot talks to Cloak, not to Discord.
+  Cloak calls a community a **server** in its own UI, and this documentation does too. The SDK type is called `Guild`, following discord.js naming.
 </Note>
 
 Ready? Head to the [Quickstart](/quickstart).

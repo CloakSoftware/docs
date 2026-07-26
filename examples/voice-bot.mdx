@@ -1,0 +1,196 @@
+---
+title: "Voice control-plane bot"
+description: "Join and leave voice channels, read the roster, and toggle self-mute. No audio and no native dependency. Based on examples/voice-bot.ts."
+---
+
+This bot joins a voice channel on command, leaves it, prints who else is there, and toggles its own microphone flag. It sends and receives no audio at all.
+
+That makes it the voice example most readers can actually run today: it needs no native engine, no `ffmpeg`, and no patched dependency. `npm install` compiles nothing. If you want the bot to publish audio, start from the [DJ bot](/examples/dj-bot) instead.
+
+<Info>
+  `joinVoice()` hands back the LiveKit credential the backend minted and stops there. Audio is a separate, opt-in media layer with its own optional native engine. See [Publishing audio](/voice/audio).
+</Info>
+
+## The full bot
+
+```ts voice-bot.ts
+import { Client } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Not optional. Identity publication is write-once server-side, so a bot
+  // with no keystore works on its first run and can never log in again.
+  keystorePath: './voice-bot.cloak-keystore.json',
+  // Note what is missing: voice_listen. This bot is deaf on purpose, and not
+  // declaring it is the demonstration.
+  requiredPermissions: ['message_send', 'voice_connect'],
+});
+
+client.on('ready', () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  console.log('Commands: !join <voiceChannelId> [groupId] | !leave | !roster [id] | !mute | !unmute');
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  // Voice is server-scoped, and a direct message has a null serverId.
+  if (msg.isDM || !msg.serverId) return;
+
+  const [cmd, ...args] = msg.content.trim().split(/\s+/);
+  try {
+    if (cmd === '!join') {
+      const [channelId, groupId] = args;
+      if (!channelId) return void (await msg.reply('usage: !join <voiceChannelId> [groupId]'));
+      const conn = await client.joinVoice(msg.serverId, channelId, { groupId });
+      // Never log or echo the token: it is a live LiveKit credential.
+      console.log(`joined voice ${conn.channelId}, url ${conn.url}, token ${conn.token.length} chars`);
+      await msg.reply(`in voice ${conn.channelId} (control plane only, no audio)`);
+    } else if (cmd === '!leave') {
+      await client.leaveVoice();
+      await msg.reply('left voice');
+    } else if (cmd === '!roster') {
+      const channelId = args[0] ?? client.voiceConnection()?.channelId;
+      if (!channelId) return void (await msg.reply('not in voice, pass a channel id'));
+      const roster = client.voiceRoster(channelId);
+      await msg.reply(
+        roster.length
+          ? roster.map((p) => `${p.userId}${p.muted ? ' (muted)' : ''}`).join(', ')
+          : 'nobody in that channel (per the cached roster)',
+      );
+    } else if (cmd === '!mute' || cmd === '!unmute') {
+      await client.setVoiceSelfState({ muted: cmd === '!mute' });
+      await msg.reply(`self-muted: ${client.voiceConnection()?.selfMuted}`);
+    }
+  } catch (e) {
+    console.error(`${cmd} failed`, e);
+    await msg.reply(`${cmd} failed: ${(e as Error).message}`).catch(() => undefined);
+  }
+});
+
+// Roster events. All of these fire for the bot's own join and leave too.
+client.on('voiceJoin', (p) => console.log(`voice join: ${p.userId} -> ${p.channelId}`));
+client.on('voiceLeave', (e) => console.log(`voice leave: ${e.userId} <- ${e.channelId}`));
+client.on('voiceStateUpdate', (e) => console.log(`voice state: ${e.userId} ${e.state}=${e.value}`));
+client.on('voiceConnectionState', (e) =>
+  console.log(`voice ${e.userId} ${e.reconnecting ? 'reconnecting' : 'recovered'}`),
+);
+
+// A moderator moved or disconnected us. voiceConnection() is already cleared,
+// and the SDK deliberately does not auto-rejoin.
+client.on('voiceDisconnect', (e) =>
+  console.warn(`removed from voice ${e.channelId} (${e.reason}${e.toChannelId ? ` -> ${e.toChannelId}` : ''})`),
+);
+
+client.on('error', (e) => console.error('sdk error', e.source, e.message));
+client.on('disconnect', (e) => console.warn('disconnected', e));
+client.on('reconnected', () => console.log('reconnected (voice is left and rejoined on our behalf)'));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+## Run it
+
+From a checkout of the SDK, put `CLOAK_TOKEN` in a `.env` file and run:
+
+```bash
+npm run example:voice
+```
+
+To run your own copy:
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx voice-bot.ts
+```
+
+Then, in any text channel the bot can see:
+
+| Command | What it does |
+| --- | --- |
+| `!join <voiceChannelId> [groupId]` | Joins that voice channel |
+| `!leave` | Leaves voice |
+| `!roster [voiceChannelId]` | Prints the cached roster |
+| `!mute` / `!unmute` | Toggles the bot's own microphone flag |
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="Two permissions to get in, and the second is not the obvious one" icon="key">
+    `voice_connect` is checked server-wide. Then channel-level **view** is enforced, and the server baseline column for that is `view_text`, not `view_voice`.
+
+    Those two govern joining only. Hearing is a separate, third grant. See the next section.
+  </Accordion>
+
+  <Accordion title="This bot is deaf on purpose" icon="ear-deaf">
+    A bot receives no other member's media unless the server has granted it `voice_listen` (permission code 30). `voice_connect` does not imply it, and `joinVoice()` never refuses a join for lacking it.
+
+    That is the intended configuration for a publisher, not a degraded one. A music or TTS bot works perfectly while deaf. This example does not declare `voice_listen` in `requiredPermissions`, and that omission is the demonstration.
+
+    Two things follow, and you need both.
+
+    Without `voice_listen`, the bot is sent nothing by the SFU **and** is never given a key that could decrypt it. With `voice_listen`, the bot can decrypt everyone in the channel, by design. Declare it only if your bot genuinely needs to hear members, and expect a human to think about it on the consent screen. See [Voice keys and scopes](/voice/keys).
+
+    <Warning>
+      `conn.selfDeafened` is not the answer to "can this bot hear". It is the self-flag the SDK put in the join frame, it defaults to `false`, and it says nothing about the SFU grant. A bot that joins with `{ deafened: false }` and no `voice_listen` reads `selfDeafened === false` and still hears nothing. To ask the real question, use `client.can('voice_listen', serverId)`, remembering that `false` also means "no verdict has arrived yet", or read the bot's own entry in `voiceRoster(channelId)`.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="The token is a credential" icon="shield-halved">
+    `VoiceConnection.token` is a live LiveKit JWT. Never log it, never echo it into a channel, and never put it in an error message. The example logs only its length.
+
+    `debug: true` redacts it on the SDK's own wire log.
+
+    A bot session is structurally Free tier, so the credential grants microphone only. Camera and screenshare are denied at token-mint time, not by the SDK.
+  </Accordion>
+
+  <Accordion title="Roster events are cursor-gated, not firehose" icon="users">
+    Unlike `messageCreate`, the voice events reach a bot only for the server it currently has **selected** or is **in voice in**. Right after a join, that is the server you just joined.
+
+    Do not build a global picture of who is in voice across every server from these events. It will be empty for every server the bot is not currently talking to.
+
+    The roster itself is eventually consistent. A snapshot seeds it on every server select, and the deltas keep it current. `client.refreshVoiceRoster(serverId)` forces a fresh snapshot. `voiceRoster(channelId)` is a synchronous cache read, so an empty array can mean "nobody is there" or "no snapshot yet".
+
+    The roster is indexed **by channel**, so it answers "who is in this channel" and not "which channel is this user in". If you need the reverse, build the index yourself off `voiceJoin` and `voiceLeave`, as the [DJ bot](/examples/dj-bot) does.
+  </Accordion>
+
+  <Accordion title="The groupId rule" icon="folder-tree">
+    `groupId` must be the voice channel's real group, and it must never equal the channel id. `groupRef === channelId` is Cloak's DM-call shape, and the SDK refuses it locally before anything reaches the wire.
+
+    Omit `groupId` and the SDK resolves it from the server's channel list, which is why `!join` accepts it as an optional argument rather than requiring it.
+  </Accordion>
+
+  <Accordion title="Being moved, disconnected, or reconnected" icon="arrows-rotate">
+    `voiceDisconnect` fires when a moderator moves (`reason: 'moved'`, with `toChannelId`) or disconnects (`reason: 'forced'`) the bot. `voiceConnection()` is already cleared when it fires, and the SDK does **not** auto-rejoin. Deciding whether to come back is the bot's call.
+
+    On a transport reconnect the SDK restores voice for you, and it leaves before it rejoins. That order matters: the backend holds a dropped session's membership open for 60 seconds and completes the leave only when the SFU confirms the media is gone, which never happens for a bot publishing none. Do the same if you manage voice yourself.
+  </Accordion>
+
+  <Accordion title="What a VoiceParticipant tells you" icon="list">
+    Each roster entry carries `userId`, `channelId`, `muted`, `deafened`, `serverMuted`, `serverDeafened`, `webcam`, `stream`, and `reconnecting` (true while that member's session sits inside the backend's 60 second grace window).
+
+    Entries are the live cache objects, so later updates mutate them in place. Copy one if you need a snapshot.
+
+    <Note>
+      `p2pWebcam` and `p2pStream` still exist on the type and are permanently `false`. Peer-to-peer video was removed from the platform. Do not build on them.
+    </Note>
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voice overview" icon="microphone" href="/voice/overview">
+    The control plane, the audio layer, and what each one needs.
+  </Card>
+  <Card title="Joining voice" icon="right-to-bracket" href="/voice/joining">
+    `joinVoice`, rosters, and the five voice events in full.
+  </Card>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    Why a bot is handed a key rather than deriving one.
+  </Card>
+  <Card title="DJ bot" icon="music" href="/examples/dj-bot">
+    The same control plane, plus audio.
+  </Card>
+</CardGroup>

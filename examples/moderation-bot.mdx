@@ -1,19 +1,22 @@
 ---
 title: "Moderation bot"
-description: "A command-driven bot that exercises reactions, history, moderation, and the guild() handle."
+description: "A command-driven bot that exercises reactions, history, purges, timeouts, pins, mentions, and typed denials."
 ---
 
-This bot answers a handful of `!` commands, and each one exercises a different corner of the SDK: reactions, message history, and the moderation actions behind the `guild()` handle. It is command-driven, so every action starts from a message you send in a channel the bot can see. Copy it, set your token, and run it.
+This bot answers a handful of `!` commands, and each one exercises a different corner of the SDK: reactions, message history, the moderation actions behind the `guild()` handle, the two halves of a mention, and the typed error the server sends back when it says no.
+
+The SDK repo ships this as `examples/mod-bot.ts`. Everything below is server-scoped, so the very first thing the message handler does is drop direct messages.
 
 ## The full bot
 
-```ts moderation-bot.ts
-import { Client, CloakActionError } from '@cloak-software/bot-sdk';
+```ts mod-bot.ts
+import { Client, CloakActionError, userMention, roleMention } from '@cloak-software/bot-sdk';
 
 const client = new Client({
   token: process.env.CLOAK_TOKEN!,
+  // The bot's identity is published to the server once. Without this file the
+  // first run works and every restart after it fails permanently.
   keystorePath: './mod-bot.cloak-keystore.json',
-  // Declare what the bot needs. A human approves a subset per server.
   requiredPermissions: [
     'message_send',
     'message_read_history',
@@ -22,115 +25,151 @@ const client = new Client({
     'member_timeout',
     'member_ban',
   ],
+  debug: process.env.DEBUG === '1',
 });
 
-client.on('ready', () => {
-  console.log(`Moderation bot online as ${client.user?.id}`);
+client.on('ready', async () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  // Presence is persisted account-side, so this is a set-once. Do not re-send
+  // it on a timer or after a reconnect.
+  await client.setStatus('online').catch((e) => console.error('setStatus', e));
 });
 
 client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
+  // messageCreate is unified: a DM arrives here too, with isDM true and a null
+  // serverId. Moderation is a server concept, so bail out first.
+  if (msg.isDM || !msg.serverId) return;
 
   const [cmd, ...args] = msg.content.trim().split(/\s+/);
-  // A server-scoped handle for every moderation action below.
+  // A server-scoped handle for every action below.
   const g = client.guild(msg.serverId);
 
   try {
+    // A mention is two halves. userMention() is the pill, which is literal text
+    // inside the encrypted body. `mentions` is the ping, a plaintext target the
+    // server routes the notification from. Send both, or one of them does
+    // nothing at all.
+    if (msg.mentionsMe) {
+      await msg.reply(`${userMention(msg.authorId)} you rang?`, {
+        mentions: [{ userId: msg.authorId }],
+      });
+      return;
+    }
+
     switch (cmd) {
-      case '!ping': {
-        // React to the command message instead of replying.
+      case '!ping':
+        // React to the command message instead of answering it.
         await msg.react('👍');
         break;
-      }
 
       case '!roles': {
-        const roles = (await g.fetchRoles()).sort((a, b) => (b.position ?? 0) - (a.position ?? 0));
-        const lines = roles.map((r) => `${r.name} (${r.memberCount})`);
-        await msg.reply(`Roles by position:\n${lines.join('\n')}`);
-        break;
-      }
-
-      case '!members': {
-        const members = await g.fetchMembers();
-        const bots = members.filter((m) => m.isBot).length;
-        await msg.reply(`${members.length} members, ${bots} of them bots.`);
+        const roles = await g.fetchRoles();
+        // Lower position sorts higher, so ascending is rank order.
+        const lines = roles
+          .sort((a, b) => (a.position ?? 99) - (b.position ?? 99))
+          .map((r) => `${r.name} (${r.memberCount} members)`);
+        await msg.reply(lines.length ? lines.join('\n') : 'no roles');
         break;
       }
 
       case '!bans': {
         const bans = await g.fetchBans();
-        const lines = bans.map((b) => `${b.username ?? b.userId}: ${b.reason || '(no reason)'}`);
-        await msg.reply(bans.length ? lines.join('\n') : 'No bans on record.');
+        await msg.reply(
+          bans.length
+            ? bans.map((b) => `${b.username ?? b.userId}: ${b.reason || '(no reason)'}`).join('\n')
+            : 'no bans',
+        );
         break;
       }
 
       case '!history': {
-        // Default 20, capped at 100.
-        const n = Math.min(Number(args[0]) || 20, 100);
-        const messages = await g.fetchMessages(msg.channelId, { limit: n });
-        const authors = new Set(messages.map((m) => m.authorId));
-        await msg.reply(`Last ${messages.length} messages from ${authors.size} distinct authors.`);
+        const n = Math.min(100, Number(args[0]) || 20);
+        const history = await g.fetchMessages(msg.channelId, { limit: n });
+        const authors = new Set(history.map((m) => m.authorId));
+        await msg.reply(`last ${history.length} messages, ${authors.size} distinct authors`);
         break;
       }
 
       case '!purge': {
-        // Newest n, capped at 50. Reverse so the newest go first.
-        const n = Math.min(Number(args[0]) || 0, 50);
-        if (!n) {
-          await msg.reply('usage: !purge <n>');
-          break;
-        }
-        const newest = (await g.fetchMessages(msg.channelId, { limit: n })).reverse();
-        for (const m of newest) {
-          await m.delete();
+        const n = Math.min(50, Number(args[0]) || 0);
+        if (!n) return void (await msg.reply('usage: !purge <n>'));
+        // fetchMessages returns fully actionable Messages. Delete the newest n,
+        // excluding the command message itself, which is too new to appear.
+        // Slow and multi round trip, so show the typing dots while it runs.
+        await client.sendTyping(msg.serverId, msg.channelId);
+        try {
+          const doomed = (await g.fetchMessages(msg.channelId, { limit: n })).reverse();
+          for (const m of doomed) {
+            await m.delete();
+            // Re-assert every few deletes: receivers expire the dots after ~10s.
+            // Repeats inside the SDK's throttle window are dropped for free.
+            await client.sendTyping(msg.serverId, msg.channelId);
+          }
+          await msg.reply(`purged ${doomed.length} messages`);
+        } finally {
+          // An indicator left on lingers for about 10 seconds. Clearing it is
+          // the whole reason the false argument exists.
+          await client.sendTyping(msg.serverId, msg.channelId, false).catch(() => {});
         }
         break;
       }
 
       case '!timeout': {
         const [userId, seconds] = args;
-        if (!userId || !seconds) {
-          await msg.reply('usage: !timeout <userId> <seconds>');
-          break;
-        }
+        if (!userId || !seconds) return void (await msg.reply('usage: !timeout <userId> <seconds>'));
         await g.timeout(userId, Number(seconds));
         await msg.react('⏳');
         break;
       }
 
       case '!pin': {
-        // Use this as a reply to the message you want pinned.
-        const replied = msg.repliedTo;
-        if (!replied) {
-          await msg.reply('Reply to a message with !pin to pin it.');
-          break;
+        if (!msg.repliedTo) return void (await msg.reply('reply to the message you want pinned'));
+        const target = (
+          await g.fetchMessages(msg.channelId, { around: msg.repliedTo.createdAt ?? new Date() })
+        ).find((m) => m.messageId === msg.repliedTo?.messageId);
+        if (!target) return void (await msg.reply('could not locate that message'));
+        await target.pin();
+        await msg.react('📌');
+        break;
+      }
+
+      case '!announce': {
+        const text = args.join(' ');
+        if (!text) return void (await msg.reply('usage: !announce <text>'));
+        // Advisory pre-gate. The server is authoritative and silently drops
+        // pings it will not route.
+        if (!client.can('mention_roles', msg.serverId)) {
+          return void (await msg.reply(
+            `no mention_roles here, say it to ${roleMention('Moderators')} yourself`,
+          ));
         }
-        const around = replied.createdAt ?? new Date();
-        const target = (await g.fetchMessages(msg.channelId, { around })).find(
-          (m) => m.messageId === replied.messageId,
-        );
-        if (target) {
-          await target.pin();
-          await msg.react('📌');
-        }
+        await g.send(msg.channelId, `@everyone ${text}`, { mentions: ['everyone'] });
         break;
       }
     }
   } catch (e) {
     if (e instanceof CloakActionError) {
-      const missing = e.permission ? ` (needs ${e.permission})` : '';
-      console.error(`${cmd} rejected: ${e.message}${missing}`);
+      const perm = e.permission ? ` (missing ${e.permission})` : '';
+      msg.reply(`denied: ${e.message}${perm}`).catch(() => {});
     } else {
       console.error(cmd, e);
     }
   }
 });
 
-// Observe server events. These fire for the bot's own actions too.
-client.on('messageDelete', (evt) => console.log('messageDelete', evt));
-client.on('pinUpdate', (evt) => console.log('pinUpdate', evt));
-client.on('reactionUpdate', (evt) => console.log('reactionUpdate', evt));
-client.on('channelCreate', (evt) => console.log('channelCreate', evt));
+// Observe the moderation-relevant events. These fire for the bot's own actions too.
+client.on('messageDelete', (e) => console.log(`message ${e.messageId} deleted in ${e.channelId}`));
+client.on('pinUpdate', (e) => console.log(`message ${e.messageId} ${e.pinned ? 'pinned' : 'unpinned'}`));
+client.on('reactionUpdate', (e) => console.log(`reaction ${e.reactionId} x${e.count} on ${e.messageId}`));
+client.on('channelCreate', (e) => console.log(`channel ${e.name} created in ${e.serverId}`));
+
+// Typing is a firehose across every visible channel, and it echoes the bot's
+// own sendTyping back. serverId and channelId are always null.
+client.on('typing', (e) => {
+  if (e.userId === client.user?.id) return;
+  console.log(`${e.userId} is ${e.isTyping ? 'typing' : 'no longer typing'} (channel unknown)`);
+});
 
 client.login().catch((e) => {
   console.error('login failed', e);
@@ -140,27 +179,95 @@ client.login().catch((e) => {
 
 ## Run it
 
-```bash
-CLOAK_TOKEN="botid.tokenid.secret" npx tsx moderation-bot.ts
+<CodeGroup>
+
+```bash Your own copy
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx mod-bot.ts
 ```
+
+```bash From the SDK repo
+# copy .env.example to .env, put CLOAK_TOKEN in it, then:
+npm run example:mod
+```
+
+</CodeGroup>
+
+Then, in any channel the bot can see: `!ping`, `!roles`, `!bans`, `!history 50`, `!purge 5`, `!timeout <userId> 600`, `!pin` as a reply, `!announce <text>`, or just `@` the bot.
 
 ## How it works, piece by piece
 
 <AccordionGroup>
+  <Accordion title="The DM guard comes first" icon="envelope-circle-check">
+    `messageCreate` is unified: direct messages arrive on the same event with `isDM: true` and a **null** `serverId`. Every command in this bot is server-scoped, so `if (msg.isDM || !msg.serverId) return;` runs before anything else.
+
+    Without it, `client.guild(msg.serverId)` does not typecheck, and in plain JavaScript the bot builds a handle around `null` and every action misfires. Any handler that touches `serverId`, `can()`, or `guild()` needs this guard. See [Direct messages](/guides/direct-messages).
+  </Accordion>
+
   <Accordion title="The guild() handle" icon="server">
-    `client.guild(msg.serverId)` returns a handle scoped to one server. Every server-level action in this bot runs through it: `fetchRoles()`, `fetchMembers()`, `fetchBans()`, `fetchMessages()`, and `timeout()`, plus the message-level `delete()` and `pin()` you reach from the messages it returns. The handle does no work until you call one of its methods, so it is cheap to create fresh on each event. See [The guild() handle](/guides/guild-handle).
+    `client.guild(serverId)` binds a server id onto every server-scoped method: `fetchRoles()`, `fetchBans()`, `fetchMessages()`, `timeout()`, `send()`, and the rest. It is pure sugar over the flat client surface, with no cache and no state, so creating one per event costs nothing. The `Message` objects it hands back are fully actionable, which is how `!purge` and `!pin` reach `delete()` and `pin()`. See [The guild() handle](/guides/guild-handle).
   </Accordion>
 
-  <Accordion title="Error handling with CloakActionError" icon="triangle-exclamation">
-    Any moderation call can be refused by the server, because the server re-checks each action and remains the authority even when `can()` looked fine. When that happens the SDK throws a `CloakActionError`. The handler reads `e.message` for the reason and `e.permission` for the capability that was missing, then falls through to a plain `console.error` for anything else. See [Handling errors](/guides/handling-errors).
+  <Accordion title="Mentions are two independent halves" icon="at">
+    `msg.mentionsMe` is true when the decrypted body carries a `<@id>` entity naming this bot. It covers direct mentions only: `@everyone` and `@here` land on `msg.mentions.everyone` and `msg.mentions.here`, and a role mention surfaces as a plain name in `msg.mentions.names`, because the SDK does not know which roles the bot holds.
+
+    Sending a mention takes two pieces that the SDK deliberately never infers from each other:
+
+    - `userMention(id)` produces the pill, which is literal text inside the encrypted body.
+    - `{ mentions: [{ userId: id }] }` produces the ping, which is what the server routes the notification from.
+
+    Text with no ping shows a pill and notifies nobody. A ping with no text notifies someone and shows nothing. Send both.
+
+    <Warning>
+      Mention **targets** ride the wire in plaintext. Message bodies are end-to-end encrypted, but the server has to read the mention array to fan notifications out, so anyone with server-side visibility can see who your bot pinged, just not what it said. See [What is encrypted, and what is not](/concepts/encryption-lanes).
+    </Warning>
+
+    See [Mentions and replies](/guides/mentions-and-replies).
   </Accordion>
 
-  <Accordion title="Why !purge reverses the list" icon="broom">
-    `fetchMessages()` returns the page with the newest message last, so `!purge` calls `.reverse()` and deletes from the newest end first. The command message you typed is too new to appear in the fetched page, so it is never part of the batch and stays put. `!purge` caps at 50 messages per run to keep a single command from clearing a whole channel.
+  <Accordion title="Typed denials with CloakActionError" icon="triangle-exclamation">
+    Any action here can be refused. `can()` is advisory and the server re-checks everything, so a call that looked fine locally can still come back denied. The SDK rejects with a `CloakActionError` carrying `opcode`, `code`, `message`, and `permission` when the denial maps to one.
+
+    This bot replies the denial into the channel rather than only logging it, so the person who typed the command learns why it failed. Anything that is not a `CloakActionError` falls through to `console.error`, because that is a bug rather than a policy decision. See [Handling errors](/guides/handling-errors).
   </Accordion>
 
-  <Accordion title="Observing events" icon="binoculars">
-    The `messageDelete`, `pinUpdate`, `reactionUpdate`, and `channelCreate` listeners log what the server reports, which is handy while you learn the event shapes. Remember that they fire for the bot's own actions too: when `!purge` deletes a message you see a `messageDelete`, and when `!pin` reacts you see a `reactionUpdate`. Guard against responding to your own effects if one of these handlers ever does real work.
+  <Accordion title="Typing indicators around slow work" icon="ellipsis">
+    `!purge` is many round trips, so it shows the typing dots while it works. Three rules matter:
+
+    - Receivers clear the indicator themselves about 10 seconds after the last `true`, so re-assert it inside the loop. Repeats of the same value inside the SDK's roughly one second throttle are dropped without touching the wire.
+    - Clear it with `sendTyping(serverId, channelId, false)` in a `finally`. An indicator left on after a crash lingers for the full timeout, and clearing it is the entire reason the `false` argument exists.
+    - `sendTyping()` moves the same selection cursor a `send()` does, and like `send()` it is fire-and-forget: a resolved promise means the frame went out.
+
+    See [Typing, presence, and profile](/guides/typing-presence-and-profile).
+  </Accordion>
+
+  <Accordion title="Why !purge reverses the page" icon="broom">
+    `fetchMessages()` returns a page with the newest message last, so `!purge` reverses it and deletes from the newest end. The command message you typed is too new to appear in that page, so it is never part of the batch and stays put. The cap of 50 keeps a single typo from clearing a channel. Deleting someone else's message needs `message_manage`. See [Moderation](/guides/moderation).
+  </Accordion>
+
+  <Accordion title="Sorting roles by position" icon="list-ol">
+    Lower `position` values sort higher, and `position` can be null, so the sort is ascending with a fallback: `(a.position ?? 99) - (b.position ?? 99)`. `fetchRoles()` is the healthy read on this surface. Each `Role` carries `id`, `name`, `color`, `secondColor`, `position`, and `memberCount`. See [Members and roles](/guides/members-and-roles).
+  </Accordion>
+
+  <Accordion title="What happened to !members" icon="user-group">
+    The shipped example still carries a `!members` command built on `fetchMembers()`. It is left out here on purpose.
+
+    <Warning>
+      `fetchMembers()` and `guild().fetchMembers()` are **broken against every current backend**. Server rosters moved to opcodes this SDK does not speak yet, so a server-scoped request gets no reply frame at all, not even an error code. The promise neither resolves nor rejects: `await` hangs until the transport timeout, and `try/catch` does not save you. It looks exactly like the bot froze. The signature will survive the fix, so code written against it stays valid, but do not ship it today.
+    </Warning>
+
+    `fetchRoles()` is unaffected. If you need to check a name against the server's roles, that is the call to use.
+  </Accordion>
+
+  <Accordion title="Presence is set once" icon="circle-dot">
+    `setStatus('online')` writes an account-level base status to the server, so it survives reconnects, restarts, and redeploys. Set it at `ready` and leave it alone. Do not re-send it on a timer.
+
+    Base `online` means "defer to liveness": a bot with no live session displays as offline whatever its base says. The other four values (`invisible`, `away`, `busy`, `dnd`) pin the display, and `dnd` also suppresses push on every device.
+  </Accordion>
+
+  <Accordion title="Observing events, including your own" icon="binoculars">
+    `messageDelete`, `pinUpdate`, `reactionUpdate`, and `channelCreate` report what the server broadcasts, and they fire for the bot's own actions too. When `!purge` deletes, you see the deletes. When `!pin` reacts, you see the reaction. Guard against reacting to your own effects if one of these handlers ever does real work.
+
+    `typing` is different in one non-obvious way: its `serverId` and `channelId` are **always null**. The relay frame carries no routing at all, so there is genuinely nothing to read. Do not substitute the bot's own selection cursor, which points wherever the bot last sent and has nothing to do with who is typing.
   </Accordion>
 </AccordionGroup>
 
@@ -170,8 +277,8 @@ CLOAK_TOKEN="botid.tokenid.secret" npx tsx moderation-bot.ts
   <Card title="Moderation" icon="gavel" href="/guides/moderation">
     Bans, timeouts, purges, and pins in depth.
   </Card>
-  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
-    The server-scoped handle every action above uses.
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    The pill, the ping, and true replies.
   </Card>
   <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
     What CloakActionError carries and how to read it.

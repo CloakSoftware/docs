@@ -1,9 +1,13 @@
 ---
 title: "Message history"
-description: "Read past messages with fetchMessages, using date or message cursors."
+description: "Read past messages in a server channel with fetchMessages, using date or message cursors."
 ---
 
 Sometimes your bot needs messages it did not see live: the last few in a channel, everything before a date, or the context around a single message. `client.fetchMessages()` reads them back from the server, always ordered oldest to newest. This guide covers the cursors, the paging behavior, and what you get back.
+
+<Note>
+  `fetchMessages` reads **server-channel history only**. There is no DM history read in this SDK. A bot sees direct messages as they arrive on `messageCreate` and cannot page back through them. See [Direct messages](/guides/direct-messages).
+</Note>
 
 ## Read the newest messages
 
@@ -22,12 +26,16 @@ Reads are auto-paginated for you, so a larger `limit` fetches across as many pag
 const lastHundred = await client.fetchMessages(serverId, channelId, { limit: 100 });
 ```
 
+<Info>
+  The wire page sizes are fixed: the first page holds up to 50 rows, and each page after it up to 25. A `limit` of 100 therefore costs several round-trips. The read stops early when a short page proves the history is exhausted in that direction.
+</Info>
+
 ## Cursors are a Date or a Message
 
 You point a read at a moment in time with a cursor. A cursor is always a `Date` or a `Message`, never a message id.
 
 <Note>
-  Cloak message ids are random UUIDv4 values, so they do not sort by time. There is no id cursor. When you pass a `Message` as a cursor, the read uses that message's `createdAt`.
+  Cloak message ids are random UUIDv4 values, so they do not sort by time. There is no id cursor. When you pass a `Message` as a cursor, the read uses that message's `createdAt`. A `Message` with no `createdAt` throws.
 </Note>
 
 Three options place the window relative to the cursor: `before`, `after`, and `around`.
@@ -112,28 +120,39 @@ const context = await client.fetchMessages(serverId, channelId, {
 
 ## Returned messages are live
 
-Every message from `fetchMessages` is fully actionable, exactly like one you received on the firehose. Each carries `reply`, `react`, `edit`, `delete`, `pin`, and `unpin`, plus a `pinned` boolean.
+Every message from `fetchMessages` is fully actionable, exactly like one you received on the firehose. Each carries `reply`, `channel.send`, `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin`, plus a `pinned` boolean.
+
+The same fields are populated too. `mentions`, `mentionsMe`, and `repliedTo` are computed for history exactly as they are for a live message, because both paths run through the same builder.
 
 ```ts
 const recent = await client.fetchMessages(serverId, channelId, { limit: 20 });
 for (const msg of recent) {
   if (msg.authorId === client.user?.id) continue; // skip our own messages
+  if (msg.mentionsMe) console.log(`missed a ping from ${msg.authorId}`);
   if (!msg.pinned && msg.content.includes('important')) {
     await msg.pin();
   }
 }
 ```
 
+History rows always carry a **non-null `serverId`**, because this read is server-channel only. That is why the loop above can call `msg.pin()` without a guard. A live `messageCreate` message is different: `serverId` is `null` for a DM, and the mutation methods reject there. Guard with `if (msg.isDM || !msg.serverId) return;` before you carry this pattern into a `messageCreate` handler.
+
+<Warning>
+  `Message.command` is **never set on fetched history**. Replaying history must not re-execute old slash commands, so the SDK deliberately leaves the field undefined on this path. If you want to audit past invocations, parse the text yourself.
+</Warning>
+
 See the [Message type](/api-reference/types#message) for the full shape.
 
 ## Undecryptable messages
 
-Each message decrypts with the key for that message. If a row cannot be decrypted, its `content` is the empty string `''`. You never receive raw ciphertext, so a simple check is enough to skip a message you cannot read.
+Each message decrypts with the key for its own epoch. If a row cannot be decrypted, its `content` is the empty string `''`. You never receive raw ciphertext, so a simple check is enough to skip a message you cannot read.
 
 ```ts
 const history = await client.fetchMessages(serverId, channelId);
 const readable = history.filter((msg) => msg.content !== '');
 ```
+
+A bot only holds keys from the epochs it was present for, so history from before it joined, or from before a key cycle, commonly reads as `''`.
 
 ## Requires the message_read_history permission
 
@@ -162,17 +181,19 @@ try {
 
 ```ts
 const where = client.messageLocation(someMessageId);
-if (where) {
+if (where?.serverId) {
   console.log(`message is in ${where.serverId} / ${where.channelId}`);
+} else if (where) {
+  console.log(`message is in dm ${where.channelId}`);
 }
 ```
 
-<ResponseField name="serverId" type="string">
-  The server the message lives in.
+<ResponseField name="serverId" type="string | null">
+  The server the message lives in, or `null` when the remembered message is a direct message. In that case `channelId` holds the dm id and is the whole location.
 </ResponseField>
 
 <ResponseField name="channelId" type="string">
-  The channel within that server.
+  The channel within that server, or the dm id when `serverId` is `null`.
 </ResponseField>
 
 <ResponseField name="groupId" type="string">
@@ -197,11 +218,11 @@ if (where) {
   <Card title="The Message object" icon="message" href="/api-reference/types#message">
     Everything a returned message can do.
   </Card>
-  <Card title="MessageLocation" icon="location-dot" href="/api-reference/types#messagelocation">
-    The shape messageLocation returns.
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Why DM history is out of scope, and what you get instead.
   </Card>
-  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
-    Work with a server your bot belongs to.
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    How mentions and mentionsMe are derived.
   </Card>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     What message_read_history grants and how.

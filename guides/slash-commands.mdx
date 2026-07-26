@@ -1,0 +1,353 @@
+---
+title: "Slash commands"
+description: "Declare typed commands, publish them to the / picker, and handle invocations from either lane."
+---
+
+Your bot can declare a set of slash commands with a typed option model, publish them so a human's `/` picker lists them, and receive typed invocations through one handler API. Registration is synchronous and happens on `client.commands`, a `CommandRegistry`.
+
+```ts
+client.commands.register(
+  {
+    name: 'play',
+    description: 'play a song',
+    options: [{ name: 'query', type: 'string', description: 'what to play', required: true }],
+  },
+  async (ctx) => {
+    await ctx.reply(`playing ${ctx.getString('query')}`);
+  },
+);
+```
+
+That is the whole happy path. The rest of this page covers the design constraints, the two lanes an invocation can arrive on, and how the menu gets published.
+
+## Two properties of v1 you must design around
+
+Both of these change what you are willing to put in a command, so read them before you write descriptions.
+
+<Warning>
+  **There is no ephemerality.** An invocation is an ordinary message, encrypted with the channel's epoch key. Every member holding that key can read every invocation, and it is a durable message row (subject only to the channel or per-message TTL). There is no "only you can see this" in v1. Ephemeral responses need a different key lane and are not shipped. Do not fake them by deleting the message afterwards.
+</Warning>
+
+<Warning>
+  **The published menu is plaintext server-side.** Command names, descriptions, option names and choice strings are stored and served unencrypted, so a client's `/` picker can render them without holding a key. Never put a secret, an internal hostname, or a customer name in a `description` or a `choices` entry. See [what is encrypted, and what is not](/concepts/encryption-lanes).
+</Warning>
+
+Message bodies stay end-to-end encrypted, including the body of an invocation. The plaintext part is the menu, not the traffic.
+
+## Declare a command
+
+`register(declaration, handler)` takes the declaration and the function to run. It returns the registry, so calls chain.
+
+<ParamField path="name" type="string" required>
+  Lowercase, matching `^[a-z0-9_-]{1,32}$`. The server casefolds and stores the casefolded form, and the text lane lowercases before matching, so declare it already lowercased.
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  1 to 100 characters. Rendered in the `/` picker, and served in plaintext.
+</ParamField>
+
+<ParamField path="options" type="CommandOption[]">
+  The command's arguments, in an order that is load-bearing. See below.
+</ParamField>
+
+Everything `register()` rejects, it rejects synchronously, in your own stack trace: a bad name, a missing description, a duplicate command, more than 25 options, a bad choice list, or a declaration set whose serialized menu would exceed 16 KiB. A bot author bug never becomes a faraway server ack code.
+
+### Option types
+
+<ParamField path="type" type="CommandOptionType" required>
+  One of `string`, `integer`, `boolean`, `user`, `channel`, `role`, `number`.
+</ParamField>
+
+`user`, `channel` and `role` values travel as **opaque id strings** in v1. The SDK does no resolution and the clients do no argument autocomplete, so read them with `getString()` and normalize before comparing them to anything.
+
+There is no `attachment` type. Declaring one throws at `register()` with the reason: upload is closed to bots, so an attachment option could never be filled on the bot's side.
+
+### Choices
+
+`choices` is a flat list of strings. The choice string is both the label and the value, because the wire has no slot for a separate label.
+
+```ts
+client.commands.register(
+  {
+    name: 'volume',
+    description: 'set the playback volume',
+    options: [
+      {
+        name: 'level',
+        type: 'string',
+        description: 'how loud',
+        required: true,
+        choices: ['quiet', 'normal', 'loud'],
+      },
+      { name: 'announce', type: 'boolean', description: 'say so in the channel' },
+    ],
+  },
+  async (ctx) => {
+    const level = ctx.getString('level');
+    if (ctx.getBoolean('announce')) await ctx.reply(`volume set to ${level}`);
+    else console.log(`[/volume] ${level} (quietly)`);
+  },
+);
+```
+
+Rules the SDK enforces at `register()`:
+
+- Up to 25 choices per option, each 1 to 100 characters.
+- A `boolean` option cannot carry choices at all.
+- For `integer` and `number` options every choice must coerce to that type.
+
+String choices match exactly first, then case-insensitively. Numeric choices are compared after coercion, so `2` and `"2"` land on the same choice.
+
+### Required options come first
+
+Every required option must precede every optional one. `register()` throws otherwise, and the server rejects the reverse order anyway.
+
+```ts
+options: [
+  { name: 'query', type: 'string', description: 'what to play', required: true },
+  { name: 'shuffle', type: 'boolean', description: 'shuffle the queue' },  // optional, last
+]
+```
+
+The reason is the text lane: options are positional in declaration order, and positional parsing cannot see a hole in the middle.
+
+## Handle an invocation
+
+Your handler receives a `CommandContext`. The same handler runs no matter which lane the invocation arrived on.
+
+```ts
+interface CommandContext {
+  name: string;
+  args: Record<string, string | number | boolean | undefined>;
+  source: 'structured' | 'text';
+  getString(n: string): string | null;
+  getInteger(n: string): number | null;
+  getNumber(n: string): number | null;
+  getBoolean(n: string): boolean | null;
+  message: Message;
+  reply(text: string, opts?: SendOptions): Promise<void>;
+}
+```
+
+Values arrive already coerced to their declared type on both lanes. The getters add null safety: each returns `null` for an option that was not filled, rather than `undefined` or a thrown error.
+
+`ctx.reply` is identical to `ctx.message.reply`. It posts a **true reply** into the invoking channel, which renders a quote header and fires a "replied to you" notification that pierces the invoker's mutes. When you want a quieter response, send into the channel instead.
+
+```ts
+await ctx.message.channel.send('done');   // plain message, no reply notification
+```
+
+Both take the same `SendOptions` object (`{ groupId?, mentions?, replyTo? }`) as every other send. Both are fire-and-forget: the promise resolves when the frame goes out, and a server-side denial arrives later on the [`sendRejected`](/api-reference/events#sendrejected) event rather than rejecting the promise.
+
+`ctx.message` is the full `Message`, so `ctx.message.authorId` is the invoker and `ctx.message.serverId` is the server the invocation came from. Commands never dispatch from direct messages, so `serverId` is populated in a handler, but it is typed `string | null` like everywhere else. Narrow it before passing it into a server-scoped call.
+
+## When a command fails
+
+The `commandError` event carries both failure modes.
+
+```ts
+client.on('commandError', (e) => {
+  console.warn(`/${e.name} failed (${e.reason}):`, e.error);
+});
+```
+
+<ParamField path="reason" type="'parse' | 'handler'">
+  `'parse'` means the text matched a registered command but did not fit its declaration: a missing required option, a value outside the choice list, or an uncoercible number. Your handler was not invoked. `'handler'` means your own handler threw or returned a rejected promise, both of which are caught.
+</ParamField>
+
+The SDK does not auto-reply to a parse failure. It never speaks unprompted, so if you want the invoker to see an error message you must send it yourself. An unregistered `/foo` emits nothing at all, not even an event, because a human talking to some other bot is not your problem.
+
+## Do not answer twice
+
+If your bot also does its own text handling in `messageCreate`, filter out messages the command router already claimed. A claimed message carries `msg.command`, and its handler has already been dispatched.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;   // never answer yourself
+  if (msg.command) return;                        // already handled as a command
+  if (msg.isDM || !msg.serverId) return;          // this handler is server-scoped
+
+  if (msg.content.trim() === 'help') {
+    const list = client.commands.list().map((d) => `/${d.name}: ${d.description}`).join('\n');
+    void msg.channel.send(`commands:\n${list}`);
+  }
+});
+```
+
+`messageCreate` fires first, then dispatch runs, so a listener and a handler see the ordering you would expect.
+
+## How an invocation reaches your bot
+
+There are two lanes, and your handler cannot tell them apart beyond `ctx.source`.
+
+| | Structured (`commandData`) | Text |
+|---|---|---|
+| Where it lives | An encrypted sidecar on the message frame | The message's readable content |
+| Addresses one bot | Yes, it carries the target bot's id | No |
+| Produced by | A client's `/` picker, or `client.sendCommand()` | Anyone typing `/play ...` into a channel |
+| `ctx.source` | `'structured'` | `'text'` |
+
+Both fields of an outbound command are encrypted under one epoch key from one context resolution, so they can never disagree about which key decrypts them.
+
+**The text lane cannot address a bot.** Every bot in the channel with `/play` registered will dispatch a text `/play`. That ambiguity is exactly why the structured lane carries a target bot id.
+
+The resolution rules:
+
+- Structured wins. A message carrying both never dispatches twice.
+- An invocation addressed to another bot is dropped, and does **not** fall back to text.
+- A malformed or undecryptable sidecar falls back to text.
+
+The practical consequence is that a client which has not yet shipped its `/` picker still reaches your bot over text, with the same handler.
+
+### The text grammar
+
+The formatter and the parser are inverses over this grammar:
+
+```
+/<name> [args...]
+
+args are, in declared order:
+  bare token            -> next unfilled positional option
+  "quoted token"        -> same, with spaces preserved
+  optName:value         -> named; fills that option wherever it appears
+  optName:"value here"  -> named, quoted
+
+The LAST option, if type 'string', is greedy: it consumes the rest of the
+line verbatim (unquoted, no escaping) once all earlier options are filled.
+Booleans accept true/false/yes/no/1/0 (case-insensitive).
+```
+
+Against the `/volume` declaration above, all of these parse:
+
+```
+/volume loud announce:true
+/volume quiet no
+/volume normal
+```
+
+Against `/play`, the greedy trailing string means `/play never gonna give you up` arrives as one `query` argument, spaces and all, with no quoting needed.
+
+The prefix is `ClientOptions.commandPrefix`, default `'/'`. Only the text lane uses it: a structured invocation carries the command name outright and is prefix-independent.
+
+<Note>
+  There is no escape character, by design. A value containing a `"` does not round-trip through the text lane. The structured lane carries it verbatim, which is what it is for.
+</Note>
+
+### Invoking a command from your bot
+
+`client.sendCommand()` posts an invocation, either of your own commands or of another bot's.
+
+```ts
+await client.sendCommand(serverId, channelId, 'play', { query: 'never gonna give you up' }, {
+  botId: targetBotId,
+});
+```
+
+<ParamField path="opts.botId" type="string" required>
+  The **target** bot. It has no default on purpose: defaulting it to your own bot would have the bot address itself, the inbound loop guard would drop the invocation, and you would see a silent no-op that looks exactly like a bug.
+</ParamField>
+
+<ParamField path="opts.decl" type="CommandDeclaration">
+  Required when `botId` is a different bot. The SDK cannot know a foreign bot's option order, and it does not read the server registry.
+</ParamField>
+
+<ParamField path="opts.groupId" type="string">
+  The channel's group, when it is not already cached from an inbound frame.
+</ParamField>
+
+The message always carries genuine readable text (`/play never gonna give you up`) alongside the sidecar. That text is what search indexes, what notifications and channel previews are built from, what a reply quotes, and what every surface without a chip renderer shows. It is not a compatibility shim.
+
+## Publishing the menu
+
+`login()` publishes whatever is registered at that moment, so a human's `/` picker can list your commands.
+
+<Warning>
+  **Register before `login()`.** A command added afterwards still dispatches locally, but it is not in the published menu until the next login, and the SDK does not re-publish on its own. This is the most common way to end up with a bot that works when you type the command by hand and is invisible in the picker.
+</Warning>
+
+Publication is best-effort and never blocks login. A rejection or a transport failure is logged behind `debug` and swallowed. Within one process an unchanged menu is sent once, so a reconnect loop cannot spam the registry, and the server independently skips the write when the menu it already holds matches.
+
+<Note>
+  Publishing needs a Cloak backend running its bot command registry. Against an older backend the frame goes nowhere and the SDK carries on. Everything on this page still works over the text lane.
+</Note>
+
+## Guards worth knowing
+
+- A command **never dispatches from `fetchMessages`**. Replaying history would re-execute old commands, so `command` is never set on a fetched message.
+- A command never dispatches from the bot's own messages.
+- **Commands are never dispatched from direct messages.** The structured lane does not exist on the DM frame, and the menu is published per server. `messageCreate` still fires for DMs, so a bot that wants DM commands can parse `msg.content` itself.
+- An unregistered command name is a cheap no-op on every inbound message.
+
+## Registry caps
+
+| Cap | Value |
+|---|---|
+| Commands per bot | 50 |
+| Options per command | 25 |
+| Choices per option | 25 |
+| Command name | 1 to 32 characters, `^[a-z0-9_-]{1,32}$` |
+| Description (command and option) | 1 to 100 characters |
+| Choice string | 1 to 100 characters |
+| Serialized menu | 16 KiB |
+
+Every one of these is checked locally at `register()`, so you find out in your stack trace rather than as a rejected frame at login. The exported constants are on the [commands reference](/api-reference/commands#caps).
+
+## A complete bot
+
+```ts
+import { Client } from '@cloak-software/bot-sdk';
+
+const token = process.env.CLOAK_TOKEN;
+if (!token) throw new Error('Set CLOAK_TOKEN (Cloak > Settings > My Bots)');
+
+const client = new Client({
+  token,
+  // The bot's identity is published to the server once and cannot be replaced.
+  // Without a keystore the identity is per-process: the first run works and
+  // every restart afterwards fails permanently.
+  keystorePath: './command-bot.cloak-keystore.json',
+  requiredPermissions: ['message_send'],
+});
+
+client.commands.register(
+  {
+    name: 'play',
+    description: 'play a song',
+    options: [{ name: 'query', type: 'string', description: 'what to play', required: true }],
+  },
+  async (ctx) => {
+    console.log(`[/play] from ${ctx.message.authorName} via the ${ctx.source} lane`);
+    await ctx.reply(`playing: ${ctx.getString('query')}`);
+  },
+);
+
+client.on('commandError', (e) => {
+  console.warn(`/${e.name} failed (${e.reason}):`, e.error);
+});
+
+client.on('error', (e) => console.warn('[cloak-sdk]', e));
+client.on('ready', () => {
+  console.log(`ready as ${client.user?.id}; ${client.commands.size} commands declared`);
+});
+
+await client.login();
+```
+
+`keystorePath` is not optional in practice. Identity publication is write-once server-side, so a bot with no keystore is bricked on its second run. See [keys and the keystore](/concepts/keys-and-keystore).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Commands reference" icon="terminal" href="/api-reference/commands">
+    Every export from the commands module, with the caps and the parser helpers.
+  </Card>
+  <Card title="What is encrypted, and what is not" icon="lock" href="/concepts/encryption-lanes">
+    Why the menu is plaintext while the invocation body is not.
+  </Card>
+  <Card title="Command bot example" icon="robot" href="/examples/command-bot">
+    The runnable version of this page.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api-reference/events#commanderror">
+    `commandError`, `sendRejected`, and the rest of the event map.
+  </Card>
+</CardGroup>

@@ -1,0 +1,152 @@
+---
+title: "Install and requirements"
+description: "What the SDK needs from your host, what npm install actually pulls, and the two optional extras."
+---
+
+The SDK is a normal npm package with no build step and no install-time compilation.
+
+<CodeGroup>
+```bash npm
+npm install @cloak-software/bot-sdk
+```
+
+```bash pnpm
+pnpm add @cloak-software/bot-sdk
+```
+
+```bash yarn
+yarn add @cloak-software/bot-sdk
+```
+</CodeGroup>
+
+The package is ESM only and ships its own `.d.ts` declarations.
+
+## Node version
+
+The SDK requires Node `^20.19.0 || >=22.12.0`. That range is narrower than it looks, so read it literally:
+
+| Node line | Supported |
+| --- | --- |
+| 18.x and earlier | No |
+| 20.0 through 20.18 | No |
+| 20.19 and later 20.x | Yes |
+| 21.x | No, no 21 release qualifies |
+| 22.0 through 22.11 | No |
+| 22.12 and later 22.x | Yes |
+| 23 and later | Yes |
+
+### Why the floor exists
+
+The floor is a crypto requirement, not a networking one. The HPKE wrap engine and the hashing and curve libraries under it draw randomness from `globalThis.crypto.getRandomValues`, read lazily at call time. Node 19 and later define `globalThis.crypto` in ESM. Node 18 does not.
+
+That produces a failure with unhelpful timing. On Node 18 the SDK imports fine, and a bot with an existing keystore can even log in fine, because importing a stored identity and unwrapping a key consume no randomness. It then dies later, at the first identity generation or the first message encrypt, with `crypto.getRandomValues must be defined`.
+
+`login()` pre-empts that. It checks the runtime as its first step and throws a `CloakEnvironmentError` carrying a remedy:
+
+```
+Unsupported Node runtime v18.20.8: cloak-sdk requires ^20.19.0 || >=22.12.0.
+The HPKE wrap engine draws randomness from globalThis.crypto.getRandomValues,
+which Node 18 and earlier do not define in ESM ...
+```
+
+If you want to assert the range yourself, the SDK exports `assertSupportedRuntime()` and the `SUPPORTED_NODE` string.
+
+<Warning>
+  If you hit that error on a host image you did not build, check that the process really runs the Node you installed. `process.version` is the value the guard read, and `generateDependencyReport()` prints it.
+</Warning>
+
+## What `npm install` does not do
+
+The default connection is a plain `wss://` WebSocket. Every dependency the SDK actually loads is pure JavaScript: `ws` for the socket, and the `@noble` ciphers, curves, and hashes packages for crypto.
+
+That gives you a short list of things you do not need:
+
+- No compiler, and no node-gyp step. Nothing compiles at install time.
+- No native addon in the import graph on the default path.
+- No glibc floor, so musl hosts like Alpine work.
+- No Dockerfile, no build step, and no git dependency.
+
+`npm i && node bot.js` is the whole deployment.
+
+## The two optional extras
+
+The package declares three `optionalDependencies`, covering two opt-in features. Neither is imported unless you ask for it.
+
+| Extra | What it adds | What it costs |
+| --- | --- | --- |
+| WebTransport lane | `@fails-components/webtransport` and `@fails-components/webtransport-transport-http3-quiche`, both pinned to the same exact version `1.6.5` | A native Quiche addon that needs glibc 2.38 or newer. Ubuntu 24.04 works at 2.39. Debian bookworm is 2.36 and fails. |
+| Voice media engine | `@livekit/rtc-node`, pinned to `0.13.31`, roughly 19 MB installed including its prebuilt addon | A prebuilt native with no musl build, so it does not run on Alpine, and a glibc floor of 2.28. Publishing audio also needs a patch applied in your own project. |
+
+Opt into the first with `transport: 'webtransport'` in `ClientOptions`, and into the second by attaching a `VoiceMediaSession`. The voice control plane (joining a channel, reading the roster) needs neither: it rides the same wire as everything else.
+
+<Note>
+  `optionalDependencies` means "a failure to install does not fail your install". It does not mean "does not install". npm pulls all three by default and skips only a platform it has no prebuild for, so roughly 19 MB of voice engine lands in a text-only bot's `node_modules` too.
+</Note>
+
+Nothing imports either extra unless you opt in, so a missing or broken build costs you disk, not runtime compatibility. To skip them outright:
+
+```bash
+npm i @cloak-software/bot-sdk --omit=optional
+```
+
+Reach for Docker only if you need one of these two. Otherwise it buys you nothing.
+
+<Warning>
+  Publishing voice audio needs a one-line patch to `@livekit/rtc-node` in your own project, because the upstream package cannot install a per-participant frame key as published. The patch file ships inside the SDK tarball. See [Voice runtime and troubleshooting](/voice/runtime).
+</Warning>
+
+## Supported hosts
+
+Any host running a supported Node version works: Railway, Fly, Render, a systemd unit on a VPS, a Raspberry Pi, a container of your own. The SDK opens one outbound `wss://` connection and needs no inbound port.
+
+Two host decisions matter more than the rest:
+
+- **The token comes from the environment.** Use a secret manager, a platform secret, or `--env-file`. Anyone holding the token is a full encrypted member of every server your bot is in.
+- **The keystore must survive restarts.** On a host with a writable disk, point `keystorePath` at a mounted volume, not at the ephemeral container filesystem. On a host with no writable disk, use a keystore adapter and put its written blob in your platform's secret store. See [Keystore backends](/production/keystore-backends).
+
+## What the other side needs
+
+Your bot never generates a server's conversation key. A human member's client wraps that key and uploads it, and this SDK produces and accepts only the current HPKE wrap format.
+
+So the humans in your bot's servers must be on a Cloak client build that ships it. If one is not, that member's key handoff fails, and the SDK names the offending peer in a warning rather than failing silently.
+
+## Checking an install
+
+The SDK ships a dependency report that tells you what your host actually resolved: the Node version and whether it satisfies the range, the platform, architecture and glibc, whether a secure random source is reachable, the resolved crypto library versions, and which optional natives are present. It opens no socket, spawns no process, and loads no native addon.
+
+It returns the report as a string rather than printing it, so print it yourself:
+
+```bash
+printf "import { generateDependencyReport } from '@cloak-software/bot-sdk';\nconsole.log(generateDependencyReport());\n" > doctor.mjs
+node doctor.mjs
+```
+
+<Warning>
+  Do not run it with `node -e` or `node -p`. Those modes define a `crypto` global in their own eval bootstrap that a normal process would not have, and the leak reaches modules imported from them. The report cannot tell that apart from a real one, so it will tell you a secure RNG is available on a runtime that has none. Run it from a file.
+</Warning>
+
+`dependencyReport()` returns the same data structured, and `hasSecureRandom()` runs just the RNG probe. Paste the string form into any bug report.
+
+## License
+
+The SDK is proprietary software owned by Cloak Software LLC. It is free to install and use for building bots, and the full grant is in the `LICENSE` file shipped inside the package. Two limits are worth knowing before you start:
+
+- You may not redistribute or republish the SDK, or a thin wrapper around it, as a competing library.
+- Your use is also governed by the [Bot Developer Terms](/legal/developer-terms).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    A running bot in about five minutes.
+  </Card>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why a keystore is mandatory, and what it holds.
+  </Card>
+  <Card title="Transports and endpoints" icon="network-wired" href="/concepts/connection-lifecycle">
+    The default WebSocket lane, the WebTransport opt-in, and the endpoints.
+  </Card>
+  <Card title="Deploying a bot" icon="server" href="/production/deploying">
+    Hosts, secrets, and keeping the keystore durable.
+  </Card>
+</CardGroup>

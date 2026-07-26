@@ -1,0 +1,168 @@
+---
+title: "Known limitations"
+description: "The honest list. What is broken, what is deliberately absent, and what will not be built. Check here before you spend an evening debugging."
+---
+
+This page exists so you stop debugging things that are not your fault. Each item says what happens, why, and whether it is expected to change.
+
+## Broken today
+
+### `fetchMembers()` hangs
+
+<Warning>
+  `fetchMembers()` and `guild().fetchMembers()` are **broken against every current backend**. They neither resolve nor reject. The promise hangs until the transport timeout.
+</Warning>
+
+A backend change made the underlying opcode direct-message-only, so a server-scoped request produces **no reply frame of any kind**, not even an error code. This is not flakiness and it is not a permission problem. It affects every bot on every server.
+
+The practical consequence is worth stating plainly: **`try`/`catch` does not save you**, because nothing is thrown, and `await` blocks the code path it is on. If you have a command that enumerates members, it will appear to do nothing forever.
+
+```ts
+// Do not do this. It never returns.
+const members = await client.guild(serverId).fetchMembers();
+```
+
+`fetchRoles()` is unaffected and works normally. So does everything else in the read surface.
+
+The rebuild is planned and the signature will survive it, so code written against `fetchMembers()` stays valid. It just cannot run today.
+
+## Not exposed to bots
+
+### Direct message reads, edits, reactions and pins
+
+A bot can hold a 1:1 end-to-end encrypted DM with a human, and both directions work. What does not work inside a DM:
+
+| Call | Behavior in a DM |
+| --- | --- |
+| `msg.react()` / `unreact()` | Rejects |
+| `msg.edit()` | Rejects |
+| `msg.delete()` | Rejects |
+| `msg.pin()` / `unpin()` | Rejects |
+| `fetchMessages()` | Server-scoped only, so there is no DM history read |
+| `msg.repliedTo` | Always `null` |
+| Slash commands | Never dispatched from a DM |
+
+The backend implements most of these operations for DMs, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. `reply()` and `channel.send()` work normally, and `messageCreate` still fires, so you can parse `msg.content` yourself if you want DM commands.
+
+### Group DMs
+
+Not implemented. The group-DM lane has a different, versioned key model. 1:1 DMs are the whole DM surface today.
+
+### The REST lane is off by default
+
+`client.rest` is disabled server-side. The first call rejects with a message saying the flag is unset. When an operator does enable it, the credential is scoped behind a default-deny allowlist that denies the custom-emoji and audit-log reads, which is why the SDK ships no `fetchCustomEmojis()` and no `fetchAuditLog()`. See [What the server must support](/production/backend-requirements).
+
+### The `typing` event has no channel
+
+`serverId` and `channelId` on the `typing` event are always `null`. This is a wire fact, not a decode gap: the relay frame carries no routing tail, and the source channel travels in the server's internal fanout envelope, which never reaches the client.
+
+<Warning>
+  Do not substitute the bot's own selection cursor. It points wherever the bot last sent, which has nothing to do with who is typing. **A bot cannot currently tell which channel a typing event came from.**
+</Warning>
+
+The fields are typed nullable so that a future backend appending routing is an additive change rather than a breaking one.
+
+## Voice
+
+### Bots cannot publish video, and will not
+
+A bot never gets a subscription tier, and the backend restricts a bot's publish sources to microphone at token-mint time. Camera and screenshare are denied at the credential, not by the SDK, so there is no path to enable and nothing to configure.
+
+### `p2pWebcam` and `p2pStream` are dead
+
+<Warning>
+  `VoiceParticipant.p2pWebcam` and `VoiceParticipant.p2pStream` still exist on the type, but peer-to-peer video was removed from the platform. The server no longer sends those columns, so both fields are permanently `false`. Do not branch on them, and never present peer-to-peer video as a feature.
+</Warning>
+
+They remain on the type for compatibility with code written before the removal.
+
+### A bot cannot detect a voice encryption failure
+
+The voice media engine surfaces **no per-participant end-to-end encryption failure state**. The generic encryption-error event carries no identity, missing-key and decryption-failed conditions are dropped, and a keyless frame decryptor retries quietly forever. The one per-participant event that exists reports that frames are *marked* encrypted and stays true through the exact key and identity mismatch cases you would want it to catch.
+
+So **a bot cannot detect that nobody can decrypt it**, and a listening bot cannot detect that it is failing to decrypt someone. Silence is the only symptom, and nothing reports it.
+
+Because of that, the SDK ships **no** voice health check and **no** retry-on-decrypt-failure path. Both would be theatre. The defence is to be right by construction: `attach()` installs exactly the key material the key manager returns, under the identity the engine reported, before publishing, and fails closed on every precondition. If members hear silence, suspect the key or the identity rather than the network.
+
+Related: a bot without `voice_listen` holds only its own frame key and is cryptographically unable to decrypt any member. A bot **granted** `voice_listen` can decrypt everyone in the channel, by design. Never quote the first sentence without the second. Also, a `voice_listen` bot must join **non-deafened**, because subscription is baked into the join credential.
+
+## Encryption boundaries
+
+Message bodies are end-to-end encrypted. Two deliberate exceptions are worth knowing before you design around "the server cannot read anything".
+
+### Mention targets ride in plaintext
+
+A Cloak mention is two independent things: pill text inside the encrypted body, and a plaintext `[id, isRole]` pair in the send frame. The server has to read the second one to fan out notifications without decrypting the first.
+
+<Warning>
+  Anyone with server-side visibility can see **who** your bot pinged, just not **what** it said. This is Cloak's design, not an SDK leak, and moving the pairs into the ciphertext would simply stop notifications from being delivered.
+</Warning>
+
+### The webhook embed lane is not encrypted at all
+
+`sendEmbed()` and `postToWebhook()` post over a lane that is stored as **plaintext** server-side and renders under a **webhook identity**, not your bot's. The payload type is named `UnencryptedWebhookPost` on purpose, and `unencrypted: true` is required and enforced at runtime.
+
+Use `sendCard()` when you want a rich card that stays encrypted and posts as the bot. See [Choosing an embed lane](/guides/rich-cards).
+
+## Rich cards
+
+### Media must be Cloak-hosted
+
+The four slots a card fetches with no user action, `image.url`, `thumbnail.url`, `author.icon_url` and `footer.icon_url`, must have origin exactly `https://media.cloak.chat`. Anything else throws a `CloakEmbedError` locally, before a frame leaves the process.
+
+Rendering a card fetches its media, which reveals the **viewer's IP address** to whoever hosts the URL. On this lane that URL is chosen by a third-party bot author who could also serve different bytes to different viewers, with no new message for moderation to see. The server cannot rewrite anything here, because it cannot read the payload.
+
+There is deliberately **no option, environment variable or flag** that widens the allowed origin. The link slots (`url`, `author.url`, `provider.url`) are unrestricted, because nothing is fetched for them at render.
+
+Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. A bot-side upload helper is designed but not shipped, because it needs the REST lane that is disabled server-side.
+
+### `fields` render on desktop only
+
+<Warning>
+  Card `fields` render on **desktop only** today. Mobile drops the rows silently, with no error anywhere. Put anything a reader must actually see in `description`, and treat `fields` as decoration until the mobile port lands.
+</Warning>
+
+Three keys that exist on the webhook lane and do not exist on the card lane: `video` (removed entirely, passing it throws), `provider.icon`, and unknown keys (rejected rather than silently dropped, because the renderer would drop them while they still counted against the payload budget).
+
+## Slash commands, v1
+
+Two properties you have to design around rather than work around.
+
+<AccordionGroup>
+  <Accordion title="There is no ephemerality">
+    An invocation is a normal message encrypted with the channel's key. **Every member holding that key can read every invocation**, and it is a durable message row. There is no "only you can see this". Ephemeral responses need a different key lane and are a later version. Do not fake them by deleting the message afterwards.
+  </Accordion>
+  <Accordion title="The registry menu is plaintext server-side">
+    Command names, descriptions, option names and choice labels are stored and served **unencrypted**, so that a client's picker can render them without holding a key. Never put a secret, an internal hostname, or a customer name in a command description or a choice label.
+  </Accordion>
+</AccordionGroup>
+
+Two more mechanics worth knowing: register commands **before** `login()`, because that is when the menu is published and the SDK does not re-publish on its own, and commands are never dispatched from DMs.
+
+## Things that are easy to misread as bugs
+
+| Behavior | It is working as designed |
+| --- | --- |
+| `send()` resolves, then nothing appears | Sends are fire-and-forget. A denial arrives on the `sendRejected` event, not as a rejected promise. |
+| A handler threw and nothing was logged | Attach an `error` listener. Without one, caught failures stay silent by design. |
+| An embed posted fine but has no images | A server-side image-proxy setting. See [What the server must support](/production/backend-requirements). |
+| The bot disconnected once and never retried | A terminal login rejection, `-2` or `-12`. Retrying cannot fix either. |
+| Events for a server the bot has not selected do not arrive | Requires a backend with membership-routed hooks. |
+| `WebTransport` fails on your PaaS image | That lane needs glibc 2.38 or newer. The default `wss://` lane needs nothing. |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
+    Symptom-indexed triage for the failures you can see.
+  </Card>
+  <Card title="What the server must support" icon="server" href="/production/backend-requirements">
+    The server-side half of this list.
+  </Card>
+  <Card title="Deploying a bot" icon="rocket" href="/production/deploying">
+    Getting a bot onto a host without tripping over the keystore.
+  </Card>
+  <Card title="Changelog and migration" icon="clock-rotate-left" href="/changelog">
+    What changed in 0.2.0, including the breaking changes.
+  </Card>
+</CardGroup>

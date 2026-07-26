@@ -3,7 +3,7 @@ title: "Channels and groups"
 description: "Create, rename, move, and delete channels and groups."
 ---
 
-Channels live inside groups, and a server is a set of groups holding channels. Your bot can shape that structure at runtime: open a new channel, rename it, move it between groups, or tear it down. Every method on this page needs the `manage_channels` permission, and every one reports a server deny by rejecting with `CloakActionError`.
+Channels live inside groups, and a server is a set of groups holding channels. Your bot can shape that structure at runtime: open a new channel, rename it, move it between groups, or tear it down. Every method on this page needs the `manage_channels` permission, and every one reports a server denial by rejecting with a `CloakActionError`.
 
 ## Channels live inside groups
 
@@ -23,12 +23,14 @@ console.log(`created channel ${channelId}`);
 ```
 
 <ParamField path="channelType" type="number" default="0">
-  The kind of channel to create. Defaults to `0`, a text channel.
+  The kind of channel to create. `0` is a text channel, and it is the only value this method is documented and tested for. Cloak has other channel types, but nothing else in the SDK understands them: leave this at the default unless you already know the numeric type your server expects.
 </ParamField>
 
 <ResponseField name="returns" type="Promise<string>">
   The id of the newly created channel.
 </ResponseField>
+
+The SDK remembers the new channel's group, so a later `send()` into it does not need a `groupId` in `SendOptions`.
 
 ## Rename a channel
 
@@ -48,11 +50,11 @@ await client.moveChannel(serverId, channelId, fromGroupId, toGroupId, 0);
 ```
 
 <ParamField path="newOrder" type="number">
-  The channel's position in the destination group. Clamped to the range `0` to `126`.
+  The channel's position in the destination group. Floored to a whole number and clamped to the range `0` to `126`.
 </ParamField>
 
 <Warning>
-  Moving a channel to the same group and the same order is a no-op, and the server rejects it. Move to a different group or a different position.
+  Moving a channel to the same group at the same order is a no-op, and the server rejects it rather than ignoring it. Move to a different group or a different position.
 </Warning>
 
 ## Delete a channel
@@ -85,7 +87,7 @@ const channelId = await client.createChannel(serverId, 'news', groupId);
 ```
 
 <ResponseField name="returns" type="Promise<string | undefined>">
-  The id of the new group, or `undefined` when it could not be captured.
+  The id of the new group, or `undefined` when it could not be captured. `undefined` does not mean the group failed to create.
 </ResponseField>
 
 ### Rename a group
@@ -112,18 +114,39 @@ await client.deleteGroup(serverId, groupId);
 
 Every method above is also available on the [`guild()` handle](/guides/guild-handle), which binds the server id for you so you pass one fewer argument. This reads well when a command already knows which server it is acting on.
 
+`Message.serverId` is `string | null` and is `null` for a direct message, which arrives on the same `messageCreate` event. Guard before you bind.
+
 ```ts
+import { CloakActionError } from '@cloak-software/bot-sdk';
+
 client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.isDM || !msg.serverId) return;        // a DM has no server to bind
   if (msg.content.trim() !== '!new-channel') return;
 
-  const guild = client.guild(msg.serverId);
-  const groupId = await guild.createGroup('Bot Output');
-  if (!groupId) return; // id was not captured, nothing to fill
-  const channelId = await guild.createChannel('bot-log', groupId);
-  await msg.reply(`opened <#${channelId}>`);
+  const g = client.guild(msg.serverId);
+  try {
+    const groupId = await g.createGroup('Bot Output');
+    if (!groupId) return; // id was not captured, nothing to fill
+    await g.createChannel('bot-log', groupId);
+    await msg.channel.send('Opened #bot-log under Bot Output.');
+  } catch (err) {
+    if (err instanceof CloakActionError) {
+      await msg.channel.send(`Could not create the channel: ${err.message}`);
+    }
+  }
 });
 ```
+
+<Note>
+  Cloak has no channel-mention entity. Writing `<#channelId>` in a message body renders as literal text, not a link, so name the channel in plain text as above. The only id-keyed mention Cloak renders is the user mention, produced by `userMention()`. Role, `@everyone`, and `@here` mentions are name-keyed literal text.
+</Note>
+
+The announcement uses `msg.channel.send()`, a plain send into the same channel. `msg.reply()` would post a true reply with a quote header and fire a mute-piercing "replied to you" notification, which a status line does not need.
+
+<Note>
+  `send()` and `msg.channel.send()` are fire-and-forget. The promise resolves when the frame leaves the process, not when the server accepts it. A denied send arrives later on the `sendRejected` event, so the `try/catch` above sees channel failures but not send failures. The channel and group methods on this page are different: they are awaited actions that really do reject.
+</Note>
 
 ## Listen for lifecycle changes
 
@@ -149,7 +172,7 @@ client.on('groupDelete', ({ groupId, serverId }) => {
 ```
 
 <Note>
-  Routing these events to a bot for a server it has not selected requires an up-to-date Cloak server.
+  Routing these events to a bot for a server it has not selected requires a current Cloak server. An older server delivers them only for the selected server.
 </Note>
 
 ## Servers are owner-level
@@ -173,7 +196,7 @@ client.on('serverUpdate', ({ serverId, name }) => {
   <Card title="Events" icon="bell" href="/api-reference/events">
     Every lifecycle event and its payload.
   </Card>
-  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Catch a CloakActionError when the server denies an action.
   </Card>
   <Card title="Permissions" icon="key" href="/concepts/permissions">

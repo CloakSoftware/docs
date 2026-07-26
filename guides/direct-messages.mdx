@@ -1,0 +1,186 @@
+---
+title: "Direct messages"
+description: "Hold a 1:1 encrypted DM with a human: sendDM, inbound isDM messages, and what does not work in a DM."
+---
+
+A bot can hold a 1:1 direct message with a human, end to end encrypted exactly like a channel. Group DMs are not supported.
+
+Two things shape every DM handler you write. Inbound DMs arrive on the **same `messageCreate` event** as server messages, and a DM message has **no server**, so `msg.serverId` is `null`.
+
+## Who may DM whom
+
+The server decides, and it decides deny-by-default. A human and a bot may DM each other only if that human **owns the bot**, or the two **share at least one server**.
+
+The SDK never pre-computes this. An ineligible target rejects with a `CloakActionError` from the create step, before anything is encrypted or sent.
+
+## Sending a DM
+
+`client.sendDM(userId, text, opts?)` sends a direct message to a user, creating the DM on first contact.
+
+```ts
+await client.sendDM(userId, 'check your inbox');
+```
+
+There is no separate "open a DM" step. First contact with a peer costs a create plus a key exchange. Every later send is just a send.
+
+<ParamField path="userId" type="string" required>
+  The user to DM. A bot cannot DM itself, and that rejects locally.
+</ParamField>
+
+<ParamField path="text" type="string" required>
+  The message body. Encrypted before it leaves the process.
+</ParamField>
+
+<ParamField path="opts" type="SendOptions">
+  `{ groupId?, mentions?, replyTo? }`, with reduced DM semantics. See below.
+</ParamField>
+
+`SendOptions` is the same object you pass to `send()`, with three differences inside a DM:
+
+- `replyTo` works. The DM branch parses the same reply slot.
+- `mentions` only notifies for **direct user** mentions. Role, `@everyone`, and `@here` pairs are dropped server-side inside a DM.
+- `groupId` is meaningless in a DM and is ignored.
+
+<Warning>
+  `sendDM()` is fire-and-forget on the send itself, like `send()`. The create and key-exchange steps are awaited and can reject, but a server-side **denial of the message** does not reject the promise. It arrives on the `sendRejected` event, where `serverId` is `null` and `channelId` is the dm id. Bot sends are rate limited server-side, which surfaces there as code `-9`.
+</Warning>
+
+## Receiving a DM
+
+DMs come in on `messageCreate`, with `isDM` set.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore self
+
+  if (msg.isDM) {
+    await msg.reply(`you said: ${msg.content}`); // routes back into the DM
+    return;
+  }
+
+  // Server handling below this line. msg.serverId is non-null here.
+});
+```
+
+<ResponseField name="isDM" type="boolean">
+  `true` for a direct message.
+</ResponseField>
+
+<ResponseField name="serverId" type="string | null">
+  **`null`** for a DM. A direct message has no server at all.
+</ResponseField>
+
+<ResponseField name="dmId" type="string | null">
+  The dm id for a DM, `null` otherwise. Always equal to `channelId` when set.
+</ResponseField>
+
+<ResponseField name="channelId" type="string">
+  For a DM this holds the dm id. One convention throughout the SDK: `channelId` is always "the thing this message lives in", so `msg.reply()` and `msg.channel.send()` work without branching.
+</ResponseField>
+
+<ResponseField name="repliedTo" type="null">
+  Always `null` on a DM. The notify frame a bot receives carries no reply array, so there is nothing to decode. This is a wire fact, not a gap.
+</ResponseField>
+
+The bot never receives its own DM, on either lane.
+
+### Guard before anything server-scoped
+
+<Warning>
+  `Message.serverId` is `string | null`. Anywhere you pass `msg.serverId` to a server-scoped call (`client.can()`, `client.guild()`, `client.send()`, `sendEmbed`, moderation, `fetchMessages`), guard first:
+
+  ```ts
+  if (msg.isDM || !msg.serverId) return;
+  ```
+
+  This is the single most common way a bot written before 0.2.x breaks. TypeScript points at every site.
+</Warning>
+
+## What does not work on a DM message
+
+`react()`, `unreact()`, `edit()`, `delete()`, `pin()`, and `unpin()` all **reject** on a DM message. The rejection is a plain `Error` naming the method, not a `CloakActionError`.
+
+The backend does implement those operations for DMs, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. It refuses rather than writing blind.
+
+`reply()` and `channel.send()` work normally.
+
+Slash commands are **not dispatched from DMs**. The structured command lane does not exist on the DM notify frame, and the menu a client's `/` picker renders is published per server. `messageCreate` still fires, so parse `msg.content` yourself if you want DM commands.
+
+There is also no DM history read. `fetchMessages` is server-channel only, so a bot cannot page backward through a DM. It sees what arrives while it is connected.
+
+## The keystore is not optional here
+
+DM state lives in the same keystore as your identity and server keys: both the peer-to-dm map and the conversation key are written there.
+
+Without a keystore, every restart re-runs the key exchange, and, far worse, a regenerated identity can never be re-published. See [Keys and the keystore](/concepts/keys-and-keystore) for why a bot with no keystore is bricked on its second run.
+
+Losing only the DM half is mild by comparison. The peer-to-dm map is re-derivable, because the create call is idempotent for an existing pair and returns the same id. A lost DM key means the bot establishes a new one, and the peer's older messages stay unreadable.
+
+If an inbound DM arrives that the bot cannot decrypt, `content` is the empty string `''` and the SDK quietly re-runs the key exchange in the background, throttled per peer. Handle `''` rather than assuming every DM is readable on arrival.
+
+## A complete DM echo bot
+
+This is `examples/dm-smoke.ts`. Run it with `npm run example:dm`.
+
+```ts
+import { Client } from '@cloak-software/bot-sdk';
+
+const token = process.env.CLOAK_TOKEN;
+if (!token) throw new Error('Set CLOAK_TOKEN (Cloak > Settings > My Bots)');
+
+const client = new Client({
+  token,
+  // Persists the identity, the DM keys, and the peer-to-dm map. Required in
+  // production: identity publication is write-once server-side.
+  keystorePath: './dm-smoke.keystore.json',
+  requiredPermissions: ['message_send'],
+});
+
+client.on('ready', async () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  const target = process.env.DM_TARGET_USER_ID;
+  if (!target) return;
+  try {
+    // Lazily runs create plus key exchange, then the send.
+    await client.sendDM(target, 'hello from dm-smoke, reply and I will echo you');
+  } catch (err) {
+    // The interesting failure: not the owner, and no shared server.
+    console.error('sendDM failed:', (err as Error).message);
+  }
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (!msg.isDM) return; // server traffic is not this bot's business
+
+  // serverId is null here. Never pass it to a server-scoped call.
+  console.log(`DM from ${msg.authorName} in dm ${msg.dmId}: ${msg.content}`);
+  await msg.reply(`echo: ${msg.content || '(could not decrypt, key still in flight?)'}`);
+});
+
+client.on('sendRejected', (r) => {
+  // A DM deny carries no routing, so serverId is null.
+  console.error(`send rejected (${r.code}): ${r.message}`);
+});
+
+client.on('error', (e) => console.error('[client error]', e.source, e.context, e.message));
+
+await client.login();
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    send(), SendOptions, and why sends are fire-and-forget.
+  </Card>
+  <Card title="Keys and the keystore" icon="lock" href="/concepts/keys-and-keystore">
+    Why a bot without a keystore cannot be restarted.
+  </Card>
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    The pill, the ping, and what rides in plaintext.
+  </Card>
+  <Card title="DM echo bot" icon="envelope" href="/examples/dm-bot">
+    The full runnable example.
+  </Card>
+</CardGroup>

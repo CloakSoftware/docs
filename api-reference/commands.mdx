@@ -1,0 +1,422 @@
+---
+title: "Commands"
+description: "The slash-command registry, declaration types, caps, and the text and sidecar helpers."
+---
+
+Everything on this page is exported from the package root.
+
+```ts
+import {
+  CommandRegistry,
+  COMMAND_OPTION_TYPE_CODES,
+  DEFAULT_COMMAND_PREFIX,
+  formatInvocationText,
+  parseInvocationText,
+} from '@cloak-software/bot-sdk';
+```
+
+You rarely construct a `CommandRegistry` yourself: `client.commands` is one, already wired to the client's dispatch. The standalone helpers exist for tests, for tooling, and for anything you build on top of raw frames. For how the pieces fit together, read [slash commands](/guides/slash-commands) first.
+
+## CommandRegistry
+
+The bot's local command set: declaration plus handler, keyed by name. `client.commands` returns the client's instance. `register()` is synchronous and callable before `login()`.
+
+### register
+
+```ts
+register(decl: CommandDeclaration, handler: CommandHandler): this
+```
+
+Declares a command and the function that runs it. Returns the registry, so calls chain.
+
+Throws synchronously on anything the server would reject: an invalid name, a missing or over-long description, a duplicate command name, a duplicate option name, an unknown or `attachment` option type, a required option that follows an optional one, a bad choice list, the 50-command cap, or a serialized menu over `MAX_COMMANDS_PAYLOAD`. On the payload-cap throw the command is removed again, so the registry is never left over the limit.
+
+### get
+
+```ts
+get(name: string): { decl: CommandDeclaration; handler: CommandHandler } | undefined
+```
+
+Looks a command up, case-insensitively. Returns `undefined` when it is not registered.
+
+### list
+
+```ts
+list(): CommandDeclaration[]
+```
+
+Every declaration, in registration order. Useful for building a `help` response.
+
+### size
+
+```ts
+get size(): number
+```
+
+How many commands are registered.
+
+### accepts
+
+```ts
+accepts(name: string, args: CommandArgs): boolean
+```
+
+Whether a structured invocation is one this registry can dispatch: the name is registered, every arg key is a declared option, every value fits its declared type and choice list, and every required option is present. This is the `CommandLookup` implementation.
+
+### parseFromText
+
+```ts
+parseFromText(text: string, prefix?: string): TextParseResult
+```
+
+Runs a message's readable text through the [text grammar](/guides/slash-commands#the-text-grammar). `prefix` defaults to `DEFAULT_COMMAND_PREFIX`.
+
+An unregistered `/foo` returns `{ kind: 'none' }`, which is why running this on every inbound message is cheap.
+
+<Note>
+  The text lane cannot address a bot. Every bot in the channel with `/play` registered will match a text `/play`. That is why the structured lane carries a target bot id and why structured wins.
+</Note>
+
+### canonicalMenu
+
+```ts
+canonicalMenu(): CanonicalMenu
+```
+
+The registry's declarations in the shape that gets published at login. Equivalent to `canonicalizeMenu(registry.list())`.
+
+### hash
+
+```ts
+hash(): string
+```
+
+`computeMenuHash(registry.list())`. A session-local skip guard that never goes on the wire.
+
+## Declaration types
+
+### CommandDeclaration
+
+<ResponseField name="name" type="string" required>
+  Lowercase, matching `^[a-z0-9_-]{1,32}$`. The server casefolds and stores the casefolded form, and the text lane lowercases before matching.
+</ResponseField>
+
+<ResponseField name="description" type="string" required>
+  1 to `MAX_COMMAND_DESC` characters. Served in plaintext to every member of every server the bot is in.
+</ResponseField>
+
+<ResponseField name="options" type="CommandOption[]">
+  The command's arguments. **Declared order is load-bearing**: it is the positional text grammar, and every required option must precede every optional one.
+</ResponseField>
+
+### CommandOption
+
+<ResponseField name="name" type="string" required>
+  Same rule as a command name, and unique within the command.
+</ResponseField>
+
+<ResponseField name="description" type="string" required>
+  1 to `MAX_COMMAND_DESC` characters. Also plaintext.
+</ResponseField>
+
+<ResponseField name="type" type="CommandOptionType" required>
+  See below.
+</ResponseField>
+
+<ResponseField name="required" type="boolean">
+  Must be a real boolean when present. Defaults to optional.
+</ResponseField>
+
+<ResponseField name="choices" type="string[]">
+  Values, as strings. The choice string is both the label and the value, because the wire has no slot for a separate label. Up to `MAX_CHOICES_PER_OPTION` entries of up to `MAX_CHOICE_LEN` characters. A `boolean` option cannot carry choices, and for `integer` and `number` options every choice must coerce.
+</ResponseField>
+
+### CommandOptionType
+
+```ts
+type CommandOptionType =
+  | 'string' | 'integer' | 'boolean' | 'user' | 'channel' | 'role' | 'number';
+```
+
+`user`, `channel` and `role` values are **opaque id strings**. The SDK does no resolution and the clients do no argument autocomplete, so read them with `getString()` and normalize before comparing.
+
+There is no `attachment` type. Declaring one throws at `register()`: upload is closed to bots, so an attachment option could never be filled on the bot's side.
+
+### COMMAND_OPTION_TYPE_CODES
+
+The integer code each option type is published under.
+
+```ts
+const COMMAND_OPTION_TYPE_CODES = {
+  string: 1,
+  integer: 2,
+  boolean: 3,
+  user: 4,
+  channel: 5,
+  role: 6,
+  number: 7,
+} as const;
+```
+
+You need this only if you are building a canonical menu by hand. `canonicalizeMenu()` applies it for you.
+
+## Invocation types
+
+### CommandArgValue
+
+```ts
+type CommandArgValue = string | number | boolean;
+```
+
+One argument value, in either lane.
+
+### CommandArgs
+
+```ts
+type CommandArgs = Record<string, CommandArgValue>;
+```
+
+A full argument set. An unfilled optional option is **omitted entirely**, never present as `null`.
+
+### CommandInvocation
+
+<ResponseField name="name" type="string">
+  The lowercased command name.
+</ResponseField>
+
+<ResponseField name="args" type="CommandArgs">
+  The coerced arguments.
+</ResponseField>
+
+<ResponseField name="source" type="'structured' | 'text'">
+  Which lane it arrived on.
+</ResponseField>
+
+This is the shape of `Message.command`, which is set only on live messages the registry recognises. It is never set on fetched history, and never on the bot's own messages.
+
+### CommandContext
+
+What a handler is handed.
+
+```ts
+interface CommandContext {
+  name: string;
+  args: Record<string, CommandArgValue | undefined>;
+  source: 'structured' | 'text';
+  getString(n: string): string | null;
+  getInteger(n: string): number | null;
+  getNumber(n: string): number | null;
+  getBoolean(n: string): boolean | null;
+  message: Message;
+  reply(text: string, opts?: SendOptions): Promise<void>;
+}
+```
+
+Values are already coerced to their declared type by both lanes. The getters add null safety:
+
+- `getString` stringifies whatever is there, or returns `null` when the option was not filled.
+- `getInteger` returns `null` for an unfilled option, for a boolean, and for anything that is not an integer.
+- `getNumber` returns `null` for an unfilled option, for a boolean, and for anything non-finite.
+- `getBoolean` passes a real boolean through, and otherwise accepts `true`/`yes`/`1` and `false`/`no`/`0` case-insensitively. Anything else is `null`.
+
+`reply` is identical to `message.reply`: a **true reply** into the invoking channel, which fires a "replied to you" notification that pierces mutes. Use `ctx.message.channel.send(text, opts)` for a plain response. Both are fire-and-forget, and a server-side denial arrives on `sendRejected` rather than rejecting the promise.
+
+### CommandHandler
+
+```ts
+type CommandHandler = (ctx: CommandContext) => unknown;
+```
+
+The return value is inspected only to catch a rejected promise. A synchronous throw and a rejected promise both surface on `commandError` with `reason: 'handler'`.
+
+### CommandLookup
+
+```ts
+interface CommandLookup {
+  accepts(name: string, args: CommandArgs): boolean;
+}
+```
+
+The minimum `decodeCommandData()` needs. `CommandRegistry` satisfies it.
+
+### TextParseResult
+
+```ts
+type TextParseResult =
+  | { kind: 'none' }
+  | { kind: 'ok'; invocation: CommandInvocation }
+  | { kind: 'error'; name: string; error: string };
+```
+
+What `CommandRegistry.parseFromText()` returns. `'none'` covers both "not an invocation" and "an unregistered command". `'error'` is what the client turns into a `commandError` with `reason: 'parse'`.
+
+## Caps
+
+Every cap is checked locally, so a violation surfaces at your call site instead of as a rejected frame later. The declaration caps throw at `register()`; `MAX_COMMAND_WIRE` rejects the `sendCommand()` promise before the frame is built.
+
+| Export | Value | What it limits |
+|---|---|---|
+| `MAX_COMMANDS_PER_BOT` | `50` | Commands in one registry |
+| `MAX_OPTIONS_PER_COMMAND` | `25` | Options in one declaration |
+| `MAX_CHOICES_PER_OPTION` | `25` | Entries in one `choices` list |
+| `MAX_CHOICE_LEN` | `100` | Characters in one choice string |
+| `MAX_COMMAND_DESC` | `100` | Characters in a command or option description |
+| `MAX_COMMANDS_PAYLOAD` | `16384` | Bytes of the serialized canonical menu |
+| `MAX_COMMAND_WIRE` | `2048` | Characters of the encrypted sidecar on one invocation |
+
+<Note>
+  Command and option names are capped at 32 characters by `^[a-z0-9_-]{1,32}$`, enforced by `validateDeclaration()`. The constant and the regex behind that rule are internal and are not exported, so do not write an import for them.
+</Note>
+
+### DEFAULT_COMMAND_PREFIX
+
+```ts
+const DEFAULT_COMMAND_PREFIX = '/';
+```
+
+The text lane's default prefix, and the default for every `prefix` parameter below. Override it per client with `ClientOptions.commandPrefix`. The structured lane carries the command name outright and is prefix-independent.
+
+### COMMAND_DATA_VERSION
+
+```ts
+const COMMAND_DATA_VERSION = 1;
+```
+
+The version stamped by `encodeCommandData()`. `decodeCommandData()` returns `null` for anything else.
+
+## Menu helpers
+
+### canonicalizeMenu
+
+```ts
+canonicalizeMenu(decls: readonly CommandDeclaration[]): CanonicalMenu
+```
+
+Turns declarations into the exact array-shaped payload published at login. Commands are sorted by name, so the result is stable across declaration order. Options keep their **declared** order, because that order is the text grammar and sorting them would silently change it.
+
+### computeMenuHash
+
+```ts
+computeMenuHash(decls: readonly CommandDeclaration[]): string
+```
+
+The SHA-256 hex of the canonical menu. This is a **session-local skip guard only** and never goes on the wire: the server hashes the payload it serialized itself, so one buggy client cannot pin a stale menu forever.
+
+### validateDeclaration
+
+```ts
+validateDeclaration(decl: CommandDeclaration): void
+```
+
+Throws on anything the server would reject, with a message naming the rule. `register()` calls it for you. Call it directly when you are validating a declaration you did not write, such as a foreign bot's declaration before passing it to `sendCommand()`.
+
+### CanonicalOption, CanonicalCommand, CanonicalMenu
+
+```ts
+type CanonicalOption = [string, number, string, boolean, string[]];
+type CanonicalCommand = [string, string, CanonicalOption[]];
+type CanonicalMenu = CanonicalCommand[];
+```
+
+A `CanonicalOption` is `[name, typeCode, description, required, choices]`. Note the element order: the integer type code is at index 1 and the description at index 2. `required` must be a real boolean, since the server coerces it strictly and a `1` would read as false, quietly making every required option optional.
+
+A `CanonicalCommand` is `[name, description, options]`.
+
+These are arrays rather than objects so the hash cannot shift with key order. If you build one by hand, use `COMMAND_OPTION_TYPE_CODES` for the type slot.
+
+## Text lane helpers
+
+### matchCommandName
+
+```ts
+matchCommandName(text: string, prefix?: string): string | null
+```
+
+The lowercased command name a line invokes, or `null` when the line is not an invocation or the name does not match the name rule. Cheap enough to run on every inbound message.
+
+### parseInvocationText
+
+```ts
+parseInvocationText(
+  decl: CommandDeclaration,
+  text: string,
+  prefix?: string,
+): { args: CommandArgs } | { error: string }
+```
+
+Parses one line against one declaration. **Never throws.** A missing required option, an unknown choice value, an uncoercible number, an extra argument, or a line that invokes a different command all come back as `{ error }`.
+
+```ts
+const r = parseInvocationText(decl, '/volume loud announce:true');
+if ('error' in r) console.warn(r.error);
+else console.log(r.args); // { level: 'loud', announce: true }
+```
+
+### formatInvocationText
+
+```ts
+formatInvocationText(
+  decl: CommandDeclaration,
+  args: CommandArgs,
+  prefix?: string,
+): string
+```
+
+The inverse: the human-readable line for an invocation. This is what `sendCommand()` puts in the message content, and it is required, not a compatibility shim. That text is what full-text search sees, what push notifications and channel previews are built from, what a reply quotes, and what every surface without a chip renderer shows.
+
+Arguments are emitted positionally up to the first unfilled option, and from there on in `name:value` form, because positional parsing cannot see a hole. A greedy trailing string is emitted bare unless quoting is needed to survive a round trip.
+
+Unlike the parser, this one **throws**: on an unknown option, a missing required option, or a value that is not one of the option's choices. Those are call-site bugs.
+
+## Sidecar codec
+
+The structured lane's payload. The client encodes it on `sendCommand()` and decodes it on inbound messages, so most bots never call these directly.
+
+### encodeCommandData
+
+```ts
+encodeCommandData(cmd: CommandData): string
+```
+
+Serializes a `CommandData` to the JSON payload that gets encrypted into the message sidecar. The bot id is canonicalized to undashed lowercase hex and the command name is lowercased.
+
+### decodeCommandData
+
+```ts
+decodeCommandData(json: string, registry?: CommandLookup): CommandData | null
+```
+
+**Never throws.** Returns `null` for bad JSON, a version other than `COMMAND_DATA_VERSION`, a missing or non-string `bot` or `name`, an `args` that is not a plain object, or an argument value that is not a string, finite number, or boolean.
+
+`registry` is optional, and whether you pass it matters. A payload that is structurally valid but addressed to another bot must be dropped without falling back to text, while a merely malformed payload must fall back. Only a structural decode can tell those apart, so the client decodes without a registry first, checks the target bot, and applies the registry after. Pass `registry` when you do not need that distinction.
+
+### CommandData
+
+<ResponseField name="botId" type="string">
+  The **target** bot's id, the dispatch discriminator. Two bots in one channel can both declare `/play`, and every bot in the channel holds the channel key, so without this both would dispatch. Compare it canonicalized, never with a raw `===` on the wire string.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The lowercased command name.
+</ResponseField>
+
+<ResponseField name="args" type="CommandArgs">
+  The arguments. Unfilled optional options are absent.
+</ResponseField>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Slash commands" icon="terminal" href="/guides/slash-commands">
+    The guide: declaring, dispatching, publishing, and the two lanes.
+  </Card>
+  <Card title="Client" icon="plug" href="/api-reference/client">
+    `client.commands`, `sendCommand()`, and `ClientOptions.commandPrefix`.
+  </Card>
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types">
+    `Message`, `SendOptions`, and the rest of the shapes a handler touches.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api-reference/events#commanderror">
+    `commandError` and `sendRejected`.
+  </Card>
+</CardGroup>

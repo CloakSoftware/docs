@@ -1,13 +1,13 @@
 ---
 title: "Types"
-description: "The objects the SDK hands you: Message, Member, Role, BanInfo, and the rest."
+description: "The objects the SDK hands you: Message, SendOptions, Member, Role, and the rest."
 ---
 
-These are the data types you receive in event payloads and from `Client` methods. The SDK ships full TypeScript declarations, so your editor knows all of this already.
+These are the data types you receive in event payloads and pass to `Client` methods. The SDK ships full TypeScript declarations, so your editor knows all of this already.
 
 ## Message
 
-The payload of a [`messageCreate`](/api-reference/events#messagecreate) event, and each element of a [`fetchMessages()`](/api-reference/client#fetchmessages) result. It carries the decrypted content, who sent it, where it came from, when it was sent, any reply context, and the actions you can take on it.
+The payload of a [`messageCreate`](/api-reference/events#messagecreate) event, and each element of a [`fetchMessages()`](/api-reference/client#fetchmessages) result.
 
 ```ts
 interface Message {
@@ -15,8 +15,10 @@ interface Message {
   authorId: string;
   authorName: string;
   messageId: string;
-  serverId: string;
-  channelId: string;
+  serverId: string | null;   // null for a DM
+  channelId: string;         // for a DM, this is the dm id
+  isDM: boolean;
+  dmId: string | null;
   createdAt: Date | null;
   repliedTo: {
     messageId: string;
@@ -24,8 +26,10 @@ interface Message {
     content: string;
     createdAt: Date | null;
   } | null;
-  reply(text: string): Promise<void>;
-  channel: { send(text: string): Promise<void> };
+  mentions: MessageMentions;
+  mentionsMe: boolean;
+  reply(text: string, opts?: SendOptions): Promise<void>;
+  channel: { send(text: string, opts?: SendOptions): Promise<void> };
   react(reactionId: string): Promise<void>;
   unreact(reactionId: string): Promise<void>;
   edit(newContent: string): Promise<void>;
@@ -33,13 +37,14 @@ interface Message {
   pin(): Promise<void>;
   unpin(): Promise<void>;
   pinned?: boolean;
+  command?: CommandInvocation;
 }
 ```
 
 ### Fields
 
 <ResponseField name="content" type="string">
-  The decrypted message text. Empty string if the key was missing or decryption failed, so check for content before acting on it.
+  The decrypted message text. Empty string if the key was missing or decryption failed, so check for content before acting on it. Never raw ciphertext.
 </ResponseField>
 
 <ResponseField name="authorId" type="string">
@@ -51,49 +56,85 @@ interface Message {
 </ResponseField>
 
 <ResponseField name="messageId" type="string">
-  The unique id of this message.
+  The unique id of this message. Cloak message ids are random UUIDs and are not time-sortable.
 </ResponseField>
 
-<ResponseField name="serverId" type="string">
-  The server the message came from.
+<ResponseField name="serverId" type="string | null">
+  The server the message came from, or **`null` when `isDM` is true**. A direct message has no server at all.
+
+  <Warning>
+    Guard before using it. `if (msg.isDM || !msg.serverId) return;` is the standard first line of a `messageCreate` handler that does server-scoped work. Passing a null value into `client.can()`, `client.guild()`, or `client.send()` is the most common bug in Cloak bots.
+  </Warning>
 </ResponseField>
 
 <ResponseField name="channelId" type="string">
-  The channel the message came from.
+  The channel the message came from. For a DM this is the dm id, the same value as `dmId`. One convention, so `msg.reply()` and `msg.channel.send()` keep working on a DM without your branching.
+</ResponseField>
+
+<ResponseField name="isDM" type="boolean">
+  True when this message arrived as a direct message rather than from a channel. See [Direct messages](/guides/direct-messages).
+</ResponseField>
+
+<ResponseField name="dmId" type="string | null">
+  The dm id for a DM, `null` otherwise. Always equal to `channelId` when set. It exists so `isDM` is not the only way to read the intent.
 </ResponseField>
 
 <ResponseField name="createdAt" type="Date | null">
-  The server-generated send time, or `null` when the payload omitted it. The `edit`, `delete`, `pin`, `unpin`, `react`, and `unreact` actions all need this value, so they reject when it is `null`. Live and fetched messages carry it.
+  The server-generated send time, or `null` when the payload omitted it. `edit`, `delete`, `pin`, `unpin`, `react`, and `unreact` all need this value, so they reject when it is `null`. Live and fetched messages carry it.
 </ResponseField>
 
 <ResponseField name="repliedTo" type="object | null">
-  The context of the message this one replies to, or `null` for a normal message. Its `content` is the decrypted quote, and is `''` when the quote cannot be decrypted, never raw ciphertext. Compare `repliedTo.authorId` with `client.user?.id` to detect a reply to your bot.
+  The context of the message this one replies to, or `null` for a normal message. Its `content` is the decrypted quote, decrypted against the key for the quote's own epoch, and is `''` when it cannot be decrypted. Compare `repliedTo.authorId` with `client.user?.id` to detect a reply to your bot.
+
+  Always `null` on a DM message.
+</ResponseField>
+
+<ResponseField name="mentions" type="MessageMentions">
+  The mentions carried by this message's body. See [MessageMentions](#messagementions).
+
+  Derived from the **decrypted body**, not from a wire field. A sender's mention array is routing metadata the server consumes for notification fanout and never echoes back, so the body is the only inbound source. The real Cloak clients decide "was I mentioned" the same way.
+</ResponseField>
+
+<ResponseField name="mentionsMe" type="boolean">
+  True when the body carries a `<@id>` entity naming your bot. Direct user mentions only.
+
+  `@everyone` and `@here` are `mentions.everyone` and `mentions.here`. A **role** mention cannot be resolved here, because the SDK does not know which roles your bot holds. Role names surface in `mentions.names` for you to check yourself.
 </ResponseField>
 
 <ResponseField name="pinned" type="boolean">
   Whether the message is pinned, when known. Present on messages from [`fetchMessages()`](/api-reference/client#fetchmessages) and after a [`pinUpdate`](/api-reference/events#pinupdate).
 </ResponseField>
 
-### Methods
+<ResponseField name="command" type="CommandInvocation | undefined">
+  The slash-command invocation this message carries, when it is one your registry recognizes. Plain data with no back-reference to the message.
 
-<ResponseField name="reply" type="(text: string) => Promise<void>">
-  Sends a reply into the same channel this message arrived in.
+  Filter with `if (msg.command) return;` in a `messageCreate` handler that also does its own text handling, so you do not process an invocation twice. Never set on fetched history or on your bot's own messages. See [CommandInvocation](/api-reference/commands#commandinvocation).
 </ResponseField>
 
-<ResponseField name="channel.send" type="(text: string) => Promise<void>">
-  Sends into the same channel. Equivalent to `reply`, phrased as sending to the channel.
+### Methods
+
+<ResponseField name="reply" type="(text: string, opts?: SendOptions) => Promise<void>">
+  Sends a **true reply** into the same channel or DM: it renders a quote header and fires a "replied to you" notification that pierces mutes.
+
+  Use it when your bot is genuinely answering a specific message. For a plain response, use `channel.send()`.
+
+  It degrades to a plain send, and never throws, when the message has no `createdAt`, because the reply pointer cannot be built without the server's own send time.
+</ResponseField>
+
+<ResponseField name="channel.send" type="(text: string, opts?: SendOptions) => Promise<void>">
+  A plain send into the same channel or DM, with no quote header and no reply notification. This is what a ping bot wants.
 </ResponseField>
 
 <ResponseField name="react" type="(reactionId: string) => Promise<void>">
-  Adds a reaction. Requires `reaction_add`. See [Reactions](/guides/reactions).
+  Adds a reaction. `reactionId` is opaque: a unicode emoji, or a custom emoji id from [`fetchEmojis()`](/api-reference/client#fetchemojis). Requires `reaction_add`. See [Reactions](/guides/reactions).
 </ResponseField>
 
 <ResponseField name="unreact" type="(reactionId: string) => Promise<void>">
-  Removes the bot's own reaction.
+  Removes your bot's own reaction.
 </ResponseField>
 
 <ResponseField name="edit" type="(newContent: string) => Promise<void>">
-  Edits the message (author only). Re-encrypts like `send`. See [Editing, deleting, and pinning](/guides/editing-and-pinning).
+  Edits the message. Author only, server-side. Re-encrypts with the channel's current epoch key, exactly like `send()`. See [Editing, deleting, and pinning](/guides/editing-and-pinning).
 </ResponseField>
 
 <ResponseField name="delete" type="() => Promise<void>">
@@ -108,7 +149,102 @@ interface Message {
   Unpins the message.
 </ResponseField>
 
-`react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` reject with [`CloakActionError`](/api-reference/errors) on a server deny. `reply` and `channel.send` are fire-and-forget for delivery and do not reject on a deny. See [Handling errors](/guides/handling-errors).
+`react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` reject with [`CloakActionError`](/api-reference/errors) on a server deny.
+
+<Warning>
+  Those same six reject **unconditionally on a DM message**, with a plain `Error`, before anything reaches the wire. Permissions have nothing to do with it. Only `reply()` and `channel.send()` work on a DM.
+</Warning>
+
+`reply()` and `channel.send()` are fire-and-forget for delivery and do not reject on a deny. A denial arrives on [`sendRejected`](/api-reference/events#sendrejected). See [Handling errors](/guides/handling-errors).
+
+## SendOptions
+
+The options object every send-shaped call takes: [`send()`](/api-reference/client#send), `msg.reply()`, `msg.channel.send()`, `guild().send()`, and [`sendDM()`](/api-reference/client#senddm).
+
+```ts
+interface SendOptions {
+  groupId?: string;
+  mentions?: MentionTarget[];
+  replyTo?: ReplyTarget;
+}
+```
+
+<ResponseField name="groupId" type="string">
+  The channel's group, for the rare case where the SDK has not already cached it from an inbound frame.
+</ResponseField>
+
+<ResponseField name="mentions" type="MentionTarget[]">
+  Who to notify.
+
+  <Warning>
+    Mention targets are sent in **plaintext**. The server routes notification fanout without decrypting the message body, so who your bot pinged is visible server-side even though what it said is not. This is Cloak's design. See [Encryption lanes](/concepts/encryption-lanes).
+  </Warning>
+
+  A mention is two independent halves and you supply both. This array is the ping. The pill is literal text in the body, produced by `userMention()`, `roleMention()`, `EVERYONE`, or `HERE`. The SDK never scans your outgoing text to synthesize the array. See [Mentions](/api-reference/mentions).
+</ResponseField>
+
+<ResponseField name="replyTo" type="ReplyTarget">
+  Makes this send a true reply: it renders the quote header and fires the "replied to you" notification.
+</ResponseField>
+
+<Warning>
+  This object replaced a positional `groupId` fourth argument in 0.2.0, and the positional form is gone. `send(s, c, text, groupId)` becomes `send(s, c, text, { groupId })`.
+</Warning>
+
+## ReplyTarget
+
+The message a send is replying to. A received `Message` satisfies it structurally, so `{ replyTo: msg }` just works.
+
+```ts
+type ReplyTarget = Pick<Message, 'messageId' | 'authorId' | 'createdAt'>;
+```
+
+All three fields ride the wire together, and the server re-reads the original row using all three as a compound key. `createdAt` must therefore be the server's own send time, which is exactly what the SDK puts there. The target must live in the channel you are sending to. A target with no `createdAt` cannot be used, so building a reply slot from one throws.
+
+## MentionTarget
+
+One entry in [`SendOptions.mentions`](#sendoptions). Ids may be dashed or undashed.
+
+```ts
+type MentionTarget =
+  | { userId: string }
+  | { roleId: string }
+  | 'everyone'
+  | 'here';
+```
+
+Role, `@everyone`, and `@here` targets are dropped server-side inside a DM. Only direct user mentions produce a notification there. See [Mentions](/api-reference/mentions).
+
+## MessageMentions
+
+What the SDK recovers from a decrypted message body, exposed as [`Message.mentions`](#message).
+
+```ts
+interface MessageMentions {
+  userIds: string[];
+  names: string[];
+  everyone: boolean;
+  here: boolean;
+}
+```
+
+<ResponseField name="userIds" type="string[]">
+  Normalized ids from `<@id>` user-mention entities in the body.
+</ResponseField>
+
+<ResponseField name="names" type="string[]">
+  Literal `@name` tokens that are not `@everyone` or `@here` and not an id entity. A name may be a role, an older-style user mention, or just text. The SDK cannot tell them apart without the server's roster, so compare against [`fetchRoles()`](/api-reference/client#fetchroles) if you need to.
+
+  A multi-word role name yields only its first word here, because the SDK has no role list at decode time.
+</ResponseField>
+
+<ResponseField name="everyone" type="boolean">
+  True when the body carries `@everyone`. Matched case-insensitively, like the real clients.
+</ResponseField>
+
+<ResponseField name="here" type="boolean">
+  True when the body carries `@here`.
+</ResponseField>
 
 ## SystemMessageEvent
 
@@ -138,7 +274,7 @@ interface SystemMessageEvent {
 </ResponseField>
 
 <ResponseField name="serverId" type="string">
-  The server the event happened in.
+  The server the event happened in. Not nullable: system messages are always server events.
 </ResponseField>
 
 <ResponseField name="channelId" type="string">
@@ -146,12 +282,16 @@ interface SystemMessageEvent {
 </ResponseField>
 
 <ResponseField name="groupId" type="string">
-  The group of the source channel, where known. Pass it to `send()` so the message lands in the right channel.
+  The group of the source channel, where known. Pass it to `send()` so the message lands in the right channel. It can be `undefined` if the channel's group has not been seen yet.
 </ResponseField>
 
 ## Member
 
-One server member, returned by [`fetchMembers()`](/api-reference/client#fetchmembers).
+One server member.
+
+<Warning>
+  The only producer of `Member[]` is [`fetchMembers()`](/api-reference/client#fetchmembers), which **hangs against every current Cloak backend**. The shape below survives the eventual fix, so code written against it stays valid, but you cannot obtain one today.
+</Warning>
 
 ```ts
 interface Member {
@@ -306,7 +446,7 @@ The remembered location of a message the bot has seen, returned by [`messageLoca
 
 ```ts
 interface MessageLocation {
-  serverId: string;
+  serverId: string | null;
   channelId: string;
   groupId?: string;
   authorId: string;
@@ -314,8 +454,8 @@ interface MessageLocation {
 }
 ```
 
-<ResponseField name="serverId" type="string">
-  The server the message is in.
+<ResponseField name="serverId" type="string | null">
+  The server the message is in, or `null` for a DM. When it is `null`, `channelId` holds the dm id.
 </ResponseField>
 
 <ResponseField name="channelId" type="string">
@@ -333,6 +473,90 @@ interface MessageLocation {
 <ResponseField name="createdAtMs" type="number | null">
   The message's send time in milliseconds, or `null`.
 </ResponseField>
+
+## VoiceConnection
+
+Your bot's own voice membership, returned by [`joinVoice()`](/api-reference/client#joinvoice) and [`voiceConnection()`](/api-reference/client#voiceconnection).
+
+```ts
+interface VoiceConnection {
+  serverId: string;
+  channelId: string;
+  groupId: string;
+  token: string;
+  url: string;
+  selfMuted: boolean;
+  selfDeafened: boolean;
+  joinedAt: Date;
+}
+```
+
+<ResponseField name="token" type="string">
+  The LiveKit credential the backend minted, opaque to the SDK.
+
+  <Warning>
+    This is a live credential. Never log it. A bot session's grant is microphone-only, so a bot cannot publish video with it whatever permissions it holds.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  The LiveKit signalling url: `ClientOptions.livekitUrl`, or the value derived from your transport url. The SDK makes no connection to it. Hand it, with the token, to a media layer. See [Voice audio](/voice/audio).
+</ResponseField>
+
+<ResponseField name="selfDeafened" type="boolean">
+  The broadcast deafen flag, not an answer to "can I hear". Whether the bot receives audio is decided by `voice_listen` and the scope of its voice key.
+</ResponseField>
+
+## VoiceParticipant
+
+One member of a voice channel's roster, from [`voiceRoster()`](/api-reference/client#voiceroster) and the [`voiceJoin`](/api-reference/events#voicejoin) event. Eventually consistent.
+
+```ts
+interface VoiceParticipant {
+  userId: string;
+  channelId: string;
+  muted: boolean;
+  deafened: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
+  webcam: boolean;
+  stream: boolean;
+  reconnecting: boolean;
+  // Deprecated. P2P was removed from the platform, so both are always false.
+  p2pWebcam: boolean;
+  p2pStream: boolean;
+}
+```
+
+<ResponseField name="reconnecting" type="boolean">
+  True while the member's voice session is inside the backend's 60 second reconnect grace window.
+</ResponseField>
+
+<Warning>
+  `p2pWebcam` and `p2pStream` are **deprecated and permanently `false`**. Peer-to-peer video is deleted from the Cloak platform, and the wire columns those fields read no longer exist. Do not treat them as capability flags.
+</Warning>
+
+`serverMuted` and `serverDeafened` come from a separate server-side query and are best-effort. The other flags are reliable.
+
+## BotStatus
+
+The named presence values [`setStatus()`](/api-reference/client#setstatus) accepts.
+
+```ts
+type BotStatus = 'invisible' | 'online' | 'away' | 'busy' | 'dnd';
+```
+
+`dnd` also suppresses push notifications on every device. `busy` does not. `online` defers to session liveness rather than pinning a green dot.
+
+## VoiceStateFlag
+
+Which flag changed on a [`voiceStateUpdate`](/api-reference/events#voicestateupdate) event.
+
+```ts
+type VoiceStateFlag = 'muted' | 'deafened' | 'webcam' | 'stream' | 'p2pWebcam' | 'p2pStream';
+```
+
+The last two are dead values that can no longer arrive, for the same reason as the `VoiceParticipant` fields above.
 
 ## Guild
 
@@ -365,30 +589,22 @@ interface BotUser {
 
 ## PermissionSet
 
-The resolved capability set for one server, returned by [`permissions()`](/api-reference/client#permissions) and included in the [`permissionsUpdate`](/api-reference/events#permissionsupdate) event.
+The resolved capability set for one server: 31 named booleans plus a numeric rank. Returned by [`permissions()`](/api-reference/client#permissions) and spread into the [`permissionsUpdate`](/api-reference/events#permissionsupdate) payload.
 
 ```ts
 type PermissionSet = { effectiveRank: number } & Record<PermissionName, boolean>;
 ```
 
-It is one boolean per permission, plus a numeric rank.
-
-<ResponseField name="effectiveRank" type="number">
-  The bot's effective rank in the server.
-</ResponseField>
-
-<ResponseField name="[permission]" type="boolean">
-  One boolean per [permission name](/api-reference/permissions), such as `message_send` or `member_ban`. `true` means the bot holds it in this server.
-</ResponseField>
+Documented in full, with every permission name, on [Permissions](/api-reference/permissions#permissionset).
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
-    The CloakActionError every action can throw.
+    Every error class an action can reject with.
   </Card>
   <Card title="Permissions" icon="list" href="/api-reference/permissions">
-    Every permission name.
+    All 31 permission names.
   </Card>
   <Card title="Events" icon="bell" href="/api-reference/events">
     Where these types come from.

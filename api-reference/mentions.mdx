@@ -1,0 +1,206 @@
+---
+title: "Mention helpers"
+description: "userMention, roleMention, mentionPairs, parseMentions, and the mention types."
+---
+
+A Cloak mention is two independent halves, and you supply both: the **pill** is literal text inside the encrypted body, and the **ping** is an `[id, isRole]` pair in `SendOptions.mentions`. These helpers build and read both halves. For the model and the patterns, see [Mentions and replies](/guides/mentions-and-replies).
+
+<Warning>
+  **Mention targets are not end-to-end encrypted.** Message bodies are, the list of who a message pings is not. It rides the send frame in plaintext because the server routes notification fanout without decrypting anything. Anyone with server-side visibility can see who your bot pinged, just not what it said. This is Cloak's design and it is true of every Cloak client.
+</Warning>
+
+```ts
+import {
+  userMention,
+  roleMention,
+  mentionPairs,
+  parseMentions,
+  EVERYONE,
+  HERE,
+  MENTION_ENTITY_RE,
+} from '@cloak-software/bot-sdk';
+import type { MentionTarget, MentionPair, MessageMentions } from '@cloak-software/bot-sdk';
+```
+
+## userMention
+
+```ts
+userMention(user: string | { id: string }): string
+```
+
+The rendered form of a user mention: Cloak's id-keyed wire entity, HTML-escaped exactly as every human client writes it. Accepts a raw id or anything with an `id`, and normalizes dashed uuids to undashed lowercase hex.
+
+```ts
+userMention('0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0');
+// '&lt;@0f1e2d3c4b5a69788796a5b4c3d2e1f0&gt;'
+```
+
+Because the pill is keyed by id, it follows the user across nickname and display-name changes.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.isDM || !msg.serverId) return;
+  if (msg.authorId === client.user?.id) return;
+  msg.channel.send(`${userMention(msg.authorId)} pong`, {
+    mentions: [{ userId: msg.authorId }],
+  });
+});
+```
+
+<Note>
+  The text alone renders a pill and notifies nobody. Pass `mentions` too, or the ping does not happen.
+</Note>
+
+## roleMention
+
+```ts
+roleMention(role: string | { name: string }): string
+```
+
+The rendered form of a role mention: literal `@Name`. Roles are still name-keyed on the wire, so the pill renders only for viewers whose client resolves that role name, and renaming the role stops old messages from rendering it. The ping itself rides the id pair and is unaffected.
+
+Multi-word role names work, because clients match them longest first. Single-word names must match `[\w-]+` to render as a pill.
+
+```ts
+await client.send(serverId, channelId, `${roleMention('Moderators')} heads up`, {
+  mentions: [{ roleId }],
+});
+```
+
+<Note>
+  Role, `@everyone` and `@here` pings are gated server-side on `mention_roles`. `client.can('mention_roles', serverId)` is an advisory pre-check, and the server remains authoritative.
+</Note>
+
+## mentionPairs
+
+```ts
+mentionPairs(targets: readonly MentionTarget[] | undefined): MentionPair[]
+```
+
+Builds the plaintext ping array for the outbound frame. Deduplicates, and drops empty ids.
+
+`send()` calls this for you on `SendOptions.mentions`, so you rarely call it directly. Reach for it when you are building a frame yourself with [`client.raw`](/guides/raw-frames).
+
+The pairs it produces:
+
+| Target | Pair |
+| --- | --- |
+| `{ userId }` | `[id, 0]` |
+| `{ roleId }` | `[id, 1]` |
+| `'here'` | `[0, 0]` |
+| `'everyone'` | `[1, 0]` |
+
+Ids may be passed dashed or undashed. The backend validates direct mention ids as uuids and silently discards targets that are not members of the server.
+
+## parseMentions
+
+```ts
+parseMentions(content: string): MessageMentions
+```
+
+Recovers the mentions carried by a **decrypted** message body.
+
+This is how the real clients decide "was I mentioned". The ping array a sender supplies is routing metadata the server consumes and never echoes back, so the decrypted text is the only inbound source. `Message.mentions` and `Message.mentionsMe` are produced by this function, and fetched history is populated identically.
+
+```ts
+const parsed = parseMentions('hey &lt;@0f1e2d3c4b5a69788796a5b4c3d2e1f0&gt; and @Moderators');
+parsed.userIds;  // ['0f1e2d3c4b5a69788796a5b4c3d2e1f0']
+parsed.names;    // ['Moderators']
+parsed.everyone; // false
+```
+
+`@Everyone` and `@Here` are matched case-insensitively, exactly like the clients.
+
+## EVERYONE and HERE
+
+```ts
+const EVERYONE = '@everyone';
+const HERE = '@here';
+```
+
+The literal pill text for the two broadcast mentions. Pair each with the matching target, because text alone notifies nobody.
+
+```ts
+await client.send(serverId, channelId, `${EVERYONE} maintenance in 5`, {
+  mentions: ['everyone'],
+});
+```
+
+## MENTION_ENTITY_RE
+
+```ts
+const MENTION_ENTITY_RE: RegExp
+```
+
+Matches a user-mention wire entity, raw or HTML-escaped, dashed or raw hex. Exported so you can scan text yourself without re-deriving the pattern.
+
+<Warning>
+  It carries the global flag. Reset `MENTION_ENTITY_RE.lastIndex = 0` before every use, or a second scan starts wherever the previous one stopped. Prefer `parseMentions()` unless you specifically need the raw matches.
+</Warning>
+
+## Types
+
+### MentionTarget
+
+```ts
+type MentionTarget =
+  | { userId: string }
+  | { roleId: string }
+  | 'everyone'
+  | 'here';
+```
+
+What `SendOptions.mentions` accepts. Ids may be dashed or undashed.
+
+### MentionPair
+
+```ts
+type MentionPair = [string | number, 0 | 1];
+```
+
+One entry of the plaintext ping array. The second element is `1` for a role and `0` for everything else.
+
+### MessageMentions
+
+What `parseMentions()` returns, and the shape of `Message.mentions`.
+
+<ResponseField name="userIds" type="string[]">
+  Normalized (undashed, lowercase) ids of the user-mention entities in the body.
+</ResponseField>
+
+<ResponseField name="names" type="string[]">
+  Literal `@name` tokens that are neither `@everyone`, `@here`, nor an id entity. A name may be a role, an older-format user mention, or just text. The SDK cannot tell them apart without the server's role list.
+</ResponseField>
+
+<ResponseField name="everyone" type="boolean">
+  The body contains `@everyone`, case-insensitively.
+</ResponseField>
+
+<ResponseField name="here" type="boolean">
+  The body contains `@here`, case-insensitively.
+</ResponseField>
+
+<Note>
+  `Message.mentionsMe` covers direct mentions only. A role mention cannot be resolved to "this means me": the SDK does not know which roles the bot holds, because permission verdicts carry an effective rank rather than role ids. Compare `names` against `guild(serverId).fetchRoles()` if you need that.
+</Note>
+
+<Warning>
+  Do not compare `names` against `fetchMembers()`. That method is broken against every current backend: it awaits a frame the backend no longer sends, so it neither resolves nor rejects, and awaiting it hangs your handler. `fetchRoles()` works.
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    The two-part model, and true replies.
+  </Card>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    Where `SendOptions` is documented.
+  </Card>
+  <Card title="Encryption lanes" icon="lock" href="/concepts/encryption-lanes">
+    What leaves the encrypted envelope, and why.
+  </Card>
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types">
+    `Message`, `SendOptions`, and the rest.
+  </Card>
+</CardGroup>

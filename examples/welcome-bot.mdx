@@ -1,9 +1,11 @@
 ---
 title: "Welcome bot"
-description: "A complete bot that greets new members and answers !ping everywhere. Copy it and run it."
+description: "A complete bot that greets new members and answers !ping everywhere, including in DMs. Copy it and run it."
 ---
 
-This bot does two things: it welcomes each new member as they join, and it replies to `!ping` in any channel it can see. It also logs the connection lifecycle so you can watch it work.
+This bot does two things. It welcomes each new member as they join, and it answers `!ping` in any channel it can see. Along the way it prints the permission grant each server hands it and logs the connection lifecycle, so you can watch the parts you cannot see from the app.
+
+The SDK repo ships this as `examples/welcome-bot.ts`. The version below is the same bot pointed at Cloak's hosted service, with the self-hosted transport plumbing left out.
 
 ## The full bot
 
@@ -12,40 +14,52 @@ import { Client } from '@cloak-software/bot-sdk';
 
 const client = new Client({
   token: process.env.CLOAK_TOKEN!,
+  // Keep this file. The bot's identity is published to the server ONCE, so a
+  // bot with no keystore works on its first run and fails on every one after.
   keystorePath: './welcome-bot.cloak-keystore.json',
   // Declare what the bot needs. A human approves a subset per server.
   requiredPermissions: ['message_send'],
+  debug: process.env.DEBUG === '1',
 });
 
 client.on('ready', () => {
-  console.log(`Online as ${client.user?.id}`);
-  console.log('Listening in every channel of every server the bot is in.');
+  console.log(`Logged in as bot ${client.user?.id}`);
+  console.log('Firehose active: listening in every channel of every server the bot is in.');
 });
 
 // A bot is a first-class member, so it can react to being added or removed.
-client.on('guildCreate', (guild) => console.log(`added to server ${guild.id}`));
+client.on('guildCreate', (guild) => console.log(`in server ${guild.id}`));
 client.on('guildDelete', (guild) => console.log(`removed from server ${guild.id}`));
 
-// Greet new members. member_join arrives as a system message.
+// The server pushes the resolved grant, per server. Declaring is not being granted.
+client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
+  console.log(`permissions for ${serverId}: send=${perms.message_send} rank=${effectiveRank}`);
+});
+
+// Greet new members. A join arrives as a system message.
 client.on('systemMessage', (evt) => {
   if (evt.type !== 'member_join') return;
-  // Advisory pre-gate: skip if the server did not grant send here.
+  // Advisory pre-gate: skip the greeting if the server did not grant send here.
   if (!client.can('message_send', evt.serverId)) return;
   client
-    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, evt.groupId)
+    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, {
+      groupId: evt.groupId,
+    })
     .catch((e) => console.error('welcome send failed', e));
 });
 
-// Answer !ping anywhere.
+// Answer !ping anywhere, including in a DM.
 client.on('messageCreate', (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() === '!ping') {
-    if (!client.can('message_send', msg.serverId)) return;
-    msg.reply('pong').catch((e) => console.error('reply failed', e));
-  }
+  if (msg.content.trim() !== '!ping') return;
+  // serverId is null in a DM, and the advisory gate is a server concept, so
+  // skip it there. channel.send() routes back into the DM either way.
+  if (msg.serverId && !client.can('message_send', msg.serverId)) return;
+  msg.channel.send('pong').catch((e) => console.error('send failed', e));
 });
 
 // Connection lifecycle, useful while you are getting started.
+client.on('disconnect', (e) => console.warn('disconnected', e));
 client.on('reconnecting', ({ attempt, delayMs }) =>
   console.log(`reconnecting (attempt ${attempt}) in ${delayMs}ms`),
 );
@@ -59,41 +73,86 @@ client.login().catch((e) => {
 
 ## Run it
 
-```bash
+<CodeGroup>
+
+```bash Your own copy
 CLOAK_TOKEN="botid.tokenid.secret" npx tsx welcome-bot.ts
 ```
+
+```bash From the SDK repo
+# copy .env.example to .env, put CLOAK_TOKEN in it, then:
+npm run example:welcome
+```
+
+</CodeGroup>
+
+The npm script runs `examples/welcome-bot.ts` and reads your token from a local `.env`. Node must be `^20.19.0 || >=22.12.0`. See [Install and requirements](/install).
+
+<Note>
+  You do not set a `url`. The SDK connects to Cloak's hosted service over a standard `wss://` WebSocket by default. `url`, `allowInsecure` and `serverCertificateHashes` only come up when you point a bot at a self-hosted or local dev stack, which the shipped example shows in its header comment.
+</Note>
 
 ## How it works, piece by piece
 
 <AccordionGroup>
-  <Accordion title="Declaring permissions" icon="key">
-    `requiredPermissions: ['message_send']` tells servers the bot wants to send messages. This is only a request. A human approves it per server on the add-a-bot consent screen, and the resolved grant arrives through the `permissionsUpdate` event. See [Permissions](/concepts/permissions).
+  <Accordion title="Why keystorePath is not optional" icon="key">
+    The bot publishes its cryptographic identity to the server on its first login, and that publication is write-once. Without a keystore the identity is generated fresh in memory each run, so the first run works, the second run tries to publish a different identity, and the server refuses it permanently. Set `keystorePath` (or pass a `keystore` adapter) before you ever run the bot. See [Keys and the keystore](/concepts/keys-and-keystore).
+  </Accordion>
+
+  <Accordion title="Declaring permissions, and being granted them" icon="shield-halved">
+    `requiredPermissions: ['message_send']` tells servers what the bot wants. That is a request, not a grant. A human approves a subset per server on the add-a-bot screen, and the server pushes the resolved set back on `permissionsUpdate`, which carries the server id, an `effectiveRank`, and one boolean per permission. The handler above prints it so you can see exactly what you were given. See [Permissions](/concepts/permissions).
   </Accordion>
 
   <Accordion title="Greeting new members" icon="hand-wave">
-    New members arrive as a `systemMessage` with `type: 'member_join'`. The event carries `serverId`, `channelId`, and `groupId`, so the bot knows exactly where to send its greeting. Passing `evt.groupId` to `send()` lets the message land in the right channel even for a channel the bot has not seen traffic from yet.
+    A join arrives as a `systemMessage` with `type: 'member_join'`. The event carries `actorId`, `actorName`, `serverId`, `channelId`, and often `groupId`, so the bot knows who joined and where to say hello.
+
+    Pass `{ groupId: evt.groupId }` as the options object. The channel select needs the channel's group, and for a channel the bot has not seen traffic from yet the SDK has nothing cached to fall back on. `groupId` is optional on the event, so treat it as a hint rather than a guarantee.
+
+    <Warning>
+      The fourth argument is an options object, not a positional group id. `send(serverId, channelId, text, evt.groupId)` was the shape before 0.2.0. It no longer compiles, and in plain JavaScript the group is silently dropped.
+    </Warning>
   </Accordion>
 
   <Accordion title="Ignoring its own messages" icon="user-slash">
-    `msg.authorId === client.user?.id` filters out the bot's own messages, which it also receives on the firehose. Without this guard, a bot that echoes messages could answer itself. Both ids are normalized, so this comparison is reliable.
+    `msg.authorId === client.user?.id` filters out the bot's own traffic, which it also receives on the firehose. Without the guard, a bot that echoes could answer itself forever. Both ids are normalized by the SDK, so the comparison is reliable across the two id shapes in the platform.
   </Accordion>
 
-  <Accordion title="Checking can() before sending" icon="shield-halved">
-    `client.can('message_send', serverId)` is an advisory check. If the server did not grant send in that server, the bot skips the action instead of firing a request the server would reject. The server stays the authority. This just keeps the bot from doing pointless work. See [Permissions](/concepts/permissions).
+  <Accordion title="DMs arrive on the same event" icon="envelope">
+    `messageCreate` is unified. A direct message arrives on the same handler with `isDM: true` and a **null** `serverId`, because a DM has no server at all.
+
+    That is why the permission check reads `if (msg.serverId && !client.can(...))`. `can()` takes a `string`, so passing `msg.serverId` unguarded does not typecheck, and in JavaScript it would return false for every DM and make the bot silently mute there. Any handler that does something server-scoped needs `if (msg.isDM || !msg.serverId) return;` instead. See [Direct messages](/guides/direct-messages).
   </Accordion>
 
-  <Accordion title="Replying into the right place" icon="reply">
-    `msg.reply('pong')` sends back into the same channel the message came from. The `Message` already knows its `serverId`, `channelId`, and group, so you do not pass a location. See the [Message type](/api-reference/types#message).
+  <Accordion title="can() is advisory, and the server is the authority" icon="gauge">
+    `client.can('message_send', serverId)` reads the last verdict the server pushed. It saves a round trip the server would reject anyway, and it returns false when no verdict has arrived yet. It never makes a send legal. The server re-checks every action.
+  </Accordion>
+
+  <Accordion title="channel.send() versus reply()" icon="reply">
+    `msg.channel.send('pong')` is a plain message back into the same place the command came from. `msg.reply('pong')` is a true reply: it renders a quote header and fires a "replied to you" notification that pierces the recipient's mutes. A ping bot answering a command does not need to pierce anyone's mutes, so this bot uses `channel.send()`. Reach for `reply()` when the quote header genuinely helps the reader. See [Mentions and replies](/guides/mentions-and-replies).
+  </Accordion>
+
+  <Accordion title="Sends are fire-and-forget" icon="paper-plane">
+    A resolved `send()` promise means the frame went out, not that the message landed. A server-side denial arrives later on the `sendRejected` event, never as a rejection of the send promise. The `.catch()` handlers above only catch local failures, like an invalid target or a dead transport. Add a `sendRejected` listener if you need to know about denials. See [Sending messages](/guides/sending-messages).
+  </Accordion>
+
+  <Accordion title="Watching the connection" icon="plug">
+    `disconnect`, `reconnecting` and `reconnected` report the transport. The SDK reconnects on its own with backoff, resumes the session, and re-establishes anything you had watched. Two login failures are terminal and stop the loop: `-2` (the token was revoked or regenerated) and `-12` (the SDK is below the backend's minimum wire version). Both emit `disconnect` rather than throwing. See [Connection lifecycle](/concepts/connection-lifecycle).
   </Accordion>
 </AccordionGroup>
 
 ## Next
 
 <CardGroup cols={2}>
+  <Card title="Moderation bot" icon="gavel" href="/examples/moderation-bot">
+    The next step up: commands, actions, and typed denials.
+  </Card>
   <Card title="Events reference" icon="bell" href="/api-reference/events">
-    Every event this bot listens for.
+    Every event this bot listens for, with payload shapes.
   </Card>
   <Card title="Client reference" icon="book" href="/api-reference/client">
-    Options and methods used above.
+    Constructor options and methods used above.
+  </Card>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why the keystore file decides whether a second run works.
   </Card>
 </CardGroup>

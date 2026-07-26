@@ -1,0 +1,182 @@
+---
+title: "What is encrypted, and what is not"
+description: "Cloak encrypts message bodies end to end. A few lanes are deliberately plaintext. Know which is which before you pick one."
+---
+
+Your bot encrypts and decrypts inside its own process. The Cloak service relays ciphertext for message content and never holds an unwrapped key.
+
+That is true of message bodies. It is not true of everything a bot can send. A few lanes are plaintext to the server on purpose, because the server has to route or render something without a key. This page is the map, so you can pick a lane knowing what it costs.
+
+<Warning>
+  Never tell your users that "nobody can read anything the bot sends". Mention targets, your published slash-command menu, and the entire webhook lane are readable server-side by design.
+</Warning>
+
+## The short version
+
+| What you send | End-to-end encrypted | Who can read it |
+| --- | --- | --- |
+| Message bodies (`send`, `reply`, `channel.send`) | Yes | Members holding that conversation key |
+| Card embeds (`sendCard`) | Yes | Members holding that conversation key |
+| Direct messages (`sendDM`) | Yes | The bot and its one peer |
+| Voice media frames | Yes | Whoever holds the matching voice key |
+| Mention targets (`SendOptions.mentions`) | No | Cloak's servers |
+| Your published slash-command menu | No | Cloak's servers, and every member who opens the picker |
+| Webhook posts (`sendEmbed`, `webhooks.post`) | No | Cloak's servers |
+| REST requests (`client.rest`) | No, this is ordinary HTTPS | Cloak's servers |
+| Routing metadata (author, channel, time) | No | Cloak's servers |
+
+## What is encrypted
+
+### Message bodies
+
+`send()`, `msg.reply()`, `msg.channel.send()`, and `guild().send()` all encrypt the text with the conversation key for that server before a frame leaves your process. The content is AES-256-GCM. The server stores ciphertext it cannot read.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.content.trim() !== '!ping') return;
+  // Encrypted in this process. Cloak relays bytes it cannot read.
+  msg.channel.send('pong').catch(console.error);
+});
+```
+
+### Card embeds
+
+`sendCard()` is the encrypted embed lane. The title, description, fields, and colors are encrypted with the same conversation key and the same epoch as the message body, and ride the same send. The card posts under your bot's own member identity with the BOT badge.
+
+```ts
+async function announceBuild(serverId: string, channelId: string) {
+  await client.sendCard(serverId, channelId, {
+    content: 'Build #4821 passed on main', // required, and genuine text
+    embed: {
+      title: 'Build #4821 passed',
+      description: '42 tests, 0 failures',
+      color: '#22c55e',
+    },
+  });
+}
+```
+
+One constraint follows from the encryption: the four slots a card fetches on its own (`image.url`, `thumbnail.url`, `author.icon_url`, `footer.icon_url`) must have origin exactly `https://media.cloak.chat`. The server cannot rewrite a URL it cannot read, so the SDK refuses a third-party host locally instead. See [Rich cards](/guides/rich-cards).
+
+### Direct messages
+
+A 1:1 DM between your bot and a human is encrypted the same way, under a key exchanged once per peer. Inbound DMs arrive on the ordinary `messageCreate` event. See [Direct messages](/guides/direct-messages).
+
+### Voice media frames
+
+Audio frames are encrypted with a voice key that is a separate slot from conversation keys. Your bot never derives that key: a human member seals one to the bot's identity and the SDK fetches it. What the bot can decrypt depends on which key it was given, which depends on the `voice_listen` permission. See [Voice keys and scopes](/voice/keys).
+
+## What is not encrypted
+
+### Mention targets
+
+A mention is two independent halves, and you supply both.
+
+| Half | What it is | Where it goes |
+| --- | --- | --- |
+| The pill | Literal text inside the encrypted body | Your `text` |
+| The ping | An id plus a role flag | `opts.mentions` |
+
+The ping array rides the send frame in plaintext. Cloak's server has to fan out notifications without decrypting anything, so it needs to see who a message pings. Anyone with server-side visibility can see who your bot mentioned, but not what it said.
+
+```ts
+import { userMention } from '@cloak-software/bot-sdk';
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (!msg.mentionsMe) return;
+  // The text is encrypted. The `mentions` array is not.
+  await msg.reply(`${userMention(msg.authorId)} you rang?`, {
+    mentions: [{ userId: msg.authorId }],
+  });
+});
+```
+
+If a given message must not reveal who it addresses, do not mention. Send the text without an `opts.mentions` array and the ping never happens.
+
+### The slash-command menu
+
+`login()` publishes whatever commands are registered at that moment so a human's `/` picker can list them. That menu is stored and served in plaintext, because the picker has to render it before any key exchange has happened.
+
+<Warning>
+  Command names, descriptions, option names, and choice labels are readable server-side and are served to every member of every server your bot is in. Never put a secret, an internal hostname, or a customer name in a description.
+</Warning>
+
+Invocations are a separate matter. A slash-command invocation is an ordinary encrypted message, so the server cannot read it. It is also durable and not ephemeral: every member holding that epoch key can read every invocation of your bot's commands. There is no "only you can see this" in v1, and deleting the message afterwards does not fake one. See [Slash commands](/guides/slash-commands).
+
+### The webhook lane
+
+`client.sendEmbed()` and `client.webhooks.post()` are not end-to-end encrypted at all. The payload type is called `UnencryptedWebhookPost` and requires a literal `unencrypted: true`, which is re-checked at runtime so a plain-JavaScript caller cannot skip it.
+
+Three things are true of every webhook post:
+
+- The message is written to the database as readable text, by design. Nothing about that is recoverable after the fact.
+- It is attributed to a webhook persona, not to your bot. Shipped Cloak clients render it with a webhook badge and a "not encrypted" notice.
+- Your bot never sees it come back. Webhook messages arrive as `systemMessage` with `type: 'unknown'`, never as `messageCreate`.
+
+If the content is sensitive, use `sendCard()` or `send()`.
+
+### The REST lane
+
+`client.rest` is ordinary HTTPS against Cloak's REST API. The request path, the query string, and the headers are visible to the server, and ids ride query strings. The credential is short-lived and scoped, minted over the already-authenticated realtime session, so the long-lived bot token never rides an HTTP header. The lane is disabled server-side by default. See [The REST lane](/guides/rest-api).
+
+### Routing metadata
+
+The server stores and relays the metadata it needs to deliver a message: who sent it, which channel it belongs to, when it was sent, and which message a reply points at. Reaction and pin activity is server-visible the same way. In voice, a participant in a channel learns who speaks and for how long even while holding no usable key.
+
+End-to-end encryption protects content. It does not hide that a conversation happened.
+
+## Choosing an embed lane
+
+Two paths render a rich embed, with opposite properties. Default to `sendCard()`.
+
+| | `sendCard()` | `sendEmbed()` / `webhooks.post()` |
+| --- | --- | --- |
+| Encryption | End to end, same key and epoch as the body | Plaintext server-side |
+| Identity | Your bot, with the BOT badge | A webhook persona |
+| Permission | `message_send` and nothing else | `manage_server` to mint, none to post to a given url |
+| Quota | None | 10 creations per account per hour, 15 per channel |
+| Media | Cloak-hosted only | Any URL, server-proxied |
+| Replies and mentions | Yes | No |
+| Per-post persona | No | Yes (`username`, `avatar_url`) |
+| Bot sees it come back | Yes, as `messageCreate` | No |
+
+Reach for the webhook lane only when you need one of the three things it alone does: many personas from one identity, posting with no bot account at all, or reaching clients older than the card rollout.
+
+The two are hard to confuse in either direction. `sendEmbed()` requires `unencrypted: true`, and `CardMessage` declares `unencrypted`, `username`, and `avatar_url` as `never`, so a webhook payload is a compile error on `sendCard()`.
+
+## Guarding server-scoped work
+
+Every sample that touches a server id has to survive a DM, where `msg.serverId` is `null`. Guard first, then act.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return; // no server, no card
+
+  if (msg.content.trim() === '!status') {
+    await client.sendCard(msg.serverId, msg.channelId, {
+      content: 'All systems normal',
+      embed: { title: 'Status', description: 'No incidents in the last 24h.' },
+    });
+  }
+});
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Keys and the keystore" icon="database" href="/concepts/keys-and-keystore">
+    Where the keys that do the encrypting live, and how to keep them.
+  </Card>
+  <Card title="Choosing an embed lane" icon="table-columns" href="/guides/rich-cards">
+    The full comparison, with runnable samples on both sides.
+  </Card>
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    The two halves of a mention, and the plaintext one.
+  </Card>
+  <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
+    The encryption model your bot is a member of.
+  </Card>
+</CardGroup>

@@ -1,0 +1,115 @@
+---
+title: "What the server must support"
+description: "Features that fail in ways your bot cannot detect, because the cause is a Cloak server setting. Read this before you debug an embed with no image."
+---
+
+Some things a bot does depend on how the Cloak server is configured or how recently it was deployed. When one of those is missing, the failure is often silent: a POST succeeds and the image is gone, a request produces no reply frame at all, an ack never arrives.
+
+<Note>
+  Everything on this page is a **server-operator** setting or a server deployment fact. None of it is SDK configuration, and your bot cannot probe for any of it. If you run against Cloak's hosted service, treat this page as a lookup table for "why did that not work". If you self-host, treat it as a checklist.
+</Note>
+
+## Server environment variables
+
+| Variable | Owns | What happens when it is unset |
+| --- | --- | --- |
+| `BOT_REST_CREDENTIALS` | The bot REST lane | Every `client.rest` call rejects with a `CloakActionError` saying the flag is unset (`opcode 638`, code `-7`). |
+| `WEBHOOK_INGRESS_PORT` | The webhook ingress | The ingress does not run at all. |
+| `WEBHOOK_PUBLIC_BASE` | Webhook URLs | Defaults to `""`, so the backend hands back a **relative** `/webhooks/{id}/{secret}` path. The SDK refuses to post to a non-absolute url and names the variable. |
+| `IMGPROXY_SECRET` | Embed image proxying | Every embed image and icon is **silently dropped**. The POST still returns success. |
+| `IMGPROXY_PUBLIC_BASE` | Embed image proxying | Same as above. |
+| `CLOAK_MIN_CLIENT_VERSION` | The force-update gate | No floor is enforced. When it is set above your SDK's wire version, login is refused with `-12`. |
+
+### `BOT_REST_CREDENTIALS`
+
+`client.rest` is off by default server-side, and cloak-backend ships the flag unset. Until an operator turns it on, the first call rejects with a message that says so by name. That is the backend's own gate, not a bug in your bot, so do not read a `-7` as your problem.
+
+Two things stay true even once it is on:
+
+- The credential is scoped behind a **default-deny allowlist**. File upload, delete and permissions are classified as bot-usable. The two obvious read surfaces, custom emoji and the audit log, are classified as unauthorized because neither route does per-resource authorization today.
+- That is why the SDK ships **no** `fetchCustomEmojis()` and **no** `fetchAuditLog()`. Named methods that always fail would be worse than none. (`client.fetchEmojis()` is unrelated and works: it returns the static unicode catalog, never per-server custom emoji.)
+
+See [The REST lane](/guides/rest-api).
+
+### The webhook ingress variables
+
+The webhook embed lane needs an ingress the server actually runs and a public base it can build absolute URLs from. If `WEBHOOK_PUBLIC_BASE` is empty, the backend returns a relative path and the SDK refuses to post to it rather than guessing an origin. The SDK also refuses plain `http://` to anything but `localhost`, `127.0.0.1` and `::1`, because the webhook secret is a path component and would travel in cleartext.
+
+### The image proxy variables, and the silent strip
+
+This is the one that costs people an afternoon.
+
+Every URL a viewer's client would auto-fetch is rewritten through the server's signed image proxy so viewers never hit a third-party origin: `image.url`, `thumbnail.url`, `video.url`, `author.icon_url`, `footer.icon_url`, `provider.icon`, and a per-post `avatar_url`. When the proxy is unconfigured, or a URL is not plain `http(s)`, the field is **stripped**. The POST still returns success. There is no error, no warning, and nothing in the response to read.
+
+<Warning>
+  Text and click-through links always survive: `title`, `description`, `url`, `color`, `timestamp`, `fields`, `author.name`, `provider.name`, `footer.text`. So an embed that arrives with all its words and none of its pictures is the signature of an unconfigured proxy, not of a malformed payload.
+</Warning>
+
+Quick check against a live deployment: set `avatar_url` on a webhook post. If the avatar does not change, the proxy is off, and your `image` will vanish too.
+
+One more consequence: a proxied URL is **longer** than the original, and the 6000-byte embed budget is measured **after** the rewrite. Your real budget is smaller than 6000. The SDK deliberately does not pre-check it, so the server answers `400 embeds too large`.
+
+This applies to the **webhook** embed lane only. The encrypted card lane cannot be proxied at all, because the server cannot read the payload, which is why it restricts media to Cloak-hosted origins instead. See [Choosing an embed lane](/guides/rich-cards).
+
+## The force-update gate and `-12`
+
+The SDK sends a wire/crypto capability version as the trailing slot of its login frame. The backend's force-update gate, `CLOAK_MIN_CLIENT_VERSION`, refuses anything below its floor with the shared `-12` "update required" code.
+
+<Warning>
+  `CLIENT_WIRE_VERSION` is an **SDK constant**, not a backend environment variable, and it is not exported from the package. Do not write an import for it. The value today is `2`, meaning the HPKE-capable SDK (0.2.0 and later). Older SDKs sent no version at all and read as `1` server-side.
+</Warning>
+
+A `-12` is terminal. The SDK emits `disconnect` and stops the reconnect loop, because no amount of retrying makes an old build newer. The fix is to update `@cloak-software/bot-sdk` and redeploy. See [Login rejections](/production/troubleshooting#login-rejections).
+
+The mirror of this gate is that `-2` (a revoked or regenerated token) is also terminal, while `-8` (a transient backend error) keeps retrying.
+
+## Both sides must be on the HPKE wrap format
+
+Your bot never generates a server's conversation key. A human member's client wraps it and uploads it. This SDK produces and accepts only the HPKE (v2) wrap.
+
+So the humans in your bot's servers have to be on a client build that ships HPKE, or every key acquire fails. When the SDK receives a pre-HPKE wrap it names the offending peer in a warning, and it appends that peer's id to the `Timed out acquiring key for server …` message so you are not left guessing which member is stale.
+
+This is a fleet property of the servers your bot joins, not something you configure.
+
+## Backend deployment level
+
+These are not settings. They are whether the server you are talking to is recent enough.
+
+<AccordionGroup>
+  <Accordion title="Server member lists: fetchMembers() is broken everywhere today">
+    A backend change made op-30 direct-message-only, so a server-scoped request produces **no reply frame of any kind**, not even an error code. `fetchMembers()` neither resolves nor rejects. It hangs until the transport timeout. This affects every bot on every server, and it is blocked on a backend rebuild. There is no version of the server today where it works. See [Known limitations](/production/known-limitations).
+  </Accordion>
+  <Accordion title="timeout(): needs a backend that routes op-160">
+    `timeout()` and `removeTimeout()` require `member_timeout` **and** a server carrying the timeout plan. Older servers drop the opcode, so the call times out rather than resolving. A working server acknowledges it.
+  </Accordion>
+  <Accordion title="Reaction and pin acks: need the numeric bot ack">
+    `react()`, `unreact()`, `pin()` and `unpin()` await a numeric ack that a backend has to send. Without it the awaited action cannot resolve, because the same opcode also carries the broadcast hook and the SDK will not accept a broadcast as its own acknowledgement.
+  </Accordion>
+  <Accordion title="Cross-server events: need membership-routed hooks">
+    Reaction, channel, group and server lifecycle events reaching a bot for a server it has not selected requires a backend with membership-routed server hooks. On an older server, `serverId` and `channelId` on those events fall back to the bot's current selection cursor, which is a less useful answer.
+  </Accordion>
+  <Accordion title="The slash-command menu: needs the bot command registry">
+    `login()` publishes your registered command menu so a human's `/` picker can list it. This needs a backend running the bot-command-registry work. Against an older backend the frame goes nowhere and the SDK carries on: publication is best-effort and never blocks login, and every command still dispatches over the text lane. See [Slash commands](/guides/slash-commands).
+  </Accordion>
+</AccordionGroup>
+
+## What none of this changes
+
+The wire format is stable and backward-compatible. A backend that is missing one of the features above does not break your bot's messaging: sending, receiving, history, moderation and the firehose all work. What you lose is the specific feature, and usually the loss is quiet, which is the reason this page exists.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Known limitations" icon="triangle-exclamation" href="/production/known-limitations">
+    The client-side half of the same honesty.
+  </Card>
+  <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
+    Symptom-indexed triage for the failures you can see.
+  </Card>
+  <Card title="The REST lane" icon="cloud-arrow-up" href="/guides/rest-api">
+    What `client.rest` is for, once an operator enables it.
+  </Card>
+  <Card title="Webhook embeds" icon="image" href="/guides/webhook-embeds">
+    The lane the image proxy applies to.
+  </Card>
+</CardGroup>

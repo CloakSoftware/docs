@@ -1,0 +1,261 @@
+---
+title: "Cards and embeds"
+description: "Types, helpers, errors and caps for the encrypted card lane."
+---
+
+Everything on this page belongs to `client.sendCard()`, the end-to-end encrypted embed lane. For how and when to use it, see [rich cards](/guides/rich-cards). The plaintext lane has its own [webhooks reference](/api-reference/webhooks).
+
+```ts
+import {
+  CloakEmbedError,
+  CLOAK_MEDIA_ORIGIN,
+  isCloakMediaUrl,
+  assertCardMessage,
+  encodeBotEmbed,
+  embedFallbackText,
+  MAX_EMBED_JSON,
+} from '@cloak-software/bot-sdk';
+import type { BotEmbed, BotEmbedField, CardMessage, CloakEmbedErrorReason } from '@cloak-software/bot-sdk';
+```
+
+## sendCard
+
+```ts
+client.sendCard(serverId: string, channelId: string, card: CardMessage): Promise<void>
+client.guild(serverId).sendCard(channelId: string, card: CardMessage): Promise<void>
+```
+
+Requires `message_send`. The card is encrypted with the same conversation key and epoch as `card.content` and rides the ordinary message frame.
+
+The returned promise rejects with `CloakEmbedError` when the card is invalid, before anything is sent and before the connection cursor moves. It does **not** reject on a server-side denial: sending is fire-and-forget, and denials arrive on the `sendRejected` event.
+
+## CardMessage
+
+The payload passed to `sendCard()`.
+
+<ResponseField name="content" type="string" required>
+  Genuine human-readable text, non-blank. It is what search indexes, what push notifications and channel previews are built from, what a reply quoting this card renders, and what any surface not wired to the card renderer shows. The SDK never synthesizes it. `embedFallbackText()` derives one line if you want it.
+</ResponseField>
+
+<ResponseField name="embed" type="BotEmbed" required>
+  Exactly one embed. Clients render one card per message.
+</ResponseField>
+
+<ResponseField name="groupId" type="string">
+  The channel's group, when it is not already cached from an inbound frame.
+</ResponseField>
+
+<ResponseField name="mentions" type="MentionTarget[]">
+  Who to notify. These targets ride the wire in plaintext, exactly as on `send()`, because the server routes notification fanout without decrypting anything.
+</ResponseField>
+
+<ResponseField name="replyTo" type="ReplyTarget">
+  Make the card a true reply. It renders the quote header and fires a "replied to you" notification. A received `Message` satisfies `ReplyTarget` structurally, so `replyTo: msg` works.
+</ResponseField>
+
+<ResponseField name="unencrypted" type="never">
+  Declared as `never` on purpose. This lane is end-to-end encrypted, so a webhook-shaped payload is a compile error here. `assertCardMessage()` re-checks it at runtime and points you at `sendEmbed()`.
+</ResponseField>
+
+<ResponseField name="username" type="never">
+  Declared as `never`. Per-post personas are a webhook-lane feature. A card posts under the bot's own identity.
+</ResponseField>
+
+<ResponseField name="avatar_url" type="never">
+  Declared as `never`, for the same reason as `username`.
+</ResponseField>
+
+## BotEmbed
+
+Field names are wire names, in `snake_case`. Do not camelCase them.
+
+<ResponseField name="type" type="'rich'">
+  Stamped by the SDK. Setting it to anything else is rejected.
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Up to 256 characters.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Up to 2048 characters. Plain text, not markdown: v1 renders it literally.
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  Click-through target for the card. A link slot: any `http(s)` URL up to 2048 characters, and nothing is fetched for it at render, so the Cloak-hosted rule does not apply.
+</ResponseField>
+
+<ResponseField name="color" type="number | string">
+  A decimal integer in `0..0xffffff` (for example `0x22c55e`) or a `#rrggbb` string. Exactly six hex digits, no shorthand and no alpha. Anything else is rejected.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO-8601, up to 64 characters. Rendered in the footer.
+</ResponseField>
+
+<ResponseField name="author" type="{ name?: string; url?: string; icon_url?: string }">
+  `name` up to 256. `url` is a link slot. `icon_url` is a media slot and must be Cloak-hosted.
+</ResponseField>
+
+<ResponseField name="provider" type="{ name?: string; url?: string }">
+  `name` up to 256. `url` is a link slot. There is no `provider.icon` on this lane, and passing one is rejected.
+</ResponseField>
+
+<ResponseField name="thumbnail" type="{ url: string }">
+  A media slot. Must be Cloak-hosted.
+</ResponseField>
+
+<ResponseField name="image" type="{ url: string }">
+  A media slot. Must be Cloak-hosted.
+</ResponseField>
+
+<ResponseField name="footer" type="{ text?: string; icon_url?: string }">
+  `text` up to 256. `icon_url` is a media slot and must be Cloak-hosted.
+</ResponseField>
+
+<ResponseField name="fields" type="BotEmbedField[]">
+  Up to 8 rows. Desktop only today, see the warning below.
+</ResponseField>
+
+<Warning>
+  `fields` render on desktop only. Mobile drops the rows silently, with no error anywhere. Put anything a reader must see in `description` and treat `fields` as decoration.
+</Warning>
+
+There is no index signature. Unknown keys are rejected, because the renderer drops them while they still count against the payload budget. `video` is rejected by name.
+
+## BotEmbedField
+
+<ResponseField name="name" type="string" required>
+  Non-empty, up to 128 characters.
+</ResponseField>
+
+<ResponseField name="value" type="string" required>
+  Non-empty, up to 512 characters.
+</ResponseField>
+
+<ResponseField name="inline" type="boolean">
+  `true` renders the row side by side. `false` is equivalent to omitting it: the renderer keeps only a literal `true`.
+</ResponseField>
+
+## Media rules
+
+Four slots are fetched with no user action and must have origin exactly `https://media.cloak.chat`:
+
+| Slot | Kind |
+| --- | --- |
+| `image.url` | Media, Cloak-hosted only |
+| `thumbnail.url` | Media, Cloak-hosted only |
+| `author.icon_url` | Media, Cloak-hosted only |
+| `footer.icon_url` | Media, Cloak-hosted only |
+| `url` | Link, any `http(s)` |
+| `author.url` | Link, any `http(s)` |
+| `provider.url` | Link, any `http(s)` |
+
+This is not configurable. See [rich cards](/guides/rich-cards#media-must-be-cloak-hosted) for why.
+
+## Helpers
+
+### embedFallbackText
+
+```ts
+embedFallbackText(embed: BotEmbed): string
+```
+
+Returns the `title`, else the first non-blank line of the `description`, else the embed `url`, capped at `MAX_FALLBACK_TEXT` (256). It never concatenates title and description.
+
+Throws `CloakEmbedError` with `reason: 'content'` when the embed carries none of the three. An image-only card must be given real text, because blank content is invisible to search, notifications, previews and quoting.
+
+### isCloakMediaUrl
+
+```ts
+isCloakMediaUrl(raw: unknown): boolean
+```
+
+`true` only when `raw` is a string that parses as a URL, carries no userinfo, and whose origin is exactly `CLOAK_MEDIA_ORIGIN`. Comparison is exact string equality on the origin, which pins scheme, host and port together.
+
+### assertCardMessage
+
+```ts
+assertCardMessage(card: CardMessage): void
+```
+
+The runtime half of the `CardMessage` type. `sendCard()` calls it for you. Call it yourself to validate a card built from untrusted input before you queue a send. It throws on the first problem it finds, in a deliberate order: shape, then `content`, then unknown keys, then caps, then the media rule, then link schemes, then "nothing renderable".
+
+### encodeBotEmbed
+
+```ts
+encodeBotEmbed(embed: BotEmbed): string
+```
+
+Serializes one validated embed to the JSON array the wire carries, stamping `type: 'rich'`. Enforces `MAX_EMBED_JSON` on the UTF-8 byte length and throws `reason: 'cap'` when over. `sendCard()` calls it for you. Use it directly only to size a card before sending.
+
+## CloakEmbedError
+
+Thrown locally, before anything reaches the wire. It is the only place a bot author can be told the card is wrong: the server cannot read the payload, and the renderer strips bad input silently by design.
+
+<ResponseField name="name" type="string">
+  Always `'CloakEmbedError'`.
+</ResponseField>
+
+<ResponseField name="reason" type="CloakEmbedErrorReason">
+  Why the embed was refused. See the table below.
+</ResponseField>
+
+<ResponseField name="field" type="string | undefined">
+  The exact offending path, for example `'embed.image.url'` or `'embed.fields[3].value'`. Absent when the whole payload is at fault.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  A remedy-carrying explanation, prefixed with `[cloak-sdk] sendCard:`.
+</ResponseField>
+
+### CloakEmbedErrorReason
+
+| Reason | Meaning |
+| --- | --- |
+| `'shape'` | Wrong type, an unknown key, a field that does not exist on this lane, or a webhook-shaped payload |
+| `'content'` | `content` missing, non-string, or blank |
+| `'cap'` | Over one of the mirrored renderer caps, or over `MAX_EMBED_JSON` |
+| `'media-host'` | A media slot whose URL is not Cloak-hosted |
+| `'empty'` | Nothing renderable left, so the client would draw no card at all |
+| `'wire-cap'` | The ciphertext exceeded `MAX_EMBED_WIRE` |
+
+## Constants
+
+Every cap mirrors a client renderer constant. Where the renderer truncates or strips a value, `sendCard()` rejects it.
+
+| Constant | Value | Applies to |
+| --- | --- | --- |
+| `CLOAK_MEDIA_ORIGIN` | `'https://media.cloak.chat'` | The one allowed media origin |
+| `MAX_EMBED_JSON` | `8192` | Serialized embed JSON, in UTF-8 bytes |
+| `MAX_EMBED_WIRE` | `12288` | The encrypted embed string on the wire |
+| `MAX_EMBED_TITLE` | `256` | `title` |
+| `MAX_EMBED_DESCRIPTION` | `2048` | `description` |
+| `MAX_EMBED_FIELDS` | `8` | Rows in `fields` |
+| `MAX_EMBED_FIELD_NAME` | `128` | `fields[].name` |
+| `MAX_EMBED_FIELD_VALUE` | `512` | `fields[].value` |
+| `MAX_EMBED_FOOTER` | `256` | `footer.text` |
+| `MAX_EMBED_NAME` | `256` | `author.name` and `provider.name` |
+| `MAX_EMBED_TIMESTAMP` | `64` | `timestamp` |
+| `MAX_EMBED_URL` | `2048` | Every URL slot, link or media |
+| `MAX_EMBED_URLS` | `8` | Total URLs across all slots. A conforming embed has seven slots, so this never binds |
+| `MAX_FALLBACK_TEXT` | `256` | The output of `embedFallbackText()` |
+
+`MAX_EMBED_JSON` sits below the server's own 16 KiB sidecar cap on the ciphertext, because base64 expands by roughly four thirds. `MAX_EMBED_WIRE` is reachable only by a payload that already failed `MAX_EMBED_JSON`. Both exist so an oversize card is a local synchronous throw rather than a `sendRejected` event with code `-11` arriving later.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Rich cards" icon="id-card" href="/guides/rich-cards">
+    The guide: lane choice, media rules, and a complete bot.
+  </Card>
+  <Card title="Webhooks reference" icon="code" href="/api-reference/webhooks">
+    The plaintext lane's types, caps and errors.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    Every error class the SDK raises.
+  </Card>
+  <Card title="Client" icon="cube" href="/api-reference/client">
+    Constructor options and the full method surface.
+  </Card>
+</CardGroup>

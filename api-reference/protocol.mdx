@@ -1,0 +1,482 @@
+---
+title: "Protocol constants"
+description: "Op, MessageType, the exported wire column maps, and the frame model behind client.raw."
+---
+
+These constants exist so that a bot writing [raw frames](/guides/raw-frames) does not have to guess wire indices. A bot that only calls mapped methods never needs this page.
+
+```ts
+import {
+  Op,
+  MessageType,
+  RESERVED_REPLY_OPCODES,
+  UploadMessageIdx,
+  UploadDenyIdx,
+  WebhookRowIdx,
+  WebhookMintIdx,
+  TypingIdx,
+  DmNotifyIdx,
+  DM_NOTIFY_KIND,
+  CreateDmIdx,
+  UserStatusIdx,
+  USER_STATUS_CODES,
+  MintRestCredentialIdx,
+  RetrieveVoiceKeyIdx,
+  VoiceScopeTag,
+  VOICE_SEALED_PLAINTEXT_BYTES,
+  VOICE_STATE_NAMES,
+} from '@cloak-software/bot-sdk';
+import type { BotStatus, VoiceStateFlag } from '@cloak-software/bot-sdk';
+```
+
+## The frame model
+
+A frame is a JSON array with an integer opcode at index 0. Everything after that is positional: the protocol has no field names and no request ids.
+
+Replies correlate **positionally by reply opcode**. When you await a reply, the first inbound frame carrying that opcode is yours. Two waiters on the same opcode at once is a correlation bug, which is why `client.raw.request` refuses the opcodes the SDK correlates itself.
+
+<Warning>
+  A reply payload is the frame minus the opcode, and when exactly one element remains it is unwrapped to that scalar. `[638, -7]` arrives as the number `-7`, while `[638, 0, id, tokenId, secret, expiry]` arrives as a five-element array. Maps marked "payload indices" below are relative to that unwrapped value, not to the frame.
+</Warning>
+
+Some opcodes are both an action reply and a broadcast hook. Opcodes 45 and 119 are the ones to know: a scalar payload is your own success or error acknowledgement, an array payload is the broadcast. Discriminate by shape, never by opcode.
+
+## Op
+
+The opcode catalogue. Only the subset a bot needs is defined.
+
+<Note>
+  Prefer `Op.UPLOAD_MESSAGE` to the literal `1` in your own code. The constant is the thing this SDK audits against the backend.
+</Note>
+
+### Session and messaging
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `KEEPALIVE` | 0 | |
+| `UPLOAD_MESSAGE` | 1 | Fire-and-forget. Its only inbound frame is the deny echo. |
+| `UPDATE_LOCAL_USER_STATUS` | 19 | `[19, status, manual]`, acknowledged with `[19, 1]` or `[19, -1]`. |
+| `UPDATE_CURRENT_TEXT_CHANNEL` | 20 | Moves the channel cursor. |
+| `UPDATE_CURRENT_SERVER` | 22 | Moves the server cursor. |
+| `SEND_HOOK_DATA_FOR_CHAT_CHANNEL` | 24 | A generic relay to watchers of the sender's current channel. Every shipped client uses it for typing. |
+| `UPDATE_USER_PROFILE_IMAGE` | 50 | The avatar write. |
+| `LOGIN_AS_BOT` | 601 | |
+
+### History
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `RETRIEVE_MESSAGES_FOR_CHANNEL` | 4 | The first page. |
+| `RETRIEVE_SPECIFIC_MESSAGE` | 55 | |
+| `REQUEST_MORE_MESSAGES_FROM_CHANNEL` | 59 | Paging. |
+
+### Servers, channels and groups
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `RETRIEVE_SERVERS` | 6 | |
+| `RETRIEVE_SERVER_CHANNELS` | 7 | |
+| `RETRIEVE_SERVER_GROUPS` | 8 | |
+| `CREATE_CHANNEL` | 40 | |
+| `CREATE_GROUP` | 41 | |
+| `EDIT_CHANNEL` | 93 | |
+| `DELETE_CHANNEL` | 94 | |
+| `EDIT_GROUP` | 95 | |
+| `DELETE_GROUP` | 96 | |
+| `CHANGE_CHANNEL_TO_NEW_GROUP` | 130 | Surfaced as `moveChannel()`. |
+
+### Message actions
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `UPDATE_MESSAGE_REACTIONS` | 45 | Reply and hook share this opcode. |
+| `EDIT_SENT_MESSAGE` | 91 | |
+| `DELETE_SENT_MESSAGE` | 92 | |
+| `UPDATE_MESSAGE_PINNED` | 119 | Reply and hook share this opcode. |
+
+### Members, roles and moderation
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `RETRIEVE_USERS_IN_SERVER` | 30 | Backs `fetchMembers()`, which current backends no longer answer for a server. |
+| `RETRIEVE_PERMISSION_GROUPS` | 105 | Backs `fetchRoles()`. |
+| `KICK_USER_FROM_SERVER` | 156 | Positive error codes. |
+| `BAN_USER_FROM_SERVER` | 157 | Positive error codes. |
+| `UNBAN_USER_FROM_SERVER` | 158 | Positive error codes. |
+| `RETRIEVE_BANNED_USERS_FROM_SERVER` | 159 | Positive error codes. |
+| `TIMEOUT_USER` | 160 | Positive error codes. |
+
+### Direct messages and keys
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `CREATE_DM` | 150 | Success is `0`. Idempotent for an existing pair. |
+| `RETRIEVE_KEY_BUNDLE` | 39 | Server push only. There is no request opcode for it. |
+| `RETRIEVE_DECRYPTION_KEY` | 236 | Success is `0`. |
+| `INSERT_DECRYPTION_KEY` | 237 | Success is `0`. |
+| `INSERT_PUBLIC_KEYS` | 238 | Identity publication. Write-once server-side. |
+| `CHECK_IF_IDENTITY_KEYS_EXIST` | 295 | |
+| `KEY_NUDGE` | 297 | Server push: a key you were waiting for arrived, refetch it. |
+| `CHECK_IF_KEY_UPDATE_IS_NEEDED` | 298 | |
+| `MESSAGE_NOTIFY` | 636 | The only inbound signal for a direct message. |
+
+### Bot lifecycle
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `BOT_ADDED_TO_SERVER` | 607 | Server push. |
+| `BOT_REMOVED_FROM_SERVER` | 609 | Server push. |
+| `SET_BOT_MANIFEST` | 612 | The bot's declared permission manifest. |
+| `BOT_PERMISSION_VERDICT` | 614 | Server push: the resolved grant for one server. |
+| `BOT_KEY_EPOCH_BUMPED` | 622 | Server push: re-acquire the derived key. |
+| `MINT_BOT_REST_CREDENTIAL` | 638 | Takes no arguments. Success is `0`. |
+
+### Webhooks
+
+Success is `0` on all five, and each requires `manage_server` on the currently selected server.
+
+| Name | Code | Reply |
+| --- | --- | --- |
+| `CREATE_WEBHOOK` | 615 | `[615, 0, id, secret, url]` |
+| `LIST_WEBHOOKS` | 616 | `[616, rows]`, never a token |
+| `EDIT_WEBHOOK` | 617 | `[617, 0]` |
+| `REGENERATE_WEBHOOK_TOKEN` | 618 | `[618, 0, secret, url]`, kills the previous url |
+| `DELETE_WEBHOOK` | 619 | `[619, 0]` |
+
+### Commands and emoji
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `SET_BOT_COMMANDS` | 625 | The declaration payload is plaintext server-side. |
+| `GET_SERVER_COMMANDS` | 626 | Named but unused: a bot declares its own menu and reads nobody's. |
+| `SERVER_COMMANDS_UPDATED` | 627 | Server push. A cache hint the SDK ignores. |
+| `RETRIEVE_EMOJI_LIST` | 240 | The static unicode catalog. |
+
+### Voice
+
+| Name | Code | Notes |
+| --- | --- | --- |
+| `UPDATE_CURRENT_VOICE_CHANNEL_AND_SERVER` | 21 | Join and leave. The success reply is the only three-element shape. |
+| `SEND_VOICE_CHANNEL_DATA` | 28 | Roster snapshot, also pushed unsolicited on every server select. |
+| `HOOK_VOICE_ROSTER` | 29 | Server push: one roster delta. |
+| `PASS_VOICE_USER_STATE` | 31 | Bidirectional per-user state flags. |
+| `HOOK_VOICE_CHANNEL_MOVE` | 136 | Server push, delivered only to the moved user. |
+| `HOOK_VOICE_FORCE_DISCONNECT` | 155 | Server push, delivered only to the disconnected user. |
+| `VOICE_CONNECTION_STATE` | 621 | `1` is reconnecting, `0` is recovered. |
+| `RETRIEVE_VOICE_KEY` | 629 | The bot's voice-key read. |
+
+### Broadcast hooks
+
+Channel, group and server lifecycle pushes. Current backends append a trailing `serverId` (and `channelId` where it applies) so a bot can route them without a selection.
+
+| Name | Code |
+| --- | --- |
+| `HOOK_CHANNEL_CREATE` | 69 |
+| `HOOK_GROUP_CREATE` | 70 |
+| `HOOK_MESSAGE_EDIT` | 71 |
+| `HOOK_MESSAGE_DELETE` | 72 |
+| `HOOK_CHANNEL_EDIT` | 73 |
+| `HOOK_CHANNEL_DELETE` | 74 |
+| `HOOK_GROUP_EDIT` | 75 |
+| `HOOK_GROUP_DELETE` | 76 |
+| `HOOK_SERVER_EDIT` | 77 |
+| `HOOK_SERVER_DELETE` | 78 |
+| `HOOK_MEMBER_UPDATE` | 79 |
+
+## MessageType
+
+The message type carried on live message payloads and history rows.
+
+| Name | Value | Meaning |
+| --- | --- | --- |
+| `USER` | 0 | A normal user or bot message. |
+| `MEMBER_JOIN` | 1 | A member joined. |
+| `BOT_ADD` | 2 | A bot was added. |
+| `WEBHOOK` | 3 | A webhook-lane message: plaintext server-side, attributed to a webhook identity. |
+
+<Note>
+  The SDK routes every type above `0` to the `systemMessage` event, so your bot's own webhook posts never echo back as `messageCreate`.
+</Note>
+
+## RESERVED_REPLY_OPCODES
+
+```ts
+const RESERVED_REPLY_OPCODES: ReadonlySet<number>
+```
+
+The reply opcodes the SDK registers its own waiters on, plus opcode 1. `client.raw.request` refuses these unless you pass `allowReserved: true`, because a raw waiter can claim a reply the SDK was waiting for, or lose its own.
+
+The set covers the mapped action surface: sends, history, server and channel reads, every message action, moderation, DM creation, the key exchange, login, the manifest, the command menu, the webhook five, the REST credential mint, and the voice key. Test membership rather than memorizing it:
+
+```ts
+RESERVED_REPLY_OPCODES.has(45);  // true
+RESERVED_REPLY_OPCODES.has(698); // false
+```
+
+Opcode 24 is in the set even though the SDK registers no waiter on it. The relay reaches your bot for every visible channel, so a raw waiter would resolve with a stranger's typing payload.
+
+## Column maps
+
+Each map names the positions of one wire payload. Frame indices count the opcode at 0. Payload indices are relative to the unwrapped reply.
+
+### UploadMessageIdx
+
+Frame indices of an outbound message (opcode 1).
+
+| Key | Index | Slot |
+| --- | --- | --- |
+| `CONTENT` | 1 | The encrypted body. |
+| `REPLY` | 2 | `[messageId, authorId, createdAtMs]`, or three nulls. |
+| `MENTIONS` | 3 | The plaintext ping array. |
+| `ATTEMPTING_FILE` | 4 | |
+| `FILE_IDS` | 5 | |
+| `EXPIRE_SECONDS` | 6 | Per-message TTL. |
+| `TTS` | 7 | |
+| `COMMAND_DATA` | 8 | The encrypted command sidecar. |
+| `EMBED_DATA` | 9 | The encrypted card sidecar. |
+
+<Warning>
+  The `MENTIONS` slot is plaintext by design. The server routes notification fanout from it without decrypting the body. See [Mention helpers](/api-reference/mentions).
+</Warning>
+
+<Note>
+  A plain send emits the six-element frame the backend has always seen. Only a sidecar path pads slots 6, 7 and 8 with `0`, `false` and `null` so a later index can carry its payload. A frame that wants slot 9 must pad all three.
+</Note>
+
+### UploadDenyIdx
+
+Frame indices of the op-1 deny echo, `[1, "", "", "", "", "", -N]`.
+
+| Key | Index | Slot |
+| --- | --- | --- |
+| `CODE` | 6 | Negative on a deny, and the constant `0` on a live broadcast, which makes it a total discriminator. |
+| `MESSAGE_ID` | 5 | Empty string on a deny. |
+
+The SDK decodes this for you and emits `sendRejected`. Two DM paths still answer with no frame at all, so silence is not proof of delivery.
+
+### DmNotifyIdx
+
+Frame indices of opcode 636. One map covers both flavors, because the server builds them with identical positions.
+
+| Key | Index |
+| --- | --- |
+| `KIND` | 1 |
+| `SERVER_ID` | 2 |
+| `CHANNEL_ID` | 3 |
+| `MESSAGE_ID` | 4 |
+| `SENDER_ID` | 5 |
+| `SENDER_NAME` | 6 |
+| `SENDER_ICON` | 7 |
+| `TIME_MS` | 8 |
+| `CIPHERTEXT` | 9 |
+
+On the DM flavor, `SERVER_ID` is the literal `0` and `CHANNEL_ID` carries the dm id. There is no mention array, no reply array and no command data on this frame, which is why a DM message has no `repliedTo`.
+
+### DM_NOTIFY_KIND
+
+```ts
+const DM_NOTIFY_KIND = 6;
+```
+
+The `KIND` value that means "a direct message", and a total discriminator. Every other kind duplicates a server message the bot already receives on the firehose, so the SDK drops them.
+
+### CreateDmIdx
+
+Payload indices of the opcode 150 reply.
+
+| Key | Index |
+| --- | --- |
+| `CODE` | 0 |
+| `DM_ID` | 1 |
+| `IS_GROUP` | 2 |
+
+<Warning>
+  A null `DM_ID` with `CODE` `0` is a denial, not a success. An ineligible target falls through the insert and still answers code `0` with no id. Check the id, not just the code.
+</Warning>
+
+### TypingIdx
+
+Frame indices of opcode 24, the same in both directions.
+
+| Key | Index |
+| --- | --- |
+| `USER_ID` | 1 |
+| `IS_TYPING` | 2 |
+
+Outbound, `USER_ID` is a placeholder that must still exist: the backend overwrites index 1 in place, so a two-element frame is an error server-side.
+
+<Note>
+  This relay carries no routing tail. The source channel travels in the backend's fanout envelope and never reaches the frame, which is why the `typing` event reports `serverId` and `channelId` as `null`.
+</Note>
+
+### UserStatusIdx
+
+Frame indices of opcode 19.
+
+| Key | Index |
+| --- | --- |
+| `STATUS` | 1 |
+| `MANUAL` | 2 |
+
+`MANUAL` true sets the account-level base status and persists it. False is a per-device activity report, which the SDK never sends.
+
+### USER_STATUS_CODES
+
+```ts
+const USER_STATUS_CODES = {
+  invisible: 0,
+  online: 1,
+  away: 2,
+  busy: 3,
+  dnd: 4,
+};
+```
+
+The named base statuses `setStatus()` accepts. The keys are the `BotStatus` type.
+
+| Name | Displayed as |
+| --- | --- |
+| `invisible` | Offline, to everyone. Indistinguishable from a real offline. |
+| `online` | The only base that defers to device activity. |
+| `away` | Verbatim. |
+| `busy` | Verbatim. |
+| `dnd` | Verbatim, and it also suppresses push notifications. `busy` does not. |
+
+### WebhookRowIdx
+
+One row of the opcode 616 reply.
+
+| Key | Index |
+| --- | --- |
+| `ID` | 0 |
+| `NAME` | 1 |
+| `CHANNEL_ID` | 2 |
+| `MINI_ICON` | 3 |
+| `CREATOR` | 4 |
+| `CREATED_MS` | 5 |
+
+`CREATOR` may be null on an old row. Discriminate the reply with `Array.isArray`, not by length: a server with no webhooks legitimately answers `[]`, while every error is a bare number.
+
+### WebhookMintIdx
+
+Payload indices of the create and regenerate replies. Both carry the code at index 0, so check it before trusting anything else.
+
+| Key | Index | Reply |
+| --- | --- | --- |
+| `CODE` | 0 | both |
+| `CREATE_ID` | 1 | create |
+| `CREATE_SECRET` | 2 | create |
+| `CREATE_URL` | 3 | create |
+| `REGEN_SECRET` | 1 | regenerate |
+| `REGEN_URL` | 2 | regenerate |
+
+<Warning>
+  `SECRET` and `URL` hold the delivery token. Never log them, never persist them, never put them in an error message.
+</Warning>
+
+### MintRestCredentialIdx
+
+Payload indices of the opcode 638 reply.
+
+| Key | Index |
+| --- | --- |
+| `CODE` | 0 |
+| `USER_ID` | 1 |
+| `TOKEN_ID` | 2 |
+| `SECRET` | 3 |
+| `EXPIRES_AT_MS` | 4 |
+
+Success is `0`, and every failure arrives as a bare number instead of an array. Discriminate on the code, never on array versus scalar shape.
+
+<Warning>
+  `USER_ID` and `TOKEN_ID` are dashed uuid strings and must reach the REST service byte for byte. Normalizing them makes every subsequent request return `401` with no other symptom. `SECRET` is returned exactly once and is stored server-side only as a hash.
+</Warning>
+
+### RetrieveVoiceKeyIdx
+
+Payload indices of the opcode 629 reply.
+
+| Key | Index |
+| --- | --- |
+| `CODE` | 0 |
+| `FROM_ID` | 1 |
+| `SEALED_KEY` | 2 |
+| `SERVER_ID` | 3 |
+| `KEY_VERSION` | 4 |
+
+These are payload indices, not frame indices. The unwrap context uses `SERVER_ID` and `KEY_VERSION` at payload positions 3 and 4, and reading them one slot over fails with a bad tag and no other symptom.
+
+## Voice key constants
+
+### VoiceScopeTag
+
+```ts
+const VoiceScopeTag = { PARTICIPANT: 0x00, ROOM: 0x01 };
+```
+
+Byte 0 of the sealed voice plaintext. `PARTICIPANT` is the bot's own frame key, publish only. `ROOM` is the room key, which a bot receives when it holds `voice_listen` or `administrator`.
+
+<Warning>
+  Any other value is an error, never a default. Treating an unknown tag as "probably participant" installs a byte-shifted key that opens cleanly, passes the cipher, and produces silently undecryptable audio.
+</Warning>
+
+### VOICE_SEALED_PLAINTEXT_BYTES
+
+```ts
+const VOICE_SEALED_PLAINTEXT_BYTES = 33;
+```
+
+The sealed voice plaintext is exactly 33 bytes: a one-byte scope tag followed by a 32-byte key. Exactly, not "at least".
+
+### VOICE_STATE_NAMES
+
+```ts
+const VOICE_STATE_NAMES = ['muted', 'deafened', 'webcam', 'stream', 'p2pWebcam', 'p2pStream'];
+```
+
+Index equals the opcode 31 state type. The array is the `VoiceStateFlag` type.
+
+<Warning>
+  **`p2pWebcam` and `p2pStream` are dead API.** Peer-to-peer video was removed from the platform. The names survive so the array stays index-aligned with the wire, and the matching `VoiceParticipant.p2pWebcam` and `.p2pStream` fields are permanently `false`. Do not build on them. Video is not available to bots at all: the backend restricts a bot's publish sources to the microphone at token-mint time.
+</Warning>
+
+## Types
+
+<ResponseField name="BotStatus" type="'invisible' | 'online' | 'away' | 'busy' | 'dnd'">
+  The keys of `USER_STATUS_CODES`, and what `setStatus()` accepts.
+</ResponseField>
+
+<ResponseField name="VoiceStateFlag" type="'muted' | 'deafened' | 'webcam' | 'stream' | 'p2pWebcam' | 'p2pStream'">
+  The members of `VOICE_STATE_NAMES`, and the `state` field on `voiceStateUpdate`.
+</ResponseField>
+
+## What is not exported
+
+Several names appear in SDK signatures or in the source without being on the public export surface. Writing an `import` for one of these does not resolve.
+
+| Name | What to do instead |
+| --- | --- |
+| `Frame` | Write `unknown[]`. That is exactly what the alias is. |
+| `Opcode` | Write `number`, or use the `Op` values directly. |
+| `CLIENT_WIRE_VERSION` | Nothing to do. The SDK sends it at login, and a backend that refuses your version disconnects with code `-12`. |
+| `MemberIdx` | Not exported. The member reply is decoded for you, and `fetchMembers()` is broken against current backends anyway. |
+| `MemberRoleIdx` | Not exported. Same reason. |
+| `VoiceKeyAccess` | Not exported. Pass `client.voiceKeys` without naming its type. |
+| `LiveMessageIdx`, `HistoryColIdx`, `RoleIdx`, the voice roster maps | Not exported. The SDK decodes those payloads into `Message`, `Role` and `VoiceParticipant`. |
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Raw frames" icon="terminal" href="/guides/raw-frames">
+    Where these constants are used.
+  </Card>
+  <Card title="Events" icon="tower-broadcast" href="/api-reference/events">
+    The decoded form of most of these frames.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    The three success-code conventions on the wire.
+  </Card>
+  <Card title="REST client" icon="server" href="/api-reference/rest">
+    Where `MintRestCredentialIdx` is consumed.
+  </Card>
+</CardGroup>

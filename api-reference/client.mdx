@@ -13,51 +13,139 @@ const client = new Client({
   keystorePath: './bot.cloak-keystore.json',
   requiredPermissions: ['message_send', 'reaction_add'],
 });
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return;
+  if (msg.content.trim() === '!ping') await msg.channel.send('pong');
+});
+
+await client.login();
 ```
 
 Server-scoped methods take a `serverId` as their first argument. If a handler does several things in one server, [`guild(serverId)`](#guild) binds that id once so you can drop it from every call.
 
+<Warning>
+  `Message.serverId` is `string | null`. It is `null` for a direct message. Guard with `if (msg.isDM || !msg.serverId) return;` before anything server-scoped, or your bot breaks on the first DM it receives. See [Direct messages](/guides/direct-messages).
+</Warning>
+
 ## Constructor options
+
+### Identity and storage
 
 <ParamField path="token" type="string" required>
   Your bot token, in the form `botid.tokenid.secret`. Create it in the Cloak app under **Settings > My Bots**. Treat it like a password. Read it from an environment variable, never hardcode it.
 </ParamField>
 
 <ParamField path="keystorePath" type="string">
-  Path to a file where the SDK persists your bot's identity and its conversation keys. Strongly recommended for any bot you keep running. See [Keys and the keystore](/concepts/keys-and-keystore).
+  Path to a file where the SDK persists your bot's identity, its conversation keys, and its peer pins. Shorthand for `keystore: fileKeystore(path)`. Mutually exclusive with `keystore`: passing both throws.
+
+  A bot with no keystore of any kind is single-run only. Its second start fails permanently, because identity publication is write-once on the server. See [Keys and the keystore](/concepts/keys-and-keystore).
 </ParamField>
 
-<ParamField path="requiredPermissions" type="PermissionName[]">
-  The permissions your bot declares it needs. Sent to servers on login. Declaring is a request, not a grant. See [Permissions](/concepts/permissions).
+<ParamField path="keystore" type="KeystoreAdapter">
+  Where to persist identity and keys when a file will not do. Use `envKeystore()` on a host with no writable volume, or supply your own adapter. Mutually exclusive with `keystorePath`. See [Keystore backends](/production/keystore-backends).
 </ParamField>
 
 <ParamField path="deviceId" type="string">
   A stable device id used for clean takeover on reconnect. Defaults to a value derived from your token. Set it only if you have a specific reason to.
 </ParamField>
 
+### Behavior
+
+<ParamField path="requiredPermissions" type="PermissionName[]">
+  The permissions your bot declares it needs, sent to the server on login. Declaring is a request, not a grant. A human approves a subset per server, and the resolved grant arrives on [`permissionsUpdate`](/api-reference/events#permissionsupdate). See [Permissions](/concepts/permissions).
+</ParamField>
+
+<ParamField path="commandPrefix" type="string" default="/">
+  The prefix the text lane of the slash-command parser matches. Only the text lane uses it. A structured invocation carries the command name outright and is prefix-independent. See [Slash commands](/guides/slash-commands).
+</ParamField>
+
+<ParamField path="webhookName" type="string" default="Bot">
+  Display name for the webhook that [`sendEmbed()`](#sendembed) mints. Cosmetic only. Reuse is matched on creator plus channel, never on name, so renaming this does not orphan an existing webhook.
+</ParamField>
+
+<ParamField path="webhookFetch" type="WebhookFetch">
+  An injected `fetch` for the webhook ingress, for tests or a proxy. Defaults to `globalThis.fetch`. This is the only outbound HTTP the SDK performs on its own.
+</ParamField>
+
 <ParamField path="debug" type="boolean" default="false">
   Logs every frame the SDK sends and receives, with your bot token redacted. Useful while developing, noisy in production.
 </ParamField>
 
-<Accordion title="Advanced: self-hosted and local dev options" icon="wrench">
-  These options exist only for pointing the SDK at a Cloak stack you run yourself. Bots against the hosted Cloak service never need them.
+### Endpoints and transport
+
+<Accordion title="Advanced: self-hosted, local dev, and lane selection" icon="wrench">
+  Bots against the hosted Cloak service rarely set any of these.
 
   <ParamField path="url" type="string">
-    The connection endpoint. Defaults to Cloak's hosted service. Set it only to target a self-hosted or local development stack.
+    The connection endpoint. Defaults to the hosted service on the lane implied by `transport`: `DEFAULT_URL` for `'ws'`, `DEFAULT_WEBTRANSPORT_URL` for `'webtransport'`. A `wss://` url speaks the WebSocket lane, an `https://` url the WebTransport lane.
+  </ParamField>
+
+  <ParamField path="transport" type="'ws' | 'webtransport'" default="ws">
+    Which wire to speak. The default WebSocket lane rides the pure-JavaScript `ws` package, so `npm install` compiles nothing. `'webtransport'` needs the optional Quiche packages installed. See [Installing](/install).
+  </ParamField>
+
+  <ParamField path="allowInsecure" type="boolean" default="false">
+    Permit a plain `ws://` url, which sends the bot token in cleartext. Local development stacks only.
+  </ParamField>
+
+  <ParamField path="idleTimeoutMs" type="number" default="60000">
+    Treat the connection as dead after this long with no inbound data, then reconnect. Defaults to `60000` on the WebSocket lane and is disabled on WebTransport, which has its own QUIC idle timeout. `0` disables it.
   </ParamField>
 
   <ParamField path="serverCertificateHashes" type="{ algorithm: 'sha-256'; value: Uint8Array }[]">
-    Certificate pins for a self-hosted stack that uses a self-signed certificate. Not needed for the hosted service.
+    WebTransport lane only: a self-signed QUIC certificate pin for a self-hosted or local stack. Throws on the WebSocket lane. Not needed for the hosted service.
+  </ParamField>
+
+  <ParamField path="restUrl" type="string">
+    The REST base that [`client.rest`](#properties) talks to. Defaults to `DEFAULT_REST_URL`. HTTPS only, except loopback. A bad value throws on the first `client.rest` call.
+  </ParamField>
+
+  <ParamField path="livekitUrl" type="string">
+    The LiveKit signalling url handed back on `VoiceConnection.url`. Defaults to `livekitUrlFor(<transport url>)`, which is the same host on port 7880. The SDK never connects to it. See [Joining voice](/voice/joining).
   </ParamField>
 </Accordion>
 
 ## Properties
 
 <ResponseField name="user" type="BotUser | null">
-  Your bot's identity after login, or `null` before `login()` completes. Its `id` is a normalized value you can compare against `msg.authorId` to detect your bot's own messages. See [BotUser](/api-reference/types#botuser).
+  Your bot's identity after login, or `null` before `login()` completes. Its `id` is normalized, so you can compare it against `msg.authorId` to detect your bot's own messages. See [BotUser](/api-reference/types#botuser).
 </ResponseField>
 
-## Lifecycle and messaging
+<ResponseField name="commands" type="CommandRegistry">
+  The bot's slash-command registry. `register(decl, handler)` is synchronous.
+
+  Register before `login()`. Whatever is registered at that moment is published as the bot's menu. A command added afterwards still dispatches locally, but it does not appear in the published menu until the next login, and the SDK never re-publishes on its own. See [Slash commands](/api-reference/commands).
+</ResponseField>
+
+<ResponseField name="webhooks" type="WebhookApi">
+  The incoming-webhook surface: `list`, `create`, `edit`, `regenerate`, `delete`, and `post`. The five CRUD calls require `manage_server`. `post(url, payload)` requires nothing at all and is the recommended path. See [Webhooks](/api-reference/webhooks).
+
+  <Warning>
+    Everything posted through this lane is **not** end-to-end encrypted and renders under a webhook identity rather than your bot's.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="rest" type="RestApi">
+  The authenticated REST lane: `request`, `json`, and `binary`. Every call transparently mints a short-lived credential over the realtime session, so your long-lived bot token never rides an HTTP header.
+
+  This is off by default server-side, so the first call usually rejects with a `CloakActionError` carrying code `-7`. See [REST](/api-reference/rest).
+</ResponseField>
+
+<ResponseField name="raw" type="RawApi">
+  The escape hatch to opcodes the SDK does not map: `send(frame, opts?)` and `request(frame, replyOpcode, opts?)`. Raw frames run on the same serialized chain as every mapped action.
+
+  `request()` refuses reply opcodes the SDK correlates internally unless you pass `{ allowReserved: true }`, because awaiting one can claim a reply the SDK was waiting for. See [Raw frames](/guides/raw-frames).
+</ResponseField>
+
+<ResponseField name="voiceKeys">
+  The voice-key lane, and nothing else: `getVoiceKey`, `acquireVoiceKey`, `voiceFrameKeyFor`, and `forgetVoiceKey`. Hand this to a media session so it can install frame keys without reaching your conversation keys. See [Voice keys](/voice/keys).
+
+  This accessor's interface type is intentionally not exported, so annotate with `typeof client.voiceKeys` if you need a name for it.
+</ResponseField>
+
+## Lifecycle
 
 ### login
 
@@ -65,20 +153,10 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
 login(): Promise<void>
 ```
 
-Connects, authenticates, publishes your bot's identity if needed, emits `guildCreate` for existing servers, then emits `ready`. Call this once, after attaching your listeners.
-
-### send
-
-```ts
-send(serverId: string, channelId: string, text: string, groupId?: string): Promise<void>
-```
-
-Sends an encrypted message to a channel. Sends are serialized internally so they never race each other. `groupId` is auto-resolved for any channel the bot has already seen, so you usually omit it.
-
-Most of the time you use [`msg.reply()`](/api-reference/types#message) instead, which already knows where the message came from. See [Sending messages](/guides/sending-messages).
+Checks the Node runtime, loads the keystore, connects, authenticates, publishes your bot's identity if it has never been published, declares the permission manifest, publishes the command menu, emits `guildCreate` for existing servers, then emits `ready`. Call it once, after attaching your listeners and registering your commands.
 
 <Warning>
-  `send()` throws a plain `Error` if your bot does not hold the server's conversation key yet. This happens right after a first join, before the key handoff completes. See [first message takes a moment](/quickstart#first-message-takes-a-moment).
+  Two login failures are terminal and stop the automatic reconnect loop: `-2` (the token was revoked or regenerated) and `-12` (this SDK is below the backend's minimum wire version). Both emit [`disconnect`](/api-reference/events#disconnect) rather than throwing from a call you can await. `-8` is transient and keeps retrying. See [Connection lifecycle](/concepts/connection-lifecycle).
 </Warning>
 
 ### watch
@@ -87,7 +165,7 @@ Most of the time you use [`msg.reply()`](/api-reference/types#message) instead, 
 watch(serverId: string, channelId: string, groupId?: string): Promise<void>
 ```
 
-Optionally pre-selects a channel, for example to warm its key before your first send. You rarely need this, because the [firehose](/concepts/message-delivery) already delivers every visible channel. `groupId` is auto-resolved from the server's channel list when omitted. The target is remembered and re-established after a reconnect.
+Optionally pre-selects a channel, for example to warm its key before your first send. You rarely need it, because the [firehose](/concepts/message-delivery) already delivers every visible channel. `groupId` is auto-resolved from the server's channel list when omitted. The target is remembered and re-established after a reconnect.
 
 ### destroy
 
@@ -95,9 +173,124 @@ Optionally pre-selects a channel, for example to warm its key before your first 
 destroy(): Promise<void>
 ```
 
-Closes the connection and stops reconnecting. The clean way to shut a bot down. See [Connection lifecycle](/concepts/connection-lifecycle#shutting-down).
+Closes the connection, stops reconnecting, and flushes any queued keystore writes. The clean way to shut a bot down. See [Connection lifecycle](/concepts/connection-lifecycle#shutting-down).
 
-## History
+## Sending
+
+### send
+
+```ts
+send(serverId: string, channelId: string, text: string, opts?: SendOptions): Promise<void>
+```
+
+Sends an encrypted message to a channel. Sends are serialized internally so they never race each other. `opts.groupId` is auto-resolved for any channel the bot has already seen, so you usually omit it.
+
+```ts
+import { userMention } from '@cloak-software/bot-sdk';
+
+await client.send(serverId, channelId, `${userMention(msg.authorId)} on it`, {
+  mentions: [{ userId: msg.authorId }],
+  replyTo: msg,
+});
+```
+
+[`SendOptions`](/api-reference/types#sendoptions) is `{ groupId?, mentions?, replyTo? }`.
+
+<Warning>
+  The fourth argument is an options object. It was a positional `groupId` before 0.2.0, and that form is gone. `send(s, c, text, groupId)` becomes `send(s, c, text, { groupId })`.
+</Warning>
+
+<Note>
+  `send()` is fire-and-forget. The wire has no success acknowledgement for it, so the promise resolves once the frame is out. A server-side denial does **not** reject the promise: it arrives later on the [`sendRejected`](/api-reference/events#sendrejected) event. Silence does not mean delivered.
+</Note>
+
+The one local throw is a plain `Error` when your bot does not hold the server's conversation key yet, which happens in the moments right after a first join.
+
+Most handlers use [`msg.reply()`](/api-reference/types#message) or `msg.channel.send()` instead, which already know where the message came from. See [Sending messages](/guides/sending-messages).
+
+### sendDM
+
+```ts
+sendDM(userId: string, text: string, opts?: SendOptions): Promise<void>
+```
+
+Sends an encrypted direct message, creating the DM and exchanging its conversation key on first contact. Both the dm id and the key are persisted in the keystore, so that cost is paid once per person.
+
+Eligibility is the server's decision and it is deny-by-default: a human may hold a DM with a bot only if they own it, or they share at least one server with it. An ineligible target rejects with a [`CloakActionError`](/api-reference/errors) before anything is encrypted.
+
+Inside a DM, `replyTo` works, and role, `@everyone`, and `@here` mention pairs are dropped server-side. See [Direct messages](/guides/direct-messages).
+
+### sendCard
+
+```ts
+sendCard(serverId: string, channelId: string, card: CardMessage): Promise<void>
+```
+
+Posts a rich card. This is the **encrypted** embed lane and the one to reach for by default: the card is encrypted with the same conversation key and epoch as the message body, and it renders under your bot's own identity. It requires `message_send` and nothing else.
+
+`card.content` is required and must be non-blank. Card media must be Cloak-hosted, and anything else throws a `CloakEmbedError` locally before a frame leaves your process. See [Rich cards](/guides/rich-cards) and [Embeds](/api-reference/embeds).
+
+### sendEmbed
+
+```ts
+sendEmbed(serverId: string, channelId: string, post: UnencryptedWebhookPost): Promise<void>
+```
+
+Posts a rich embed by minting or reusing a webhook for the channel. Requires `manage_server`.
+
+<Warning>
+  This lane is **not** end-to-end encrypted. The message is stored as plaintext server-side and renders under a webhook identity, not your bot's. Your bot does not receive its own post back on `messageCreate`. Prefer [`sendCard()`](#sendcard) unless you need per-post personas, no bot account at all, or clients older than the card rollout. See [Webhook embeds](/guides/webhook-embeds).
+</Warning>
+
+### sendCommand
+
+```ts
+sendCommand(
+  serverId: string,
+  channelId: string,
+  name: string,
+  args?: CommandArgs,
+  opts?: { botId: string; decl?: CommandDeclaration; groupId?: string },
+): Promise<void>
+```
+
+Invokes a slash command, your bot's own or another bot's. `opts.botId` names the target bot and has no default. Targeting a foreign bot also requires `opts.decl`, because the SDK cannot know another bot's option order. See [Slash commands](/api-reference/commands).
+
+### sendTyping
+
+```ts
+sendTyping(serverId: string, channelId: string, isTyping?: boolean, groupId?: string): Promise<void>
+```
+
+Shows or clears the typing indicator in a channel. `isTyping` defaults to `true`. The SDK never sends this implicitly, not even around `send()`.
+
+Receivers clear the indicator themselves about ten seconds after the last `true`, so re-send it every few seconds during long work. A repeat of the same boolean for the same channel inside about a second is dropped without touching the wire. It moves the server-side selection cursor exactly like a send does, and it is fire-and-forget. See [Typing, presence, and profile](/guides/typing-presence-and-profile).
+
+## Presence and profile
+
+### setStatus
+
+```ts
+setStatus(status: BotStatus): Promise<void>
+```
+
+Sets the bot's presence. `BotStatus` is `'invisible' | 'online' | 'away' | 'busy' | 'dnd'`. `dnd` also suppresses push notifications on every device.
+
+This writes an account-level status to a database column, so it survives reconnects, restarts, and redeploys. Set it once on `ready`, never on a timer. Rejects with a [`CloakActionError`](/api-reference/errors) if the server does not acknowledge it.
+
+<Note>
+  `online` means "defer to liveness" rather than "show a green dot". A bot with no live session displays as offline whatever its stored base says. The other four values pin the display outright.
+</Note>
+
+### setAvatar
+
+```ts
+setAvatar(iconUrl: string | null, miniIconUrl?: string | null): Promise<void>
+```
+
+Sets or clears the bot's avatar from an already-hosted image url. `miniIconUrl` defaults to `iconUrl`. Passing `null` clears both. Urls are capped at 512 characters server-side. The SDK never uploads images, because file upload is closed to bots.
+
+## History and reads
 
 ### fetchMessages
 
@@ -115,7 +308,9 @@ fetchMessages(
 ): Promise<Message[]>
 ```
 
-Reads message history for a channel, returned oldest to newest and auto-paginated. Requires the `message_read_history` permission. Cursors are a `Date` or a `Message`, never a message id. The returned messages are fully actionable. See [Message history](/guides/message-history) for the cursor rules and examples.
+Reads message history for a channel, returned oldest to newest and auto-paginated. Requires `message_read_history`. Cursors are a `Date` or a `Message`, never a message id, because Cloak message ids are random UUIDs and not time-sortable. `around` returns a single window and is not auto-paged.
+
+Content decrypts per row against the key for that row's own epoch, and is `''` (never raw ciphertext) when the key is missing. Returned messages are fully actionable and carry `pinned`. See [Message history](/guides/message-history).
 
 ### messageLocation
 
@@ -131,7 +326,39 @@ Returns where a message the bot has seen lives, or `undefined`. This is a bounde
 fetchEmojis(): Promise<{ emojis: unknown; category: unknown }>
 ```
 
-Returns the global emoji catalog. Its ids are the custom-emoji ids that [`msg.react()`](/api-reference/types#message) accepts. See [Reactions](/guides/reactions).
+Returns the global emoji catalog. It takes no `serverId` because the catalog is server-agnostic, and it does not move the selection cursor. Its ids are what [`msg.react()`](/api-reference/types#message) accepts. `react()` itself stays an opaque pass-through with no client-side validation. See [Reactions](/guides/reactions).
+
+### fetchRoles
+
+```ts
+fetchRoles(serverId: string): Promise<Role[]>
+```
+
+Reads a server's roles on demand, with no caching. Returns each role's color, position, and member count. See [Role](/api-reference/types#role).
+
+### fetchBans
+
+```ts
+fetchBans(serverId: string): Promise<BanInfo[]>
+```
+
+Returns the server's ban list. Requires `member_ban`, and some older Cloak servers also require owner or admin standing. Usernames are resolved server-side and may be `null`. See [BanInfo](/api-reference/types#baninfo).
+
+### fetchMembers
+
+```ts
+fetchMembers(serverId: string): Promise<Member[]>
+```
+
+<Warning>
+  **`fetchMembers()` does not work against any current Cloak backend. Do not call it.**
+
+  It awaits an opcode the backend made DM-only. A server-scoped request produces no reply frame of any kind, not even an error code, so the returned promise **neither resolves nor rejects**. `await` hangs until the transport timeout, and `try`/`catch` does not save you. This is not flakiness and not a permission problem, and there is no workaround in the SDK.
+
+  The rebuild is planned and the signature will survive it, so code written against this method stays valid. It just cannot run today. [`guild().fetchMembers()`](#guild) binds the same broken call. [`fetchRoles()`](#fetchroles) is unaffected.
+</Warning>
+
+Enumerates a server's members. See [Member](/api-reference/types#member) and [Members and roles](/guides/members-and-roles).
 
 ## Moderation
 
@@ -151,7 +378,7 @@ Removes a member. Requires `member_kick`, a rank above the target, and the targe
 ban(serverId: string, userId: string, reason?: string): Promise<void>
 ```
 
-Kicks a member and records the ban. Requires `member_ban`. `reason` is capped at 256 characters.
+Kicks a member and records the ban. Requires `member_ban`. `reason` is capped at 256 characters server-side.
 
 ### unban
 
@@ -167,10 +394,10 @@ Lifts a ban. Requires `member_ban`. Some older Cloak servers also require owner 
 timeout(serverId: string, userId: string, durationSeconds: number): Promise<void>
 ```
 
-Times a member out for `durationSeconds`. A timed-out member cannot send or react. Passing `0` lifts the timeout. Requires `member_timeout`.
+Times a member out for `durationSeconds`. A timed-out member cannot send or react in that server. Passing `0` lifts the timeout. Requires `member_timeout`.
 
 <Note>
-  `timeout()` requires an up-to-date Cloak server. On an older server the call times out rather than resolving.
+  `timeout()` needs an up-to-date Cloak server. An older server drops the opcode, so the call times out rather than resolving.
 </Note>
 
 ### removeTimeout
@@ -180,14 +407,6 @@ removeTimeout(serverId: string, userId: string): Promise<void>
 ```
 
 Lifts a member's timeout. Equivalent to `timeout()` with `0` seconds.
-
-### fetchBans
-
-```ts
-fetchBans(serverId: string): Promise<BanInfo[]>
-```
-
-Returns the server's ban list. Requires `member_ban` (older servers also require owner or admin). See [BanInfo](/api-reference/types#baninfo).
 
 ## Channels and groups
 
@@ -199,7 +418,7 @@ All of these require `manage_channels` and reject with [`CloakActionError`](/api
 createChannel(serverId: string, name: string, groupId: string, channelType?: number): Promise<string>
 ```
 
-Creates a channel in a group and returns the new channel's id. `channelType` defaults to `0` (a text channel).
+Creates a channel in a group and returns the new channel's id. `channelType` defaults to `0`, a text channel.
 
 ### editChannel
 
@@ -220,7 +439,13 @@ Deletes a channel along with its messages and pins.
 ### moveChannel
 
 ```ts
-moveChannel(serverId: string, channelId: string, fromGroupId: string, toGroupId: string, newOrder: number): Promise<void>
+moveChannel(
+  serverId: string,
+  channelId: string,
+  fromGroupId: string,
+  toGroupId: string,
+  newOrder: number,
+): Promise<void>
 ```
 
 Moves a channel to a group and position. `newOrder` is clamped to the range `0` to `126`. Moving to the same group and order is a no-op the server rejects.
@@ -231,7 +456,7 @@ Moves a channel to a group and position. `newOrder` is clamped to the range `0` 
 createGroup(serverId: string, name: string): Promise<string | undefined>
 ```
 
-Creates a channel group. The new group's id is captured best-effort from the server's create broadcast, so it can be `undefined`. Handle that case.
+Creates a channel group. The acknowledgement carries no id, so the new group's id is captured best-effort from the server's create broadcast within a short window. Handle the `undefined` case.
 
 ### editGroup
 
@@ -253,23 +478,75 @@ Deletes a group and its channels.
   There are no methods to edit or delete a server. Those actions are owner-level and surface only as the [`serverUpdate`](/api-reference/events#serverupdate) and [`serverDelete`](/api-reference/events#serverdelete) events.
 </Note>
 
-## Reads
+## Voice
 
-### fetchMembers
+This is the control plane. It mints a LiveKit credential and stops there. The SDK sends no media of its own. See [Voice overview](/voice/overview).
 
-```ts
-fetchMembers(serverId: string): Promise<Member[]>
-```
-
-Reads a server's members on demand, with no caching. See [Member](/api-reference/types#member) and [Members and roles](/guides/members-and-roles).
-
-### fetchRoles
+### joinVoice
 
 ```ts
-fetchRoles(serverId: string): Promise<Role[]>
+joinVoice(
+  serverId: string,
+  channelId: string,
+  opts?: { groupId?: string; muted?: boolean; deafened?: boolean },
+): Promise<VoiceConnection>
 ```
 
-Reads a server's roles on demand, with no caching. See [Role](/api-reference/types#role).
+Joins a voice channel and returns the [`VoiceConnection`](/api-reference/types#voiceconnection) the backend minted, including the LiveKit token and url. Requires `voice_connect` server-wide plus channel-level view.
+
+`opts.groupId` must be the channel's real group and must never equal the channel id. That shape is Cloak's DM-call form, and the SDK refuses it locally rather than round-tripping a rejection. The group is resolved from the server's channel list when omitted.
+
+<Warning>
+  `voice_connect` gets your bot into the channel. Hearing anyone is a separate grant, `voice_listen`. Without it the bot joins and publishes normally, receives no media, and is never given a key that could decrypt anyone. `joinVoice()` deliberately does not gate on it, so the failure mode is total silence with no error. See [Voice keys](/voice/keys).
+</Warning>
+
+### leaveVoice
+
+```ts
+leaveVoice(): Promise<void>
+```
+
+Leaves voice. A safe no-op server-side when the bot is not in a channel, so you may call it defensively.
+
+### voiceConnection
+
+```ts
+voiceConnection(): VoiceConnection | null
+```
+
+The bot's own voice membership, or `null`. A synchronous cache read.
+
+### setVoiceSelfState
+
+```ts
+setVoiceSelfState(state: { muted?: boolean; deafened?: boolean }): Promise<void>
+```
+
+Sets the bot's own mute and deafen flags. Requires a live join. The server never acknowledges this, so local state is updated optimistically. Deafened implies muted, mirroring both shipped Cloak clients.
+
+<Note>
+  `selfDeafened` is a broadcast flag, not an answer to "can I hear". Whether the bot receives audio is decided by `voice_listen` and the scope of the voice key it was handed.
+</Note>
+
+### voiceRoster
+
+```ts
+voiceRoster(channelId: string): VoiceParticipant[]
+```
+
+The cached roster of a voice channel, read synchronously. The array is a fresh copy, but its entries are the live cache objects, so copy them if you need a snapshot.
+
+### refreshVoiceRoster
+
+```ts
+refreshVoiceRoster(serverId: string): Promise<void>
+```
+
+Re-seeds the roster for a server by re-selecting it, because the roster snapshot is a side effect of that selection.
+
+<Note>
+  Voice roster events are cursor-gated, not [firehose](/concepts/message-delivery). Your bot sees them only for the server it currently has selected or is in voice in. Do not build on them as a firehose.
+</Note>
 
 ## Permissions
 
@@ -281,7 +558,7 @@ These are advisory. They reflect the last grant the server sent, and the server 
 can(permission: PermissionName, serverId: string): boolean
 ```
 
-Whether your bot holds `permission` in `serverId` per the last grant. `administrator` implies every permission. Returns `false` if no grant has arrived yet.
+Whether your bot holds `permission` in `serverId` per the last grant. `administrator` implies every permission here. Returns `false` when no grant has arrived yet, so a `false` means "not permitted, or not known yet".
 
 ### permissions
 
@@ -289,7 +566,7 @@ Whether your bot holds `permission` in `serverId` per the last grant. `administr
 permissions(serverId: string): PermissionSet | undefined
 ```
 
-The full resolved capability set for a server, or `undefined` if no grant has arrived. See [PermissionSet](/api-reference/types#permissionset).
+The full resolved capability set for a server, or `undefined` when no grant has arrived. See [PermissionSet](/api-reference/permissions#permissionset).
 
 ### visibleChannelIds
 
@@ -299,32 +576,103 @@ visibleChannelIds(serverId: string): string[]
 
 The channel ids your bot may view in a server. Mirrors the [firehose read-gate](/concepts/message-delivery#delivery-is-view-gated). Empty array if unknown.
 
+## Encryption helpers
+
+You need these only when you are building a frame by hand through [`client.raw`](#properties).
+
+### encryptFor
+
+```ts
+encryptFor(serverId: string, text: string): string
+```
+
+Encrypts text for a server's current epoch key, producing exactly what `send()` would put on the wire. Throws when the bot holds no key for that server.
+
+### decryptFrom
+
+```ts
+decryptFrom(serverId: string, wire: string): string
+```
+
+Decrypts a wire ciphertext with the key for its own epoch. Returns `''`, never raw ciphertext, when the key is missing or stale.
+
+## Events
+
+`Client` extends Node's `EventEmitter`, and `on`, `once`, `off`, `addListener`, `prependListener`, `prependOnceListener`, `removeListener`, and `emit` all carry typed overloads over [`ClientEvents`](/api-reference/events). Your listener arguments are inferred.
+
+```ts
+client.on('messageCreate', (msg) => {
+  // msg is typed as Message
+});
+```
+
+Listeners are wrapped at registration so a handler that throws surfaces on the [`error`](/api-reference/events#error) event instead of vanishing. That means `client.listeners(event)` returns the wrappers rather than your original functions. `off()` and `removeListener()` still work normally: pass the same function you registered.
+
 ## guild
 
 ```ts
-guild(serverId: string): GuildHandle
+guild(serverId: string)
 ```
 
-Returns a lightweight handle that binds `serverId` onto every server-scoped method. It is pure sugar over the flat methods, with no cache and no state. See [The guild() handle](/guides/guild-handle).
+Returns a lightweight handle that binds `serverId` onto every server-scoped method. Pure sugar over the flat methods, with no cache and no state.
 
 ```ts
+if (msg.isDM || !msg.serverId) return; // serverId is null in a DM
+
 const g = client.guild(msg.serverId);
 await g.timeout(msg.authorId, 300);
-const members = await g.fetchMembers();
+const roles = await g.fetchRoles();
 const history = await g.fetchMessages(msg.channelId, { limit: 100 });
 ```
+
+The handle exposes `id`, plus:
+
+| Group | Bound methods |
+| --- | --- |
+| Messaging | `send(channelId, text, opts?)`, `sendCard(channelId, card)`, `sendEmbed(channelId, post)` |
+| History | `fetchMessages(channelId, opts?)` |
+| Moderation | `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans` |
+| Reads | `fetchRoles()`, `fetchMembers()` |
+| Channels | `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup` |
+| Voice | `joinVoice(channelId, opts?)`, `refreshVoiceRoster()` |
+| Webhooks | `webhooks.list`, `.create`, `.edit`, `.regenerate`, `.delete`, `.post` |
+| Permissions | `can(perm)`, `permissions()`, `visibleChannelIds()` |
+
+<Warning>
+  `guild().fetchMembers()` binds the same broken call as [`fetchMembers()`](#fetchmembers) and hangs the same way.
+</Warning>
+
+See [The guild() handle](/guides/guild-handle).
+
+## Exported constants
+
+<ResponseField name="DEFAULT_URL" type="string">
+  Cloak's hosted WebSocket endpoint, used when you omit `url`.
+</ResponseField>
+
+<ResponseField name="DEFAULT_WEBTRANSPORT_URL" type="string">
+  Cloak's hosted WebTransport endpoint, used when you omit `url` and set `transport: 'webtransport'`.
+</ResponseField>
+
+<ResponseField name="DEFAULT_REST_URL" type="string">
+  The default origin for [`client.rest`](#properties).
+</ResponseField>
+
+<ResponseField name="livekitUrlFor" type="(transportUrl: string) => string">
+  Derives the LiveKit signalling url from a transport url: same host, port 7880. Returns `''` for an unparseable url. This is what `livekitUrl` defaults to.
+</ResponseField>
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Events" icon="bell" href="/api-reference/events">
-    Everything a Client emits.
+    All 32 events a Client emits.
   </Card>
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">
-    Message, Member, Role, and more.
+    Message, SendOptions, Member, and the rest.
   </Card>
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
-    The CloakActionError every action can throw.
+    Every error class an action can reject with.
   </Card>
   <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
     Bind a server id once.

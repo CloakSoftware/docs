@@ -7,9 +7,10 @@ By the end of this guide you will have a running bot that answers `!ping` with `
 
 ## Prerequisites
 
-- **Node.js** `20.19+` or `22.12+`. Check with `node --version`.
+- **Node.js** `^20.19.0 || >=22.12.0`. Check with `node --version`. Node 21.x does not qualify, and neither does Node 18. See [Install and requirements](/install) for why.
 - A **Cloak account**. Download Cloak from [cloak.chat](https://cloak.chat) if you do not have it yet.
 - A server where you have the **Manage Server** permission, so you can add a bot to it.
+- **A human member on a current Cloak build.** Your bot never generates a server's key. A member's client wraps it and uploads it, and this SDK produces and accepts only the current HPKE wrap format. If the person handing over the key runs an old client build, every key acquire fails and the SDK names them in a warning.
 
 ## Steps
 
@@ -30,6 +31,8 @@ By the end of this guide you will have a running bot that answers `!ping` with `
     yarn add @cloak-software/bot-sdk
     ```
     </CodeGroup>
+
+    Nothing compiles. If you want to skip the two optional native extras your bot will not use, run `npm i @cloak-software/bot-sdk --omit=optional` instead.
   </Step>
 
   <Step title="Create a bot and copy its token">
@@ -38,14 +41,16 @@ By the end of this guide you will have a running bot that answers `!ping` with `
     The token has the shape `botid.tokenid.secret` and is shown only once. It grants full encrypted membership, so treat it like a password. Store it in an environment variable or a secret manager, and never commit it to source control.
 
     <Warning>
-      If you lose the token you cannot recover it. Create a new one from the same screen.
+      If you lose the token you cannot recover it. Create a new one from the same screen. Regenerating a token invalidates the old one, and a bot still holding the old one stops retrying and disconnects.
     </Warning>
   </Step>
 
   <Step title="Add the bot to a server">
     Open the server you want the bot in, then go to **Server Settings > Invites > Add a Bot**. This requires the Manage Server permission.
 
-    Adding the bot shares that server's encryption key with it, which is what lets the bot decrypt and send messages there.
+    Two things happen here. A consent screen asks you to approve the permissions the bot declared, and you can approve a subset. Adding the bot also shares that server's encryption key with it, which is what lets the bot decrypt and send messages there.
+
+    Declaring a permission is a request, not a grant. See [Permissions](/concepts/permissions).
   </Step>
 
   <Step title="Write the bot">
@@ -57,6 +62,8 @@ By the end of this guide you will have a running bot that answers `!ping` with `
     const client = new Client({
       token: process.env.CLOAK_TOKEN!,
       keystorePath: './bot.cloak-keystore.json', // persists identity and keys
+      requiredPermissions: ['view_text', 'message_send'],
+      // url is optional and defaults to Cloak's hosted service.
     });
 
     client.on('ready', () => {
@@ -66,9 +73,17 @@ By the end of this guide you will have a running bot that answers `!ping` with `
     client.on('messageCreate', (msg) => {
       if (msg.authorId === client.user?.id) return; // ignore our own messages
       if (msg.content.trim() === '!ping') {
-        msg.reply('pong').catch(console.error);
+        msg.channel.send('pong').catch(console.error);
       }
     });
+
+    // A server-side denial does NOT reject the send promise. It arrives here.
+    client.on('sendRejected', (deny) => {
+      console.error(`send denied (${deny.code}): ${deny.message}`);
+    });
+
+    // The single funnel for failures the SDK caught and kept going from.
+    client.on('error', (err) => console.error(err));
 
     await client.login();
     ```
@@ -91,33 +106,76 @@ By the end of this guide you will have a running bot that answers `!ping` with `
   </Step>
 </Steps>
 
+## Why the keystore matters
+
+`keystorePath` is the one line in that file you cannot skip. Your bot's identity is published write-once on the server. Run once without a keystore and the private half of that identity dies with your process, while the server keeps the public half forever. Members keep wrapping keys to an identity your bot no longer holds, and the next start fails permanently with an error about a rejected publication. The SDK prints an un-suppressed warning at the moment it happens.
+
+On a host with no writable disk, pass a `keystore` adapter instead of a path. [Keys and the keystore](/concepts/keys-and-keystore) has the full model and the adapter options.
+
+## Two behaviors worth learning now
+
+**`send()` is fire-and-forget.** The promise resolves when the frame goes out on the wire, not when the server accepts it. The protocol has no success acknowledgement for a message send, so a denial (a missing `message_send` grant, a rate limit, an oversized payload) can only arrive later on the `sendRejected` event. Keep the `.catch()` for local and transport errors, and keep the `sendRejected` listener for everything the server refuses.
+
+**`reply()` and `channel.send()` are different.** `msg.reply()` posts a true reply: it renders the quote header and fires a "replied to you" notification that pierces the author's mutes. For a bot that is just answering, like this ping bot, `msg.channel.send()` is the right call. Use `reply()` when the quote header genuinely helps.
+
 ## First message takes a moment
 
-The first time a bot joins a server, another member who already holds that server's key needs to be online to hand the key to the bot. Until that happens the bot can connect but cannot decrypt or send in that server. The SDK retries automatically, so once a member comes online the bot catches up on its own.
+The first time a bot joins a server, another member who already holds that server's key needs to be online to wrap it and hand it over. Until that lands, the bot connects fine and receives nothing it can read, and a send throws:
+
+```
+No conversation key for server <serverId>; not added / key not delivered yet
+```
+
+The SDK retries the key pull automatically, so once a member comes online the bot catches up on its own.
 
 <Tip>
   Keep the person who added the bot online for a minute after the first join. That is usually all it takes for the key handoff to complete.
 </Tip>
 
+## If nothing happens
+
+<AccordionGroup>
+  <Accordion title="The bot connects but never sees a message">
+    Delivery is view-gated by the server. `messageCreate` fires only for channels the bot is permitted to view, so a silent channel can mean "not permitted to see it" rather than "nobody is talking". Check `client.visibleChannelIds(serverId)` and confirm the `view_text` grant was approved on the consent screen.
+  </Accordion>
+  <Accordion title="The bot replies to nothing and logs a send denial">
+    Read the `sendRejected` payload. It carries the deny `code`, a `message`, and often the `permission` that was missing. Its `serverId` and `channelId` are attributed best-effort from your most recent send, so treat them as a hint.
+  </Accordion>
+  <Accordion title="Login fails and the bot stops retrying">
+    Two failures are terminal and stop the reconnect loop: code `-2`, a revoked or regenerated token, and code `-12`, an SDK below the backend's minimum wire version. Both emit `disconnect` rather than throwing. Other failures, including `-8`, are transient and keep retrying. See [Connection lifecycle](/concepts/connection-lifecycle).
+  </Accordion>
+  <Accordion title="The process will not start at all">
+    Run the dependency report before anything else. It prints your Node version, whether it satisfies the SDK's range, and whether a secure random source is reachable.
+
+    ```bash
+    printf "import { generateDependencyReport } from '@cloak-software/bot-sdk';\nconsole.log(generateDependencyReport());\n" > doctor.mjs
+    node doctor.mjs
+    ```
+
+    Run it from a file, not with `node -e`. See [When a bot will not start](/production/troubleshooting).
+  </Accordion>
+</AccordionGroup>
+
 ## What just happened
 
-- Your bot logged in and published its identity to Cloak.
-- It started receiving messages from every channel it is allowed to view. This is called the [firehose](/concepts/message-delivery), and it means you never subscribe to channels by hand.
+- Your bot logged in and published its identity to Cloak, then wrote it to the keystore so the next run reuses it.
+- It declared the permissions it needs, and the server pushed back the subset a human approved.
+- It started receiving messages from every channel it is permitted to view. This is called the [firehose](/concepts/message-delivery), and it means you never subscribe to channels by hand.
 - When it saw `!ping`, it encrypted `pong` in your process and sent the ciphertext. Cloak relayed it and the sender's app decrypted it.
 
 ## Next steps
 
 <CardGroup cols={2}>
   <Card title="How bots work" icon="lock" href="/concepts/how-bots-work">
-    The encryption model behind that `pong`.
+    The model behind that `pong`.
   </Card>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     Declare what your bot needs and check what it was granted.
   </Card>
-  <Card title="Welcome bot example" icon="hand-wave" href="/examples/welcome-bot">
-    Greet new members and handle more events.
+  <Card title="Sending messages" icon="message" href="/guides/sending-messages">
+    Options, replies, mentions, and the send rules in full.
   </Card>
-  <Card title="API reference" icon="book" href="/api-reference/client">
-    The full surface of the `Client`.
+  <Card title="Deploying a bot" icon="server" href="/production/deploying">
+    Put it on a host, and keep the keystore alive.
   </Card>
 </CardGroup>

@@ -1,0 +1,432 @@
+---
+title: "Publishing audio"
+description: "Turn a voice credential into sound in the channel with VoiceMediaSession, VoicePlayer, and the resource helpers."
+---
+
+The audio layer is opt-in. It needs the native media engine installed at an exact version and patched, which is a one-time setup step in your own app.
+
+<Warning>
+  **Do the [runtime setup](/voice/runtime) first.** An unpatched engine cannot install a frame key, so a bot that skips the patch appears to work and publishes audio nobody can decrypt. There is no error and no event. The only symptom is silence.
+</Warning>
+
+## A publish-only bot, end to end
+
+The five steps, assuming a logged-in `client`. A complete runnable bot is [further down the page](#a-complete-music-bot).
+
+```ts
+import {
+  VoiceMediaSession,
+  ffmpegResource,
+} from '@cloak-software/bot-sdk';
+
+// 1. Control plane. Join DEAFENED: the SFU then forwards this bot nothing at
+//    all. Crypto and transport both say no, which is the right shape for a
+//    publisher.
+const conn = await client.joinVoice(serverId, voiceChannelId, { deafened: true });
+
+// 2. Key lane. A bot never derives a voice key. A human member seals one to it.
+const keys = client.voiceKeys;
+const voiceKey = await keys.acquireVoiceKey(serverId);
+
+// 3. The scope is not this bot's choice. Publish-only means participant scope.
+if (voiceKey.scope !== 'participant') {
+  throw new Error('this server granted voice_listen; this bot is publish-only');
+}
+
+// 4. Media. attach() installs the key BEFORE publishing, and that order is
+//    load-bearing.
+const session = await VoiceMediaSession.attach({
+  url: conn.url,
+  token: conn.token,      // a live credential, never log it
+  botId: client.user!.id, // its media identity is derived from this
+  serverId,
+  voiceKey,               // for the scope and the length check
+  keys,                   // where frame keys actually come from
+  deafened: conn.selfDeafened,
+});
+
+// 5. Resolves at the end of the track, and REJECTS if the decoder exits non-zero.
+await session.player.play(ffmpegResource('./track.mp3'));
+
+await session.detach();
+await client.leaveVoice();
+```
+
+## VoiceMediaSession.attach
+
+```ts
+VoiceMediaSession.attach(options: VoiceMediaOptions): Promise<VoiceMediaSession>
+```
+
+<ParamField path="url" type="string" required>
+  `VoiceConnection.url`.
+</ParamField>
+
+<ParamField path="token" type="string" required>
+  `VoiceConnection.token`. A live credential. Never log it.
+</ParamField>
+
+<ParamField path="botId" type="string" required>
+  Your bot's Cloak user id, from `client.user.id`. The media identity is derived from it, and `attach()` asserts the SFU agrees.
+</ParamField>
+
+<ParamField path="serverId" type="string" required>
+  The server the voice channel belongs to. The key derivation binds it.
+</ParamField>
+
+<ParamField path="voiceKey" type="VoiceKey" required>
+  The scope-tagged key from `acquireVoiceKey()`. Used for the **scope** and the 32-byte length check. Its bytes are not what gets installed.
+</ParamField>
+
+<ParamField path="keys" type="VoiceKeyAccess" required>
+  Where frame keys come from. Pass `client.voiceKeys`.
+</ParamField>
+
+<ParamField path="deafened" type="boolean">
+  Whether the bot joined deafened. Purely diagnostic: it lets `attach()` warn about the one combination that silently breaks a listening bot.
+</ParamField>
+
+<ParamField path="sampleRate" type="number" default="48000" />
+
+<ParamField path="channels" type="number" default="2" />
+
+<ParamField path="debug" type="boolean" default="false">
+  Logs which key fingerprint was installed under which identity. Never logs key material.
+</ParamField>
+
+### What attach enforces
+
+Every step fails closed, because every failure mode in this path is otherwise silent.
+
+<Steps>
+  <Step title="Load the engine">
+    An actionable environment error before anything else happens.
+  </Step>
+  <Step title="Validate the key">
+    Exactly 32 bytes, and a scope that came from the authenticated tag. A key that carries no scope is refused rather than defaulted.
+  </Step>
+  <Step title="Connect">
+    Subscription is derived from the scope, never from a free-standing flag.
+  </Step>
+  <Step title="Assert the identity">
+    If the SFU knows this session by a different name than the one the key was sealed for, `attach()` fails. Publishing under a name nobody derives a key for produces audio nobody can decrypt.
+  </Step>
+  <Step title="Install the bot's own key first">
+    In both scopes.
+  </Step>
+  <Step title="Room scope only: install every other identity">
+    Everyone already in the channel, plus a hook so late joiners get one too.
+  </Step>
+  <Step title="Publish, only now">
+    The local frame encryptor is created at publish time. With no key filed for the bot's identity, frames are dropped rather than sent in the clear.
+  </Step>
+</Steps>
+
+### Session surface
+
+| Member | Type | Notes |
+| --- | --- | --- |
+| `player` | `VoicePlayer` | Pump audio through this. |
+| `identity` | `string` | The identity the SFU knows this bot by. |
+| `scope` | `'participant' \| 'room'` | Read-only. Not something a bot picks. |
+| `installedIdentities` | `readonly string[]` | Every identity this session filed a key for. In participant scope this is exactly one. |
+| `setVoiceKey(next)` | `Promise<void>` | Re-pin. See [Voice keys and scopes](/voice/keys). |
+| `detach()` | `Promise<void>` | Stop the pump, unpublish, disconnect. |
+
+## Playing audio
+
+```ts
+await session.player.play(resource);
+```
+
+`play()` resolves when the resource ends or when `stop()` is called, and rejects when the source throws. It refuses to start a second resource while one is playing: call `stop()` first to switch tracks.
+
+<Warning>
+  **Do not add a pacer.** The player awaits each frame capture, and the native queue is the only scheduler. Do not add a 20 ms timer, a ring buffer, or an Opus encoder. The engine encodes internally, and a manual pacer racing the native queue produces stutter that only shows up on a real call.
+</Warning>
+
+Player events: `start`, `end`, and `error`.
+
+```ts
+session.player.on('error', (e) => console.error('playback failed', e));
+```
+
+<Note>
+  A successful `play()` proves the bytes reached the encoder. It proves nothing about whether any member decrypted them. See [the blind spot](/voice/runtime#the-blind-spot).
+</Note>
+
+## Audio resources
+
+An `AudioResource` is any async iterable of interleaved 16-bit PCM, plus its format.
+
+```ts
+interface AudioResource {
+  pcm: AsyncIterable<Int16Array>;
+  sampleRate?: number;  // default 48000
+  channels?: number;    // default 2
+  close?(): void;       // called once when the pump ends, for any reason
+}
+```
+
+Each chunk must contain a whole number of frames. A partial frame would shift channel parity for the entire rest of the stream, so the player refuses it rather than truncating.
+
+### pcmChunks
+
+```ts
+pcmChunks(bytes: AsyncIterable<Uint8Array>, channels?: number): AsyncIterable<Int16Array>
+```
+
+Adapts a byte stream into frame-aligned chunks. Use it for anything that produces raw bytes, such as a text-to-speech process or a socket. It handles two silent corruption bugs for you: a chunk that ends mid-sample, and a buffer whose offset is not two-byte aligned.
+
+```ts
+await session.player.play({
+  pcm: pcmChunks(myByteStream, 2),
+  sampleRate: 48000,
+  channels: 2,
+});
+```
+
+### ffmpegResource
+
+```ts
+ffmpegResource(input: string, opts?: FfmpegResourceOptions): AudioResource
+```
+
+Decodes anything ffmpeg understands. Synchronous: it spawns the decoder and hands back the resource immediately.
+
+| Option | Type | Notes |
+| --- | --- | --- |
+| `ffmpegPath` | `string` | Point at a specific build or container path. Defaults to `ffmpeg` on PATH. |
+| `sampleRate` | `number` | Default 48000. |
+| `channels` | `number` | Default 2. |
+
+<Warning>
+  **`ffmpegResource` takes a file path or a direct media URL.** Hand it a YouTube, SoundCloud, or Bandcamp **watch page** and ffmpeg, which has no site extractors, decodes the HTML. This is the single commonest voice-bot mistake. Use `ytdlpResource()` instead.
+</Warning>
+
+**A failed decode is an error, not a short song.** An unreadable input makes ffmpeg write nothing to standard output and exit non-zero, which to a naive pump looks exactly like a clean end of stream. `play()` checks the exit code and throws a `CloakEnvironmentError` carrying the head of ffmpeg's own stderr as its diagnosis. A deliberate `stop()` is exempt. The error also distinguishes "no audio at all" from "truncated N bytes in", which usually means a dropped source rather than a wrong argument.
+
+### ytdlpResource and resolveMediaUrl
+
+```ts
+import { ytdlpResource, resolveMediaUrl } from '@cloak-software/bot-sdk';
+
+// async, unlike ffmpegResource: resolving is a round trip through yt-dlp
+await session.player.play(await ytdlpResource('https://www.youtube.com/watch?v=...'));
+
+// or resolve only, to log, cache, or inspect the url yourself
+const direct = await resolveMediaUrl(pageUrl);
+```
+
+`ytdlpResource()` is `resolveMediaUrl()` followed by `ffmpegResource()`, so it accepts every `FfmpegResourceOptions` field plus:
+
+| Option | Type | Notes |
+| --- | --- | --- |
+| `ytdlpPath` | `string` | Defaults to `yt-dlp` on PATH. |
+| `format` | `string` | Default `bestaudio*/best`. |
+| `ytdlpArgs` | `string[]` | Extra flags, such as `['--cookies', 'cookies.txt']` for gated media or `['--playlist-items', '1']`. |
+
+<Warning>
+  **The resolved URL is signed, expiring, and usually bound to this host's IP address.** Resolve at play time. Never persist it, and never hand it to another machine.
+</Warning>
+
+`--no-playlist` is passed by default, so a link to a track that happens to sit in a playlist resolves that one track. When yt-dlp fails, the error's remedy names the usual suspects in order: it is out of date (it breaks whenever a site changes), the media is private, region-locked or age-gated, or the URL is not a media page at all.
+
+<Tip>
+  Any `http(s)` URL can go through yt-dlp. Its generic extractor passes a direct media URL straight through, so you do not have to guess which kind you were handed.
+</Tip>
+
+## Stopping and tearing down
+
+```ts
+session.player.stop();  // end the current resource; the in-flight frame is still awaited
+await session.detach(); // stop the pump, unpublish, disconnect
+await client.leaveVoice();
+```
+
+<Warning>
+  **Order matters.** Detach the media before dropping the control-plane membership, or the SFU keeps a publisher for a member who has left.
+</Warning>
+
+`detach()` does not clear keys as a security measure. The process already held them, and forgetting a key it has already used proves nothing. Tearing the room down is, however, the only honest response to a `voice_listen` revoke, because the engine has no key-removal call.
+
+## Listening to members
+
+When a server grants `voice_listen`, the key lane hands your bot the room key and `attach()` subscribes and installs a derived key for every participant. Two rules change:
+
+- **Join non-deafened.** The subscribe grant is fixed at join time, so a deafened listening bot hears silence regardless of its keys.
+- **Handle the scope in your key update handler.** A grant or revoke arrives at the same key version, and `setVoiceKey()` detaches and throws on a scope change.
+
+Read [Voice keys and scopes](/voice/keys) before you ship a bot that listens.
+
+## A complete music bot
+
+A slash command that joins whichever voice channel the invoker is sitting in.
+
+```ts
+import {
+  Client,
+  VoiceMediaSession,
+  ffmpegResource,
+  ytdlpResource,
+  probeVoiceRuntime,
+} from '@cloak-software/bot-sdk';
+import type { AudioResource, VoiceConnection } from '@cloak-software/bot-sdk';
+
+const token = process.env.CLOAK_TOKEN;
+if (!token) throw new Error('set CLOAK_TOKEN');
+
+const client = new Client({
+  token,
+  // Not optional. See /concepts/keys-and-keystore.
+  keystorePath: './dj-bot.cloak-keystore.json',
+  requiredPermissions: [
+    'view_text',
+    'message_send',
+    'commands',
+    'voice_connect',
+    'voice_speak',
+  ],
+});
+
+// userId -> channelId. The roster is keyed by channel, so keep the reverse.
+const whereTheyAre = new Map<string, string>();
+client.on('voiceJoin', (p) => whereTheyAre.set(p.userId, p.channelId));
+client.on('voiceLeave', ({ userId }) => whereTheyAre.delete(userId));
+
+let conn: VoiceConnection | undefined;
+let session: VoiceMediaSession | undefined;
+
+function resource(source: string): AudioResource | Promise<AudioResource> {
+  // Any http(s) url goes through yt-dlp; local paths skip it.
+  return /^https?:\/\//i.test(source) ? ytdlpResource(source) : ffmpegResource(source);
+}
+
+async function leave(): Promise<void> {
+  try {
+    await session?.detach();
+  } finally {
+    session = undefined;
+    if (conn) {
+      await client.leaveVoice().catch(() => undefined);
+      conn = undefined;
+    }
+  }
+}
+
+client.commands.register(
+  {
+    name: 'play',
+    description: 'play something in the voice channel you are in',
+    options: [
+      {
+        name: 'source',
+        type: 'string',
+        description: 'a file path or a URL',
+        required: true,
+      },
+    ],
+  },
+  async (ctx) => {
+    // Plain answers use channel.send(), not reply(): a true reply fires a
+    // mute-piercing "replied to you" notification.
+    const say = (text: string) => ctx.message.channel.send(text);
+
+    // Voice is server-scoped, and a direct message has a null serverId.
+    const serverId = ctx.message.serverId;
+    if (ctx.message.isDM || !serverId) {
+      await say('run this in a server, not a DM');
+      return;
+    }
+
+    const channelId = whereTheyAre.get(ctx.message.authorId);
+    if (!channelId) {
+      await say('join a voice channel first');
+      return;
+    }
+
+    // The engine is an optional dependency. Probe rather than letting an
+    // import throw halfway through a join.
+    const probe = await probeVoiceRuntime();
+    if (!probe.available) {
+      await say(`voice engine unavailable: ${probe.remedy ?? probe.error}`);
+      return;
+    }
+
+    await leave();
+    conn = await client.joinVoice(serverId, channelId, { deafened: true });
+
+    const voiceKey = await client.voiceKeys.acquireVoiceKey(serverId);
+    if (voiceKey.scope !== 'participant') {
+      await leave();
+      await say('this server granted me voice_listen and I am deliberately publish-only');
+      return;
+    }
+
+    session = await VoiceMediaSession.attach({
+      url: conn.url,
+      token: conn.token,
+      botId: client.user!.id,
+      serverId,
+      voiceKey,
+      keys: client.voiceKeys,
+      deafened: conn.selfDeafened,
+    });
+
+    await say('playing, and I cannot hear any of you');
+    try {
+      await session.player.play(await resource(ctx.getString('source')!));
+    } catch (e) {
+      // Report it in channel. A decoder failure is the likeliest thing to go
+      // wrong, and CloakEnvironmentError carries a remedy written for it.
+      const err = e as Error & { remedy?: string };
+      await leave();
+      await say(`could not play that: ${err.message}${err.remedy ? `\n\n${err.remedy}` : ''}`);
+      return;
+    }
+    await say('finished');
+  },
+);
+
+client.commands.register(
+  { name: 'stop', description: 'stop playing and leave voice' },
+  async (ctx) => {
+    await leave();
+    await ctx.message.channel.send('stopped');
+  },
+);
+
+// A scope flip re-pins at the SAME version, so a version-only handler misses it.
+client.on('voiceKeyUpdate', ({ scope }) => {
+  if (session && scope !== 'participant') void leave();
+});
+
+client.on('error', (e) => console.error('sdk error', e.message));
+
+process.on('SIGINT', () => {
+  void leave().finally(() => process.exit(0));
+});
+
+await client.login();
+```
+
+<Note>
+  The SDK repo ships this as `examples/dj-bot.ts`. Run it with `npx tsx examples/dj-bot.ts`. The older `examples/music-bot.ts` (`npm run example:music`) predates `client.voiceKeys` and reaches the key lane through an internals seam that is explicitly not stable across versions. Prefer the shape above.
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
+    The engine patch, the executables, and a symptom-to-cause table.
+  </Card>
+  <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
+    Re-pinning, scope changes, and what the keys do not buy.
+  </Card>
+  <Card title="Voice reference" icon="book" href="/api-reference/voice">
+    Every option type and constant on this page.
+  </Card>
+  <Card title="Joining voice" icon="phone" href="/voice/joining">
+    The control plane that produces `conn`.
+  </Card>
+</CardGroup>

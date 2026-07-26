@@ -1,0 +1,214 @@
+---
+title: "Webhook embed bot"
+description: "Post rich embeds through the webhook lane, which is not end-to-end encrypted. Based on examples/embed-bot.ts."
+---
+
+This bot posts rich embeds three ways: through a webhook url a human created, through a webhook the bot mints itself, and it lists the webhooks on a server. It is the runnable companion to [Webhook embeds](/guides/webhook-embeds).
+
+<Warning>
+  **Everything this bot posts is not end-to-end encrypted.** A webhook message is stored on the Cloak server as plaintext by design, and it renders under a webhook identity (its own name and avatar, plus a "not encrypted" badge) rather than as your bot. The `unencrypted: true` field is required, and re-checked at runtime, so you cannot make that trade by accident.
+
+  If the content is sensitive, use [`sendCard()`](/guides/rich-cards), which is encrypted and posts under the bot's own identity, or plain [`send()`](/guides/sending-messages).
+</Warning>
+
+## The full bot
+
+```ts embed-bot.ts
+import { Client, CloakWebhookError } from '@cloak-software/bot-sdk';
+
+// The recommended path. A human creates the webhook in the Cloak app under
+// room settings > Webhooks, and you put its url in an env var. The bot then
+// needs no permissions at all to post through it.
+//
+// The url embeds the webhook's token secret and the server stores only its
+// hash: it is shown exactly once and cannot be re-fetched. Never commit it,
+// never log it. The SDK keeps it out of every error it raises.
+const webhookUrl = process.env.CLOAK_WEBHOOK_URL;
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Not optional. Identity publication is write-once server-side, so a bot
+  // with no keystore works on its first run and can never log in again.
+  keystorePath: './embed-bot.cloak-keystore.json',
+  // manage_server is needed only by the !mint and !hooks paths below. Drop it
+  // from this list if you only ever post to a human-created url.
+  requiredPermissions: ['message_send', 'manage_server'],
+  webhookName: 'Embed Example', // the name a minted webhook posts under
+});
+
+function buildEmbed(text: string) {
+  return {
+    title: 'Example embed',
+    description: text,
+    // Either a CSS color string or a Discord decimal int. Both render.
+    color: '#22c55e',
+    url: 'https://cloak.chat',
+    fields: [
+      { name: 'Lane', value: 'webhook (plaintext)', inline: true },
+      { name: 'Encrypted', value: 'no', inline: true },
+    ],
+    footer: { text: 'posted by embed-bot' },
+    timestamp: new Date().toISOString(),
+    // image / thumbnail / video urls, and every *_icon_url, are dropped
+    // silently unless the backend has its image proxy configured. The POST
+    // still returns success. Text and links always survive.
+    // image: { url: 'https://example.com/banner.png' },
+  };
+}
+
+client.on('ready', () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  console.log(webhookUrl ? 'CLOAK_WEBHOOK_URL is set, !embed will work' : 'no CLOAK_WEBHOOK_URL, !embed disabled');
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  // Webhooks are server-scoped, and a direct message has a null serverId.
+  if (msg.isDM || !msg.serverId) return;
+
+  const [cmd, ...rest] = msg.content.trim().split(/\s+/);
+  const text = rest.join(' ') || 'hello from the webhook lane';
+
+  try {
+    if (cmd === '!embed') {
+      if (!webhookUrl) return void (await msg.reply('set CLOAK_WEBHOOK_URL first'));
+      await client.webhooks.post(webhookUrl, {
+        unencrypted: true, // required: this message is NOT end-to-end encrypted
+        username: 'Embed Example', // per-post display name, 1 to 80 chars
+        embeds: [buildEmbed(text)],
+      });
+    } else if (cmd === '!mint') {
+      // Mints, or reuses, a webhook for this channel. Needs manage_server.
+      // Reuse only ever adopts a webhook this bot created.
+      await client.sendEmbed(msg.serverId, msg.channelId, {
+        unencrypted: true,
+        embeds: [buildEmbed(text)],
+      });
+    } else if (cmd === '!hooks') {
+      const hooks = await client.guild(msg.serverId).webhooks.list();
+      await msg.reply(
+        hooks.length
+          ? hooks.map((h) => `${h.name} (${h.id}) in ${h.channelId}`).join('\n')
+          : 'no webhooks on this server',
+      );
+    }
+  } catch (e) {
+    // CloakWebhookError is the delivery failure (the HTTPS POST). A CRUD
+    // denial arrives as CloakActionError with .permission set instead.
+    // Neither ever carries the delivery url: it is a bearer credential.
+    if (e instanceof CloakWebhookError) {
+      console.error(`webhook post failed: ${e.status} ${e.detail}`);
+    } else {
+      console.error(`${cmd} failed`, e);
+    }
+    await msg.reply(`${cmd} failed: ${(e as Error).message}`).catch(() => undefined);
+  }
+});
+
+client.on('error', (e) => console.error('sdk error', e.source, e.message));
+client.on('disconnect', (e) => console.warn('disconnected', e));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+## Run it
+
+From a checkout of the SDK, put `CLOAK_TOKEN` and `CLOAK_WEBHOOK_URL` in a `.env` file and run:
+
+```bash
+npm run example:embed
+```
+
+To run your own copy, pass the environment directly:
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" \
+CLOAK_WEBHOOK_URL="https://your-cloak-host/webhooks/..." \
+npx tsx embed-bot.ts
+```
+
+`CLOAK_WEBHOOK_URL` is optional. Without it, `!embed` refuses and `!mint` still works if the server granted `manage_server`.
+
+Then, in any text channel the bot can see:
+
+| Command | What it does | Permissions |
+| --- | --- | --- |
+| `!embed <text>` | Posts through `CLOAK_WEBHOOK_URL` | none |
+| `!mint <text>` | Mints or reuses a webhook, then posts | `manage_server` |
+| `!hooks` | Lists the server's webhooks | `manage_server` |
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="The trade you are making" icon="lock-open">
+    Three things are true of every webhook post, and none of them are recoverable after the fact.
+
+    The message is stored server-side as readable text. It is attributed to a webhook identity, not to your bot. Your bot will not receive it back on `messageCreate`, so you cannot read your own embeds back (they surface as a `systemMessage` with `type: 'unknown'`).
+
+    `unencrypted: true` is required on the payload and re-checked at runtime, so a plain JavaScript caller cannot skip it either. The payload type is named `UnencryptedWebhookPost` for the same reason. See [Choosing an embed lane](/guides/rich-cards).
+  </Accordion>
+
+  <Accordion title="webhooks.post() needs no permissions at all" icon="shield-check">
+    `client.webhooks.post(url, post)` is the low-privilege path and the one to default to. A human creates the webhook in the Cloak app, the operator hands the bot its url in an env var, and the bot holds no `manage_server`, no CRUD rights, and no ability to rotate a token somebody else's integration depends on.
+
+    The delivery url is a bearer credential. It embeds the token secret, the server stores only its hash, and it is returned exactly once. Never commit it, never log it, never write it into your keystore.
+  </Accordion>
+
+  <Accordion title="sendEmbed() mints or reuses a webhook, against a quota" icon="wand-magic-sparkles">
+    `client.sendEmbed(serverId, channelId, post)` finds or mints a webhook for that channel and posts through it. It requires `manage_server`, which most bots should not hold.
+
+    On a cold start it lists the server's webhooks, looks for one in that channel **that this bot itself created**, and rotates its token to obtain a usable url. Webhooks a human created are never adopted: rotating one would silently break whatever was posting to it. Only when there is no match does it mint a new one, named after `ClientOptions.webhookName` (default `'Bot'`).
+
+    That reuse path is load-bearing. Creations are capped at 10 per account per hour and 15 per channel, so a restart loop that minted every time would exhaust the quota. The minted url is cached in memory only and never persisted. If someone rotates or deletes the webhook underneath you, the next post gets a `401`, and `sendEmbed()` re-mints and retries exactly once.
+  </Accordion>
+
+  <Accordion title="Guarding on serverId before anything server-scoped" icon="shield-halved">
+    `Message.serverId` is `string | null`. It is null for a direct message, because a DM has no server at all. Direct messages arrive on the same `messageCreate` event as server traffic.
+
+    Webhooks are server-scoped, so this bot returns early on `if (msg.isDM || !msg.serverId) return;`. After that guard, TypeScript narrows `msg.serverId` to `string` and `client.guild(msg.serverId)` and `client.sendEmbed(msg.serverId, ...)` both typecheck. Every bot that does server-scoped work from `messageCreate` needs this line. See [Direct messages](/guides/direct-messages).
+  </Accordion>
+
+  <Accordion title="Images can vanish with no error" icon="image-slash">
+    Every URL a viewer would auto-fetch (`image.url`, `thumbnail.url`, `video.url`, `author.icon_url`, `footer.icon_url`, `provider.icon`, and a per-post `avatar_url`) is rewritten through the Cloak server's signed image proxy, so viewers never hit a third-party origin.
+
+    When that proxy is unconfigured server-side, the field is stripped and the POST still returns success. There is no error, no warning, and no way to tell from the response. Text and click-through links always survive: `title`, `description`, `url`, `color`, `timestamp`, `fields`, `author.name`, `provider.name`, and `footer.text`.
+
+    Quick check against a live deployment: set `avatar_url` on a post. If the avatar does not change, the proxy is off and your `image` will vanish too.
+  </Accordion>
+
+  <Accordion title="Two error types, and neither leaks the url" icon="triangle-exclamation">
+    `CloakWebhookError` is a **delivery** failure: the HTTPS POST itself. It carries `status` (or `0` for a transport failure) and `detail`, a short label such as `'content'`, `'embeds too large'`, `'empty'`, `'unauthorized'`, or `'rate limited'`.
+
+    A **CRUD** denial on `list`, `create`, `edit`, `regenerate`, or `delete` is different: it rejects with `CloakActionError`, which carries the backend code and a `permission` field naming what was missing.
+
+    Neither ever contains the delivery url. `CloakWebhookError` carries only the non-secret `webhookId`.
+  </Accordion>
+
+  <Accordion title="Two shape differences from Discord" icon="code-compare">
+    `color` accepts either a Discord decimal int (`0x22c55e`) or a CSS color string (`'#22c55e'`). The Cloak renderer takes both.
+
+    `fields[].inline` defaults to **true** on this backend, not false. Pass it explicitly if you care.
+
+    Caps are enforced leniently (out-of-spec payloads are truncated) except for four hard `400`s: `content` over 2000 characters, serialized `embeds` over 6000 bytes, a request body over 64 KiB, and a post with no content and no surviving embeds. The 6000-byte budget is measured after the proxy rewrite lengthens every media URL, so your real budget is smaller.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Webhook embeds" icon="webhook" href="/guides/webhook-embeds">
+    The full webhook lane: CRUD, quotas, and the server-side configuration it depends on.
+  </Card>
+  <Card title="Rich cards" icon="id-card" href="/guides/rich-cards">
+    The encrypted embed lane, posted under your bot's own identity.
+  </Card>
+  <Card title="Choosing an embed lane" icon="code-compare" href="/guides/rich-cards">
+    A short decision page between the two.
+  </Card>
+  <Card title="Webhooks reference" icon="book" href="/api-reference/webhooks">
+    `WebhookApi`, `UnencryptedWebhookPost`, `Embed`, and the caps table.
+  </Card>
+</CardGroup>

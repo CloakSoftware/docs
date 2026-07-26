@@ -1,0 +1,279 @@
+---
+title: "Crypto"
+description: "The encryption surface the SDK exports, and the small parts of it a bot author ever touches."
+---
+
+The SDK does its own encryption. `Client` generates an identity on first run, persists it to your [keystore](/concepts/keys-and-keystore), fetches conversation keys, and encrypts and decrypts message bodies for you. A normal bot never imports anything on this page.
+
+These exports exist for the cases that fall outside that: building a frame by hand through [`client.raw`](/guides/raw-frames), attaching a [voice media session](/voice/audio), storing your keystore somewhere unusual, or writing a startup check.
+
+## The model, in one screen
+
+<Note>
+  **Message bodies are encrypted with AES-256-GCM** under a conversation key your bot holds. The server stores ciphertext and cannot read it.
+
+  **Conversation keys are wrapped with RFC 9180 HPKE** against your bot's published identity. The class that does this is still called `SignalSession` for historical reasons. The Signal Protocol and libsignal are not involved.
+
+  **Voice frame keys are a separate slot.** A bot never derives one. A human member seals one to your bot's identity and the SDK fetches it. See [Voice keys](/voice/keys).
+</Note>
+
+<Warning>
+Several things a bot sends are deliberately **not** end-to-end encrypted, and you should design around all of them:
+
+  - **Mention targets.** `SendOptions.mentions` rides the wire in plaintext, because the server routes notification fanout without decrypting the body. Who your bot pinged is visible server-side; what it said is not.
+  - **The slash-command menu.** Command names, descriptions, and option choices are published in plaintext to every server the bot is in. Do not put anything sensitive in a command description.
+  - **The webhook embed lane.** [`sendEmbed()`](/api-reference/client#sendembed) and `webhooks.post()` are plaintext server-side. The payload type is named `UnencryptedWebhookPost` on purpose.
+
+  See [Encryption lanes](/concepts/encryption-lanes).
+</Warning>
+
+## Runtime guard
+
+The crypto stack needs `globalThis.crypto.getRandomValues`, which Node 18 does not define in ESM. Without it, key generation and message encryption fail at runtime.
+
+### SUPPORTED_NODE
+
+```ts
+const SUPPORTED_NODE = '^20.19.0 || >=22.12.0';
+```
+
+The supported Node range, mirroring `engines.node`. Read it literally: 20.x needs 20.19.0 or newer, **21.x never qualifies**, 22.x needs 22.12.0 or newer, and 23 and up qualify.
+
+<Note>
+  This is a crypto requirement, not a transport one. The default lane is a plain `wss://` WebSocket over the pure-JavaScript `ws` package, and `npm install` compiles nothing.
+</Note>
+
+### assertSupportedRuntime
+
+```ts
+assertSupportedRuntime(version?: string): void
+```
+
+Throws a [`CloakEnvironmentError`](/api-reference/errors#cloakenvironmenterror) with a `remedy` when the runtime is out of range. `login()` calls it as its first statement, so you rarely need to. Call it yourself in a startup health check if you want the failure earlier than your first login.
+
+```ts
+import { assertSupportedRuntime, SUPPORTED_NODE } from '@cloak-software/bot-sdk';
+
+assertSupportedRuntime(); // throws on Node 18 or 21
+console.log(`node ok, need ${SUPPORTED_NODE}`);
+```
+
+For a full picture of what a host is missing, use `generateDependencyReport()`. See [Troubleshooting](/production/troubleshooting).
+
+## Keystore adapters
+
+Where your bot's identity and keys are persisted. Pass one as [`ClientOptions.keystore`](/api-reference/client#constructor-options), or pass a path as `keystorePath` and get `fileKeystore` for free.
+
+<Warning>
+  A bot with no keystore of any kind is single-run only. Identity publication is write-once server-side, so the second start fails permanently. Every bot you intend to run twice needs one of these. See [Keys and the keystore](/concepts/keys-and-keystore).
+</Warning>
+
+### KeystoreAdapter
+
+```ts
+interface KeystoreAdapter {
+  read(): Promise<string | null>;
+  write(contents: string): Promise<void>;
+  describe?(): string;
+}
+```
+
+An adapter owns bytes and nothing else. The SDK owns the format.
+
+<ResponseField name="read" type="() => Promise<string | null>">
+  The stored keystore text, or `null` when nothing is stored yet.
+
+  <Warning>
+    Resolving `null` is the **only** way to say "first run". Every other failure, including a permissions error, a truncated read, or a dead network, must **reject**. A failure that masquerades as a first run makes the SDK generate a new identity it can never publish, which bricks the bot permanently.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="write" type="(contents: string) => Promise<void>">
+  Persists the full keystore text. Implementations should be atomic.
+</ResponseField>
+
+<ResponseField name="describe" type="() => string">
+  Optional human label used in operator-facing errors, such as `file ./bot.keystore.json`.
+</ResponseField>
+
+### fileKeystore
+
+```ts
+fileKeystore(path: string): KeystoreAdapter
+```
+
+The on-disk keystore: a JSON file written atomically with `0600` permissions. `keystorePath: './bot.keystore.json'` is shorthand for this.
+
+### envKeystore
+
+```ts
+envKeystore(opts?: EnvKeystoreOptions): KeystoreAdapter
+
+interface EnvKeystoreOptions {
+  varName?: string;
+  onWrite?: (blob: string) => void | Promise<void>;
+}
+```
+
+`EnvKeystoreOptions` is exported, so you can name it in your own signatures.
+
+A keystore held in an environment variable, for hosts with no writable volume. Reads either raw JSON or base64; writes always emit single-line base64 that is safe to paste into a config field. The variable defaults to `CLOAK_KEYSTORE`, exported as `DEFAULT_KEYSTORE_ENV`.
+
+<Warning>
+  Durability is your job. `process.env` does not survive the process, so an identity written here and not captured by `onWrite` is gone on restart, and the bot can never re-publish. Persist the blob into your host's secret store from `onWrite`.
+</Warning>
+
+```ts
+import { Client, envKeystore } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystore: envKeystore({
+    onWrite: async (blob) => saveToSecretStore('CLOAK_KEYSTORE', blob),
+  }),
+});
+```
+
+See [Keystore backends](/production/keystore-backends).
+
+## Voice keys
+
+You reach these through [`client.voiceKeys`](/api-reference/client#properties), not by constructing anything.
+
+### VoiceKeyScope
+
+```ts
+type VoiceKeyScope = 'participant' | 'room';
+```
+
+The scope the sealing member tagged the key with. It is read from inside the sealed payload and from nowhere else, so a permission race cannot make your bot install the wrong key.
+
+`'participant'` means your bot holds only its own frame key: it can publish, and it can decrypt nobody. `'room'` means your bot was granted `voice_listen` and holds the room key, from which a frame key for any participant is derived.
+
+### VoiceKey
+
+```ts
+interface VoiceKey {
+  scope: VoiceKeyScope;
+  key: Buffer;
+  version: number;
+  fromId: string;
+}
+```
+
+<ResponseField name="key" type="Buffer">
+  32 bytes whose meaning depends entirely on `scope`, which is why the two never travel apart.
+
+  <Warning>
+    Never install `key` directly as a LiveKit frame key. In room scope it is the room key, and installing it publishes audio nobody can decrypt, silently. Always install what `voiceFrameKeyFor()` returns.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="version" type="number">
+  The server's voice key version this was sealed at. It survives a message-key rotation and changes only on a root cycle.
+</ResponseField>
+
+<ResponseField name="fromId" type="string">
+  The human member who sealed it for your bot.
+</ResponseField>
+
+Subscribe to [`voiceKeyUpdate`](/api-reference/events#voicekeyupdate) and re-pin when either the version or the scope changes. Never poll.
+
+### deriveParticipantVoiceKey
+
+```ts
+deriveParticipantVoiceKey(roomKey: Buffer, serverId: string, identity: string): Buffer
+```
+
+Derives one participant's frame key from a room key. This is a normative derivation pinned by a cross-repo test vector, exported so that vector stays checkable.
+
+You almost certainly want `client.voiceKeys.voiceFrameKeyFor(serverId, identity)` instead: it hides the scope, which is the point, because scope is invisible on the publish path and a mistake there is silent.
+
+<Note>
+  The derivation only goes downward, from the room key to a participant key. There is no function that walks back up, in this SDK or anywhere. A publish-only bot's deafness is the absence of that path, not a check that refuses.
+</Note>
+
+## Lower-level exports
+
+You need these only when building frames by hand.
+
+### messageCipher
+
+```ts
+import { messageCipher } from '@cloak-software/bot-sdk';
+```
+
+The AES-256-GCM content cipher, exported as a namespace. `encryptToWire(key, text, epoch)` and `decryptFromWire(key, wire)` are the two functions that matter, alongside `wireEpoch(wire)`, which tells you which key epoch a stored value was encrypted under.
+
+<Tip>
+  [`client.encryptFor()`](/api-reference/client#encryptfor) and [`client.decryptFrom()`](/api-reference/client#decryptfrom) do the same job and select the right key and epoch for you. Prefer them.
+</Tip>
+
+### SignalSession
+
+```ts
+class SignalSession { /* ... */ }
+```
+
+The identity and key-wrapping engine. It generates and serializes your bot's identity material, pins peer identities, and wraps and unwraps conversation keys.
+
+<Note>
+  The name is historical. The engine is RFC 9180 HPKE, not the Signal Protocol and not libsignal, which the SDK no longer ships or depends on. The class kept its old name so existing keystores and imports keep working.
+</Note>
+
+`Client` constructs and drives one. Constructing your own is only useful if you are reimplementing key management.
+
+### WrapContext
+
+```ts
+interface WrapContext {
+  conversationId: string;
+  keyEpoch: number;
+}
+```
+
+Which conversation and which key epoch a wrap belongs to. Both terms are bound into the wrap itself, so a wrap relabelled to another conversation or epoch no longer opens. Required by `wrapKey()` and `unwrapKey()`.
+
+### KeyManager
+
+```ts
+class KeyManager { /* ... */ }
+```
+
+Orchestrates identity and conversation keys over a keystore adapter, and owns the voice key slot. `Client` builds one from your `keystorePath` or `keystore` option and exposes the voice-key part of it as [`client.voiceKeys`](/api-reference/client#properties).
+
+Construction performs no I/O. `await load()` must run before anything reads or writes identity state, which `Client.login()` does for you. An unloaded manager refuses to write, because writing from empty state would replace a real keystore with one that has no identity.
+
+### KeyManagerOptions
+
+```ts
+interface KeyManagerOptions {
+  keystorePath?: string;
+  keystore?: KeystoreAdapter;
+  debug?: boolean;
+  onKey?: (serverIdHex: string, epoch: number) => void;
+  onVoiceKey?: (serverIdHex: string, version: number, scope: VoiceKeyScope) => void;
+  serialize?: <T>(task: () => Promise<T>) => Promise<T>;
+  onCursorInvalidated?: () => void;
+  onError?: (err: unknown, context: string) => void;
+}
+```
+
+`keystorePath` and `keystore` are mutually exclusive: supplying both throws. Omitting both gives an in-memory-only manager, which is fine for tests and fatal for a real bot. The callbacks are how `Client` wires key events into its own event surface, so a bot that lets `Client` build the manager never sets them.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why every bot needs one, and what breaks without it.
+  </Card>
+  <Card title="Encryption lanes" icon="lock" href="/concepts/encryption-lanes">
+    What is encrypted, and the two exceptions.
+  </Card>
+  <Card title="Voice keys" icon="microphone" href="/voice/keys">
+    Scopes, re-pinning, and why a bot can be deaf.
+  </Card>
+  <Card title="Keystore backends" icon="database" href="/production/keystore-backends">
+    Running without a writable volume.
+  </Card>
+</CardGroup>

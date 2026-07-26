@@ -25,38 +25,94 @@
         "group": "Get started",
         "pages": [
           "index",
-          "quickstart"
+          "quickstart",
+          "install"
         ]
       },
       {
         "group": "Core concepts",
         "pages": [
           "concepts/how-bots-work",
-          "concepts/permissions",
+          "concepts/encryption-lanes",
           "concepts/message-delivery",
+          "concepts/permissions",
           "concepts/keys-and-keystore",
           "concepts/connection-lifecycle"
         ]
       },
       {
-        "group": "Guides",
+        "group": "Messaging",
         "pages": [
           "guides/sending-messages",
+          "guides/mentions-and-replies",
           "guides/reactions",
           "guides/editing-and-pinning",
           "guides/message-history",
+          "guides/direct-messages",
+          "guides/typing-presence-and-profile"
+        ]
+      },
+      {
+        "group": "Slash commands",
+        "pages": [
+          "guides/slash-commands"
+        ]
+      },
+      {
+        "group": "Embeds and cards",
+        "pages": [
+          "guides/rich-cards",
+          "guides/webhook-embeds"
+        ]
+      },
+      {
+        "group": "Voice",
+        "pages": [
+          "voice/overview",
+          "voice/joining",
+          "voice/keys",
+          "voice/audio",
+          "voice/runtime"
+        ]
+      },
+      {
+        "group": "Server management",
+        "pages": [
           "guides/moderation",
           "guides/channels-and-groups",
           "guides/members-and-roles",
-          "guides/guild-handle",
-          "guides/handling-errors"
+          "guides/guild-handle"
+        ]
+      },
+      {
+        "group": "Advanced",
+        "pages": [
+          "guides/handling-errors",
+          "guides/rest-api",
+          "guides/raw-frames"
+        ]
+      },
+      {
+        "group": "Running in production",
+        "pages": [
+          "production/deploying",
+          "production/keystore-backends",
+          "production/troubleshooting",
+          "production/backend-requirements",
+          "production/known-limitations"
         ]
       },
       {
         "group": "Examples",
         "pages": [
           "examples/welcome-bot",
-          "examples/moderation-bot"
+          "examples/moderation-bot",
+          "examples/command-bot",
+          "examples/card-bot",
+          "examples/embed-bot",
+          "examples/dm-bot",
+          "examples/voice-bot",
+          "examples/dj-bot"
         ]
       },
       {
@@ -66,12 +122,21 @@
           "api-reference/events",
           "api-reference/types",
           "api-reference/errors",
-          "api-reference/permissions"
+          "api-reference/permissions",
+          "api-reference/commands",
+          "api-reference/embeds",
+          "api-reference/webhooks",
+          "api-reference/voice",
+          "api-reference/mentions",
+          "api-reference/rest",
+          "api-reference/protocol",
+          "api-reference/crypto"
         ]
       },
       {
-        "group": "Legal",
+        "group": "Reference",
         "pages": [
+          "changelog",
           "legal/developer-terms"
         ]
       }
@@ -98,14 +163,16 @@
         "header": "Cloak",
         "items": [
           { "label": "Homepage", "href": "https://cloak.chat" },
-          { "label": "Quickstart", "href": "/quickstart" }
+          { "label": "Quickstart", "href": "/quickstart" },
+          { "label": "Changelog", "href": "/changelog" }
         ]
       },
       {
         "header": "SDK",
         "items": [
           { "label": "API reference", "href": "/api-reference/client" },
-          { "label": "Permissions", "href": "/api-reference/permissions" }
+          { "label": "Permissions", "href": "/api-reference/permissions" },
+          { "label": "Known limitations", "href": "/production/known-limitations" }
         ]
       },
       {

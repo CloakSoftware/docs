@@ -1,20 +1,102 @@
 ---
 title: "Members and roles"
-description: "Read members and roles for a server, on demand."
+description: "Read a server's roles on demand, and what to do while the member roster read is out of service."
 ---
 
-Sometimes you need the full roster of a server, not just the people who happen to be talking on the firehose. `fetchMembers()` and `fetchRoles()` read that for you when you ask. Both go to the server every time, so what you get back is current as of the call.
+<Warning>
+  **`fetchMembers()` does not work against any current Cloak server.** The opcode it waits on became direct-message-only server-side, so a server-scoped request gets no reply frame at all, not even an error code. The promise never resolves and never rejects: it hangs until the transport timeout. A `try/catch` catches nothing, and `await` blocks your handler for the whole wait.
 
-## Fetch the members
+  This is not a permission problem, a flake, or something a retry fixes. There is no workaround inside the SDK. The signature will survive the rebuild, so code written against it stays valid, but it cannot run today. `fetchRoles()` is unaffected and works normally.
+</Warning>
 
-`client.fetchMembers(serverId)` returns a `Promise<Member[]>`. It reads the server's members on demand and does not cache, so each call is a fresh read.
+The `Client` has two on-demand server reads. `fetchRoles()` returns the server's roles, and it works. `fetchMembers()` returns the member roster, and it is currently out of service. Neither read caches, so each call goes to the server and gives you a point-in-time answer.
+
+## Fetch the roles
+
+`client.fetchRoles(serverId)` returns a `Promise<Role[]>`. It reads on demand and does not cache.
 
 ```ts
-const members = await client.fetchMembers(serverId);
-console.log(`${members.length} members`);
+const roles = await client.fetchRoles(serverId);
+for (const role of roles) {
+  console.log(`${role.name}: ${role.memberCount} members`);
+}
 ```
 
-Each entry describes one member of that server.
+Each entry describes one role in the server.
+
+<ResponseField name="id" type="string">
+  The role's id.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The role's name.
+</ResponseField>
+
+<ResponseField name="color" type="string | null">
+  The role's primary color, or `null` if none is set.
+</ResponseField>
+
+<ResponseField name="secondColor" type="string | null">
+  The role's secondary color, or `null` if none is set.
+</ResponseField>
+
+<ResponseField name="position" type="number | null">
+  The role's position, or `null` if unknown. Lower is higher in the list.
+</ResponseField>
+
+<ResponseField name="memberCount" type="number">
+  How many members hold this role.
+</ResponseField>
+
+### A !roles command
+
+`fetchRoles()` is a server read, so guard the handler first. `Message.serverId` is `string | null` and is `null` for a direct message, which arrives on the same `messageCreate` event.
+
+```ts
+import { CloakActionError } from '@cloak-software/bot-sdk';
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.isDM || !msg.serverId) return;        // roles are server-scoped
+  if (msg.content.trim() !== '!roles') return;
+
+  try {
+    const roles = await client.fetchRoles(msg.serverId);
+    const lines = roles
+      .sort((a, b) => (a.position ?? 99) - (b.position ?? 99))
+      .map((r) => `${r.name} (${r.memberCount} members)`);
+    await msg.channel.send(lines.length ? lines.join('\n') : 'This server has no roles.');
+  } catch (err) {
+    if (err instanceof CloakActionError) {
+      await msg.channel.send(`Could not read roles: ${err.message}`);
+    }
+  }
+});
+```
+
+The reply uses `msg.channel.send()`, a plain send. `msg.reply()` would post a true reply with a quote header and fire a "replied to you" notification, which is more than a command answer needs.
+
+<Note>
+  `msg.channel.send()` is fire-and-forget. Its promise resolves when the frame leaves the process, not when the server accepts it. A server-side denial arrives later on the `sendRejected` event, so listen for that if you need to know a send was refused.
+</Note>
+
+## Counting members without fetchMembers()
+
+`Role.memberCount` is the one live membership number a bot can read today. Summing it does not give you a server total, because a member holds at most one role and members with no role are counted nowhere, but it is enough for "how many people hold this role".
+
+```ts
+const roles = await client.fetchRoles(serverId);
+const moderators = roles.find((r) => r.name === 'Moderators');
+console.log(`${moderators?.memberCount ?? 0} moderators`);
+```
+
+For per-person information, use what the firehose already hands you. Every `messageCreate` carries `msg.authorId` and `msg.authorName`, so a bot can build its own map of the people it has actually seen.
+
+## The member roster read
+
+`client.fetchMembers(serverId)` is declared as `Promise<Member[]>`. Do not call it against a live server. See the warning at the top of this page: the call hangs rather than failing, so a bot that reaches it stalls the handler that awaited it.
+
+The shape is documented here so code you write now still compiles once the read is rebuilt.
 
 <ResponseField name="userId" type="string">
   The member's normalized id.
@@ -48,104 +130,80 @@ Each entry describes one member of that server.
   The member's assigned role, or `null` if they have none. A `MemberRole` is `{ id, name, color, secondColor, admin }`, where `admin` is `true` when the role carries admin.
 </ResponseField>
 
-## Count members and bots
+<Warning>
+  If you already ship a bot that calls `fetchMembers()`, the symptom is a handler that appears to do nothing and never logs an error. Remove the call or put it behind a flag you leave off. Wrapping it in `Promise.race()` with your own timer bounds the wait, but there is still no roster to read at the end of it.
+</Warning>
 
-Because you get a plain array back, you can slice it however you like. Here a `!count` command reports how many members are humans and how many are bots.
+## There is no live roster stream
+
+These reads hit the server every time, so treat a result as a snapshot rather than a live view. Call again when you need current data.
+
+Cloak has no continuous member-roster feed for a bot. The firehose carries messages, not membership. The one inbound membership signal is the `systemMessage` event with `type: 'member_join'`, which fires when someone joins a server the bot is in.
 
 ```ts
-client.on('messageCreate', async (msg) => {
-  if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() !== '!count') return;
-
-  const members = await client.fetchMembers(msg.serverId);
-  const bots = members.filter((m) => m.isBot);
-  const humans = members.length - bots.length;
-
-  await msg.reply(`${members.length} members: ${humans} people, ${bots.length} bots`);
+client.on('systemMessage', async (evt) => {
+  if (evt.type !== 'member_join') return;
+  await client.send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName}.`, {
+    groupId: evt.groupId,
+  });
 });
 ```
 
-## Fetch the roles
+`SystemMessageEvent` carries `actorId`, `actorName`, `serverId`, `channelId`, and an optional `groupId` resolved from the bot's channel-group cache. Pass `groupId` through in `SendOptions` so the send does not have to guess the channel's group.
 
-`client.fetchRoles(serverId)` returns a `Promise<Role[]>`. Like `fetchMembers()`, it reads on demand and does not cache.
-
-```ts
-const roles = await client.fetchRoles(serverId);
-for (const role of roles) {
-  console.log(`${role.name}: ${role.memberCount} members`);
-}
-```
-
-Each entry describes one role in the server.
-
-<ResponseField name="id" type="string">
-  The role's id.
-</ResponseField>
-
-<ResponseField name="name" type="string">
-  The role's name.
-</ResponseField>
-
-<ResponseField name="color" type="string | null">
-  The role's primary color, or `null` if none is set.
-</ResponseField>
-
-<ResponseField name="secondColor" type="string | null">
-  The role's secondary color, or `null` if none is set.
-</ResponseField>
-
-<ResponseField name="position" type="number | null">
-  The role's position, or `null` if unknown.
-</ResponseField>
-
-<ResponseField name="memberCount" type="number">
-  How many members hold this role.
-</ResponseField>
+The voice roster events are a separate thing and are not a firehose either. They reach a bot only for the server it currently has selected or is in voice in, so they are not a general membership feed.
 
 ## Read through the guild() handle
 
-Both reads are also available on the `guild()` handle, if you already have one for the server. These are the same calls, just reached a different way.
+Both reads are bound on the `guild()` handle when you already have one for the server.
 
 ```ts
-const guild = client.guild(serverId);
-const members = await guild.fetchMembers();
-const roles = await guild.fetchRoles();
+const g = client.guild(serverId);
+const roles = await g.fetchRoles();
 ```
 
-See [The guild() handle](/guides/guild-handle) for what else the handle gives you.
+<Warning>
+  `g.fetchMembers()` binds the same out-of-service read as the flat method and hangs the same way. Only `g.fetchRoles()` works.
+</Warning>
 
-<Note>
-  These reads always hit the server, so treat them as a point-in-time snapshot rather than a live view. Call again when you need current data. For continuous member activity, use the firehose instead.
-</Note>
+See [The guild() handle](/guides/guild-handle) for the rest of what the handle binds.
 
 ## Handle failures
 
-Both calls reject with `CloakActionError` if the read fails. Wrap them in a `try/catch` and decide what to do when the roster is not available.
+`fetchRoles()` rejects with a `CloakActionError` when the server refuses the read or errors while serving it. Wrap it and decide what to do when the roles are not available.
 
 ```ts
+import { CloakActionError } from '@cloak-software/bot-sdk';
+
 try {
-  const members = await client.fetchMembers(serverId);
-  console.log(`${members.length} members`);
+  const roles = await client.fetchRoles(serverId);
+  console.log(`${roles.length} roles`);
 } catch (err) {
-  console.error('could not read members', err);
+  if (err instanceof CloakActionError) {
+    console.error(`could not read roles: ${err.message}`);
+  } else {
+    throw err;
+  }
 }
 ```
 
-The server decides whether your bot may read this data and is the authority on the result. If a read is refused, it rejects here rather than returning a partial list.
+The server decides whether your bot may read this data and is the authority on the result. A refused read rejects rather than returning a partial list.
+
+`fetchMembers()` has no working failure path today. It does not reject, so the `catch` above would never run for it.
 
 ## Next
 
 <CardGroup cols={2}>
-  <Card title="Member type" icon="user" href="/api-reference/types#member">
-    Every field on a member.
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types">
+    Every field on Role, Member, and MemberRole.
   </Card>
-  <Card title="Role type" icon="tag" href="/api-reference/types#role">
-    Every field on a role.
+  <Card title="Known limitations" icon="circle-exclamation" href="/production/known-limitations">
+    What else is out of service, and what is tracked.
   </Card>
   <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
     The other way to reach these reads.
   </Card>
   <Card title="Moderation" icon="gavel" href="/guides/moderation">
-    Act on the members you just read.
+    Act on a member once you have their id.
   </Card>
 </CardGroup>

@@ -1,46 +1,112 @@
 ---
 title: "Sending messages"
-description: "Send and reply with encrypted messages, and choose where they land."
+description: "Send encrypted text with the SendOptions object, and understand why a denied send never rejects."
 ---
 
-Your bot sends text by handing it to the SDK, which encrypts it in your process and puts the ciphertext on the wire. You have three ways to send: reply where a message arrived, send into that same channel, or send somewhere else entirely. This page covers when to reach for each.
+Your bot hands text to the SDK, which encrypts it in your process and puts ciphertext on the wire. There are three entry points: reply to a message you are handling, send into the channel it arrived in, or send to a channel you name. This page covers all three, plus the two behaviors that catch people out. The fourth argument is an options object, and a send the server refuses does not reject.
 
-## Reply where a message arrived
+## The signature
 
-When you are handling an incoming message, the location is already known, so you pass only the text. Prefer `msg.reply(text)` and `msg.channel.send(text)`. Both send into the same channel the message came from.
+```ts
+send(serverId: string, channelId: string, text: string, opts?: SendOptions): Promise<void>
+```
+
+<Warning>
+  **Breaking in 0.2.0.** The fourth argument used to be a positional `groupId`. It is now a `SendOptions` object. Rewrite `send(s, c, text, groupId)` as `send(s, c, text, { groupId })`. In TypeScript the old call is a compile error. In plain JavaScript it fails quietly: reading `.groupId` off a string yields `undefined`, so the message goes out with no group, which is the exact failure that argument exists to prevent.
+</Warning>
+
+The same `SendOptions` object is accepted by `msg.reply()`, `msg.channel.send()`, `guild().send()`, and `client.sendDM()`.
+
+### SendOptions
+
+<ParamField path="opts.groupId" type="string">
+  The target channel's group. The SDK resolves it from its channel cache for any channel the bot has already seen traffic from, so you usually leave it out. Pass it when sending into a channel with no prior traffic.
+</ParamField>
+
+<ParamField path="opts.mentions" type="MentionTarget[]">
+  Who to notify: `{ userId }`, `{ roleId }`, `'everyone'`, or `'here'`. This array is the ping. The pill that renders in the message is separate literal text you put in `text` yourself. See [Mentions and replies](/guides/mentions-and-replies).
+
+  This array rides the wire in **plaintext**. The server routes notifications without decrypting the body, so mention targets are visible server-side even though the message text is not.
+</ParamField>
+
+<ParamField path="opts.replyTo" type="ReplyTarget">
+  Make this a true reply to another message: it renders the quote header and fires the mute-piercing "replied to you" notification. A received `Message` satisfies the type, so `{ replyTo: msg }` works. The target must live in the channel you are sending to and must carry a `createdAt`.
+</ParamField>
+
+## Answer a message you are handling
+
+A received `Message` carries its own location, so you pass only the text. You have two choices, and they are not interchangeable.
+
+<CardGroup cols={2}>
+  <Card title="msg.channel.send(text, opts?)" icon="paper-plane">
+    A plain message in the same channel. Nothing is quoted and no reply notification fires. This is what a bot answering a user should send.
+  </Card>
+  <Card title="msg.reply(text, opts?)" icon="reply">
+    A true reply. It renders the quote header on the original message and fires the "replied to you" notification, which pierces the recipient's mutes.
+  </Card>
+</CardGroup>
+
+<Note>
+  `msg.reply()` was a plain send before 0.2.0. If you are upgrading a bot that answered commands with `reply()`, switch those calls to `msg.channel.send()` unless you really want every answer to ping the user through their mutes.
+</Note>
+
+A ping bot answers, so it uses `channel.send()`.
 
 ```ts
 import { Client } from '@cloak-software/bot-sdk';
 
 const client = new Client({
   token: process.env.CLOAK_TOKEN!,
+  // A bot with no keystore is single-run only: identity publication is
+  // write-once server-side, so the second start fails permanently.
+  keystorePath: './ping-bot.cloak-keystore.json',
   requiredPermissions: ['message_send'],
 });
 
 client.on('messageCreate', (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() === '!ping') {
-    msg.reply('pong').catch((e) => console.error('reply failed', e));
-  }
+  if (msg.content.trim() !== '!ping') return;
+  msg.channel.send('pong').catch((e) => console.error('send failed', e));
+});
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
 });
 ```
 
-`msg.reply()` and `msg.channel.send()` are thin wrappers over `client.send()`. They read the source location off the `Message` for you, so you never repeat where the reply should go.
+See [Keys and the keystore](/concepts/keys-and-keystore) for why `keystorePath` is not optional in practice.
 
-## Send somewhere else
+Use `reply()` when the quote genuinely helps, such as a moderation notice attached to the offending message.
 
-Reach for `client.send()` when you want to send to a channel other than the one a message arrived in. A common case is greeting a new member in a specific welcome channel.
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return;
+  if (!msg.content.toLowerCase().includes('bannedword')) return;
+  msg.reply('Please keep it civil.').catch((e) => console.error('reply failed', e));
+});
+```
+
+Both methods work on a direct message. There they route into the DM lane instead of `client.send()`, which is why you do not have to branch. They are also the only two message actions that work in a DM: `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` all reject on a DM message.
+
+## Send to a channel you name
+
+Reach for `client.send()` when the target is not where a message arrived. Greeting a new member in a welcome channel is the common case, and `systemMessage` hands you every id you need, including the group.
 
 ```ts
 client.on('systemMessage', (evt) => {
   if (evt.type !== 'member_join') return;
+  // Advisory pre-gate. The server stays authoritative, but checking first
+  // avoids a doomed round trip.
+  if (!client.can('message_send', evt.serverId)) return;
   client
-    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, evt.groupId)
+    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, {
+      groupId: evt.groupId,
+    })
     .catch((e) => console.error('welcome send failed', e));
 });
 ```
-
-`client.send(serverId, channelId, text, groupId?)` returns `Promise<void>`. It encrypts `text` in your process and sends the ciphertext.
 
 <ParamField path="serverId" type="string" required>
   The server that holds the target channel.
@@ -54,57 +120,135 @@ client.on('systemMessage', (evt) => {
   The message content. The SDK encrypts it before it leaves your process.
 </ParamField>
 
-<ParamField path="groupId" type="string">
-  The channel's group. Optional, and auto-resolved from the SDK's channel cache for any channel the bot has already seen. Pass it only when sending to a channel with no prior traffic.
+<ParamField path="opts" type="SendOptions">
+  `{ groupId?, mentions?, replyTo? }`, described above. Optional.
 </ParamField>
+
+### Guard serverId before you pass it
+
+`Message.serverId` is `string | null`. It is `null` for a direct message, and direct messages arrive on the same `messageCreate` event as server messages. Anywhere you hand `msg.serverId` to a server-scoped call, guard first.
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return; // a DM has no server at all
+  // msg.serverId is a plain string from here down
+  if (!client.can('message_send', msg.serverId)) return;
+  await client.send(msg.serverId, msg.channelId, 'ack');
+});
+```
+
+Without the guard, TypeScript rejects the call and plain JavaScript degrades silently: `can()` returns false for a null server, so the bot goes quiet with nothing to read in the logs. See [Direct messages](/guides/direct-messages) for the rest of the DM story.
 
 ### When to pass groupId
 
-For any channel the bot has already seen traffic from, the SDK resolves `groupId` from its channel cache, so you can leave it out. Pass it explicitly when you are sending into a channel the bot has no prior traffic from, such as a member-join greeting in a fresh channel. The `systemMessage` event carries `evt.groupId` for exactly this reason.
+For any channel the bot has already seen traffic from, the SDK resolves the group from its channel cache and you can leave `groupId` out. Pass it when the bot has no prior traffic from that channel, such as a member-join greeting in a channel nobody has spoken in. The `systemMessage` event carries `evt.groupId` for exactly that reason.
+
+A wrong or unknown group makes the server refuse the channel selection, and the send rejects with a plain `Error` naming the channel and the group it tried.
+
+## Send through a server handle
+
+`client.guild(serverId)` returns a handle with the server already bound, which reads better when a block of code works against one server.
+
+```ts
+const guild = client.guild(serverId);
+await guild.send(channelId, 'deploy finished');
+await guild.send(channelId, 'and the smoke tests passed', { groupId });
+```
+
+`guild().send(channelId, text, opts?)` takes the same options object as `client.send()`. See [The guild() handle](/guides/guild-handle).
 
 ## Sends never race
 
-Every send goes through a single internal queue, so sends never race each other. You do not manage ordering. Fire them in the order you want them to arrive and let the SDK serialize them.
+Every action the client performs, sends included, runs on one serialized chain. A send and its channel selection cannot be interleaved by another call. You do not manage ordering: fire messages in the order you want them delivered.
 
 ```ts
 await client.send(serverId, channelId, 'first');
 await client.send(serverId, channelId, 'second');
 ```
 
-## Sending right after a first join
+## Sends are fire-and-forget
 
-`send()` throws a plain `Error` when the bot does not yet hold the server's conversation key. This happens right after a first join, before the key handoff completes. The SDK retries key acquisition automatically, so a later send succeeds once a key-holding member has been online.
+There is no success acknowledgement for a message send. `send()` resolves when the frame is on the wire, not when the server accepts it. A resolved promise means "sent", never "delivered".
 
-<Note>
-  This is the only case where `send()` throws locally. Catch it and let the bot try again later rather than treating it as fatal.
-</Note>
+<Warning>
+  A server-side denial does **not** reject the promise. It arrives later on the `sendRejected` event. Wrapping `send()` in `try/catch` will not catch a missing `message_send` permission, a rate limit, or a timeout.
+</Warning>
+
+Register a listener once, at startup.
+
+```ts
+client.on('sendRejected', ({ code, message, permission, serverId, channelId }) => {
+  console.warn(`send denied (${code}): ${message}`);
+  if (permission) console.warn(`the bot is missing ${permission}`);
+  if (serverId && channelId) console.warn(`probably ${serverId}/${channelId}`);
+});
+```
+
+The deny frame carries no routing of its own, so `serverId` and `channelId` are attributed best-effort from the most recent send inside a 30 second window, and are `null` otherwise. Treat them as a hint, not a fact.
+
+<AccordionGroup>
+  <Accordion title="The deny codes a send can report">
+    | Code | Meaning | `.permission` |
+    |---|---|---|
+    | `-1` | Not authenticated | |
+    | `-2` | Message empty or over the size limit | |
+    | `-3` | No channel selected | |
+    | `-4` | Send denied | |
+    | `-6` | Missing the send-messages permission | `message_send` |
+    | `-9` | Rate limited (bot message throttle) | |
+    | `-10` | The bot is timed out in this server | |
+    | `-11` | A message sidecar is over the 16 KiB wire cap | |
+    | `-13` | Missing the attach-files permission | `upload_file` |
+
+    Older Cloak servers delivered only `-6` and dropped the rest. Current servers deliver all of them. Even so, this is not an acknowledgement channel: silence does not prove delivery.
+  </Accordion>
+</AccordionGroup>
+
+`sendRejected` does not also fire `error`. A denial is an expected outcome, not a plumbing failure. Forward it yourself if you want a single funnel.
+
+## When a send rejects locally
+
+Two failures happen inside your process, before anything reaches the wire, and both reject the promise.
+
+<Steps>
+  <Step title="No conversation key for the server">
+    The rejection is a plain `Error` reading `No conversation key for server <id>; not added / key not delivered yet`. This happens right after a first join, before the key handoff completes. The SDK keeps retrying key acquisition on its own, so a later send succeeds once a key-holding member has been online. Treat it as "not yet", not as fatal.
+  </Step>
+  <Step title="replyTo with no createdAt">
+    The rejection reads `[cloak-sdk] replyTo has no createdAt; the reply slot needs the original message's server send time`. The server re-reads the quoted row by its send time, so a reply target without one cannot resolve. Check before you pass it.
+  </Step>
+</Steps>
 
 ```ts
 try {
   await client.send(serverId, channelId, 'hello');
-} catch (e) {
-  // Most likely the conversation key has not arrived yet. A later send will work.
-  console.error('send failed, will retry later', e);
+} catch (err) {
+  // Most likely the conversation key has not arrived yet. A later send works.
+  console.error('send failed locally', err);
 }
 ```
 
-<Warning>
-  `send()` does not surface per-message delivery receipts, and it does not throw a `CloakActionError` when a send is denied. The only failure it reports locally is the missing-key case above.
-</Warning>
+```ts
+if (!target.createdAt) return; // no reply slot without the server's send time
+await client.send(serverId, channelId, 'as I was saying', { replyTo: target });
+```
+
+`msg.reply()` never throws for the second reason. On the rare message with no `createdAt` it degrades to a plain send rather than blowing up inside your handler.
 
 ## Next
 
 <CardGroup cols={2}>
+  <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
+    Pill text, the plaintext ping array, and true replies.
+  </Card>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Why `serverId` is nullable and what changes in a DM.
+  </Card>
   <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
-    How the firehose decides where messages reach you.
+    How the firehose decides what reaches your bot.
   </Card>
-  <Card title="Reactions" icon="face-smile" href="/guides/reactions">
-    Respond without sending a new message.
-  </Card>
-  <Card title="The Message object" icon="envelope" href="/api-reference/types#message">
-    Every field a received message carries.
-  </Card>
-  <Card title="client.send()" icon="paper-plane" href="/api-reference/client#send">
-    The full method signature and options.
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    Which failures throw, which reject, and which arrive as events.
   </Card>
 </CardGroup>

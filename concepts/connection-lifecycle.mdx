@@ -1,26 +1,118 @@
 ---
 title: "Connection lifecycle"
-description: "Logging in, staying connected, recovering from drops, and shutting down cleanly."
+description: "What the connection is, what login() actually does, how a drop is detected and recovered, and how to shut down cleanly."
 ---
 
 Your bot maintains a live connection to Cloak. The SDK handles the hard parts of keeping that connection healthy, and gives you events so you can observe what is happening.
 
+## What the connection is
+
+The SDK speaks one opcode protocol over one of two lanes.
+
+| Lane | Scheme | Status |
+| --- | --- | --- |
+| `'ws'` | `wss://` | The default. A plain WebSocket over a pure-JavaScript package. Nothing compiles at install time. |
+| `'webtransport'` | `https://` | Opt-in. WebTransport over QUIC, which needs two optional native packages. |
+
+Stay on the default unless you have a specific reason not to. `npm install` compiles nothing on the WebSocket lane, so a bot runs on any supported Node host with no Dockerfile, no compiler, and no glibc floor.
+
+```ts
+// The whole configuration for the hosted service.
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json',
+});
+```
+
+`url` defaults to `DEFAULT_URL` (`wss://cloak.expatiate.net:2001`), or to `DEFAULT_WEBTRANSPORT_URL` (`https://cloak.expatiate.net:2000/wt`) when you set `transport: 'webtransport'`. Both are exported if you want to read them.
+
+### The lane follows the URL scheme
+
+`resolveLane()` decides which lane a URL speaks, and refuses combinations that would either leak your token or quietly ignore what you asked for.
+
+| Scheme | Lane | Notes |
+| --- | --- | --- |
+| `wss:` | `ws` | An explicit `transport: 'webtransport'` throws. |
+| `ws:` | `ws` | Requires `allowInsecure: true`. Local dev stacks only. |
+| `https:` | `webtransport` | An explicit `transport: 'ws'` throws. |
+| Anything else | none | Throws. |
+
+Two related rules:
+
+- A plain `ws://` URL is refused without `allowInsecure: true`, because a bot token would otherwise cross the network in cleartext.
+- `serverCertificateHashes` is WebTransport-only. Passing it with a `ws://` or `wss://` URL throws rather than silently ignoring your pin request.
+
+<Note>
+  The WebTransport lane needs `@fails-components/webtransport` and `@fails-components/webtransport-transport-http3-quiche`, installed at the same exact version, on a host with glibc 2.38 or newer. Nothing imports them unless you set `transport: 'webtransport'`, so a text-only bot pays nothing for their existence.
+</Note>
+
+### The transport types
+
+You do not need these to write a bot. They are exported for the rare case where you supply your own transport through `ClientOptions.internals`, or you want to name one of these shapes in your own code.
+
+<ResponseField name="LaneName" type="type">
+  `'ws' | 'webtransport'`. The same values `ClientOptions.transport` accepts.
+</ResponseField>
+
+<ResponseField name="Lane" type="interface">
+  One lane implementation: how it opens a connection, writes a frame, and closes.
+</ResponseField>
+
+<ResponseField name="LaneHooks" type="interface">
+  The callbacks a lane reports back through, for frames received and for connection state changes.
+</ResponseField>
+
+<ResponseField name="Transport" type="class">
+  The lane-agnostic wrapper the `Client` actually holds. It owns reconnect, backoff, and the keepalive.
+</ResponseField>
+
+<ResponseField name="TransportOptions" type="interface">
+  What `Transport` is constructed with. Note that only `idleTimeoutMs` is reachable from `ClientOptions`; the 15 second keepalive is fixed from a bot author's point of view.
+</ResponseField>
+
+<ResponseField name="TransportLike" type="interface">
+  The minimum surface the `Client` needs, and the return type of `internals.transportFactory`. Implement this to stub the network in a test.
+</ResponseField>
+
+<ResponseField name="KeyManagerLike" type="interface">
+  The matching contract for `internals.keyManagerFactory`, the other half of the same escape hatch.
+</ResponseField>
+
+<Warning>
+  `internals` is an escape hatch for tests and for the SDK's own harness. It is not covered by semver, and a bot that reaches for it can break on a patch release.
+</Warning>
+
 ## Logging in
 
-Calling `login()` runs the full startup sequence:
+Calling `login()` runs the full startup sequence. Three of these steps happen before a socket is opened, which is where a misconfigured host fails.
 
 <Steps>
+  <Step title="Check the Node runtime">
+    The literal first statement of `login()`. The supported range is `^20.19.0 || >=22.12.0`, so 21.x never qualifies. The reason is that the crypto stack draws randomness from `globalThis.crypto.getRandomValues`, which Node 18 leaves undefined in ESM. Failing here replaces a cryptic randomness error much later in the run.
+  </Step>
+  <Step title="Parse the token">
+    The token has the shape `botid.tokenid.secret`. Anything else throws.
+  </Step>
+  <Step title="Read the keystore">
+    Before any network traffic and before any identity decision. A keystore that exists but cannot be read or parsed throws here. See [Keys and the keystore](/concepts/keys-and-keystore).
+  </Step>
   <Step title="Connect and authenticate">
-    The SDK opens a connection and authenticates with your bot token.
+    The transport opens and the bot authenticates with its token, carrying the SDK's wire version.
   </Step>
-  <Step title="Publish identity if needed">
-    On the very first login, your bot's identity is published to the server. On later logins, it reuses the identity from your [keystore](/concepts/keys-and-keystore).
+  <Step title="Publish the identity, if the server does not already hold it">
+    On the very first login only. On later logins the SDK reuses the identity from your keystore. This publication is write-once.
   </Step>
-  <Step title="Announce existing servers">
-    `guildCreate` fires for each server the bot is already in.
+  <Step title="Declare the permission manifest">
+    Whatever you passed as `requiredPermissions`. Best-effort: a refusal is reported on the `error` event and never blocks login.
+  </Step>
+  <Step title="Publish the slash-command menu">
+    Whatever is registered at that moment. Register commands before `login()`. Also best-effort.
+  </Step>
+  <Step title="Fetch servers and await their verdicts">
+    `guildCreate` fires for each server the bot is already in, and the SDK awaits each server's permission verdict.
   </Step>
   <Step title="Signal readiness">
-    `ready` fires once startup is complete. Permission grants are populated before this, so `can()` is usable inside your `ready` handler.
+    `ready` fires. Because the verdicts were awaited, `can()` and `permissions()` are already populated inside your `ready` handler.
   </Step>
 </Steps>
 
@@ -29,17 +121,80 @@ client.on('ready', () => console.log(`Online as ${client.user?.id}`));
 await client.login();
 ```
 
-## Staying connected and recovering
+### Login rejections
 
-If the connection drops unexpectedly, the SDK reconnects on its own. It rebuilds the connection, re-authenticates, and re-establishes your last [`watch()`](/concepts/message-delivery#pre-selecting-a-channel-is-optional) target if you set one. It uses exponential backoff with jitter, capped at 30 seconds between attempts, so a flaky network does not turn into a tight retry loop.
+Two rejection codes are terminal, and the difference decides whether an operator has a dead bot or a slow one.
+
+| Code | Meaning | Behavior |
+| --- | --- | --- |
+| `-2` | Bad credentials. The token was revoked or regenerated. | Terminal. The reconnect loop stops. |
+| `-12` | This SDK is below the backend's minimum wire version. | Terminal. Redeploy on a newer `@cloak-software/bot-sdk`. |
+| `-8` | Transient backend error. | Retries with the usual backoff. |
+
+<Warning>
+  A terminal rejection emits `disconnect` and does not throw. It is not followed by `reconnecting`. A `disconnect` with no `reconnecting` after it is the signal that the bot is permanently offline. Unless `debug: true` is set, that is the only signal you get.
+</Warning>
+
+```ts
+let stopped: NodeJS.Timeout | undefined;
+client.on('disconnect', () => {
+  // If no 'reconnecting' follows, this bot is not coming back.
+  stopped = setTimeout(() => console.error('bot is permanently offline'), 60_000);
+});
+client.on('reconnecting', () => clearTimeout(stopped));
+```
+
+## Detecting a drop
+
+A closed socket is easy. A black-holed one produces no frames, no close, and no reconnect unless something watches for silence, so the SDK watches on two timers.
+
+- **Keepalive, every 15 seconds.** A protocol frame plus a wire-level WebSocket ping. The ping is the only thing that produces inbound traffic on a genuinely idle bot.
+- **Read-idle watchdog.** Closes a connection that has received nothing for `idleTimeoutMs`. The default is 60000 on the WebSocket lane, and disabled on WebTransport, which has QUIC's own idle timeout. Pass `0` to disable it.
+
+```ts
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json',
+  idleTimeoutMs: 30_000, // stricter than the 60s default
+});
+```
+
+The watchdog feeds the same close path as a real drop, so it surfaces as an ordinary `disconnect` followed by `reconnecting`.
+
+## Recovering
+
+On an unexpected disconnect the SDK reconnects on its own. You do not call `login()` again.
+
+The backoff is full jitter over a capped exponential base, with a floor:
+
+```ts
+delayMs = Math.floor(Math.random() * Math.min(30_000, 1000 * 2 ** attempt)) + 500;
+```
+
+`attempt` resets to 0 after a successful reconnect, so a flaky network does not turn into a tight retry loop and a brief blip does not inherit yesterday's backoff.
+
+### What a reconnect restores
+
+- A fresh transport, and re-authentication.
+- The permission manifest and the slash-command menu, re-declared.
+- Your last `watch()` target, if you set one.
+- Voice, by leaving explicitly and then rejoining with the prior muted and deafened state.
+
+### What a reconnect resets or drops
+
+- The server, channel, and group selection cursor starts fresh. So does typing state.
+- A `watch()` target that can no longer be established is **dropped**, not retried. The bot continues on the firehose.
+- A voice channel that was deleted or denied while the bot was offline degrades the same way. `voiceConnection()` becomes null and the bot carries on.
+
+<Warning>
+  `guildCreate` is **not** re-emitted on a reconnect. It fires only during `login()`. A bot that rebuilds per-server state inside `guildCreate` will not get a second chance after a drop. Build that state somewhere that survives, or rebuild it in `ready`.
+</Warning>
 
 Your keys and identity carry across reconnects, so the bot picks up where it left off.
 
-<Note>
-  A `watch()` target is only a preference. If the watched channel was deleted or is no longer selectable while the bot was offline, the SDK drops the watch and continues on the firehose rather than failing the reconnect. A working bot never gets stranded over an optional pre-selection.
-</Note>
+## Observing it
 
-Observe the process with three events:
+Four events, and the fourth is the one that is easy to miss.
 
 ```ts
 client.on('disconnect', (err) => console.warn('connection dropped', err));
@@ -49,15 +204,22 @@ client.on('reconnecting', ({ attempt, delayMs }) =>
 );
 
 client.on('reconnected', () => console.log('back online'));
+
+client.on('error', (err) => {
+  // err is a CloakClientError: .source, .context, .cause
+  console.error(`[cloak:${err.source}] ${err.message}`);
+});
 ```
 
-<Note>
-  Reconnection is automatic. You do not need to call `login()` again after a drop. The events are for logging and observability, not for driving the reconnect yourself.
-</Note>
+<Warning>
+  `error` is the single funnel for every failure the SDK catches and keeps going from: a handler of yours that threw, a key pull that failed, a frame that could not be dispatched. With no listener registered, those stay silent by design. Register one on every bot you intend to run unattended.
+</Warning>
+
+`error` does not fire for backend denials of an awaited action, which reject with a `CloakActionError`, nor for denied sends, which arrive on `sendRejected`.
 
 ## Being removed from a server
 
-If your bot is kicked or banned, the SDK drops that server's cached key and fires `guildDelete`. This does not stop reconnection or tear down your other work.
+If your bot is kicked or banned, the SDK drops that server's cached keys and permission state and fires `guildDelete`. This does not stop reconnection or tear down your other work.
 
 ```ts
 client.on('guildDelete', (guild) => {
@@ -67,11 +229,13 @@ client.on('guildDelete', (guild) => {
 
 ## Shutting down
 
-Call `destroy()` to close the connection and stop reconnecting. This is the clean way to end your bot's session.
+Call `destroy()` to close the connection and stop reconnecting. It also flushes pending keystore writes, which is why it must be awaited.
 
 ```ts
 await client.destroy();
 ```
+
+A shutdown right after a key landed would otherwise drop that key and cost a re-acquire, or a deaf window, on the next start.
 
 A bot that has been removed from everything and has nothing left to do can call `destroy()` from its own `guildDelete` handler.
 
@@ -82,6 +246,12 @@ A bot that has been removed from everything and has nothing left to do can call 
     Every lifecycle event and its payload.
   </Card>
   <Card title="Keys and the keystore" icon="database" href="/concepts/keys-and-keystore">
-    What persists across a reconnect.
+    What persists across a reconnect, and what must never be lost.
+  </Card>
+  <Card title="Client options" icon="sliders" href="/api-reference/client">
+    `url`, `transport`, `allowInsecure`, `idleTimeoutMs`, `deviceId`, and the rest.
+  </Card>
+  <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
+    The dependency report, and what to paste into a bug report.
   </Card>
 </CardGroup>

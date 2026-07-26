@@ -1,0 +1,410 @@
+---
+title: "When a bot will not start"
+description: "Symptom-indexed triage: the dependency report, the login failures that stop retrying, and how to read a bot that is already running."
+---
+
+Start with the symptom. Each row links to the section that explains it.
+
+## Symptom index
+
+| What you see | Likely cause | Go to |
+| --- | --- | --- |
+| `Unsupported Node runtime v…` on `login()` | Node outside `^20.19.0 \|\| >=22.12.0` | [Node version](#node-version) |
+| `crypto.getRandomValues must be defined` | No secure RNG in the process | [Secure random](#secure-random) |
+| `the keystore (…) exists but is corrupt or unreadable` | A damaged store, thrown before connecting | [Keystore failures](#keystore-failures) |
+| `the server already holds a published identity for this bot` | The keystore was lost after the first run | [Keystore failures](#keystore-failures) |
+| A warning about an identity stored only in `process.env` | `envKeystore` with no `onWrite` | [Keystore failures](#keystore-failures) |
+| `GLIBC_2.38' not found` | WebTransport lane on an old glibc | [Transport failures](#transport-failures) |
+| `Cannot find package '@fails-components/…'` | WebTransport requested, packages absent | [Transport failures](#transport-failures) |
+| `A number was expected` | The two WebTransport packages are at skewed versions | [Transport failures](#transport-failures) |
+| One `disconnect`, then nothing ever again | A terminal login rejection (`-2` or `-12`) | [Login rejections](#login-rejections) |
+| Endless `reconnecting` events | A transient failure (`-8`), or the network | [Login rejections](#login-rejections) |
+| `Timed out acquiring key for server …` | No human client answered the key request | [Key acquisition](#key-acquisition) |
+| `send()` resolves but nothing appears | A server-side denial, which is an event | [Reading a live bot](#reading-a-live-bot) |
+| An `await` that never settles | `fetchMembers()` | [Known limitations](/production/known-limitations) |
+| Total silence, no errors, no logs | No `error` listener | [Reading a live bot](#reading-a-live-bot) |
+| Embeds post fine but have no images | A server-side setting you cannot detect | [Backend requirements](/production/backend-requirements) |
+
+## The dependency report
+
+The SDK ships a doctor that reports what your host actually resolved: the Node version and whether it satisfies `engines`, the platform, arch and glibc, whether a secure RNG is reachable, the resolved `@noble/*` versions, and which optional natives are present.
+
+It is pure and offline. It opens no socket, spawns no process, reads no clock, and never loads a native addon to learn its version. It **returns** a string and never prints, so printing is your one line.
+
+### Run it from a file
+
+```bash
+printf "import { generateDependencyReport } from '@cloak-software/bot-sdk';\nconsole.log(generateDependencyReport());\n" > doctor.mjs
+node doctor.mjs
+```
+
+If you want a one-liner, the stdin form is also faithful:
+
+```bash
+echo "import('@cloak-software/bot-sdk').then(m => console.log(m.generateDependencyReport()))" | node --input-type=module
+```
+
+<Warning>
+  **Do not run the report with `node -e`.** `node -e`, `node -p` and the REPL define a `crypto` global in their own eval bootstrap that no module in a normal process would otherwise have, and the leak reaches modules they `import()`. The probe cannot tell that global apart from a real one, so the secure-random row lies on exactly the hosts the report exists to diagnose.
+</Warning>
+
+Measured on Node 18.20.8, same machine, same second:
+
+```
+node doctor.mjs   ->  secure random: available (node:webcrypto)   # true: the SDK's shim supplied it
+node -e "..."     ->  secure random: available (global)           # false: the runtime has none
+```
+
+Only the first is true. The `node -e` form hides the fact that the runtime itself has no secure RNG and the SDK is carrying it, which is exactly what you need to know when your own code (or another dependency) reaches for randomness without the SDK's shim. Run it as a file, or through `node --input-type=module` on stdin.
+
+### What the output looks like
+
+```
+- @cloak-software/bot-sdk 0.2.0
+- Runtime
+    - node: v22.12.0 (engines ^20.19.0 || >=22.12.0 — satisfied)
+    - platform: linux x64
+    - glibc: 2.39
+    - secure random: available (node:webcrypto)
+- Crypto
+    - @noble/ciphers: 2.2.0
+    - @noble/curves: 2.2.0
+    - @noble/hashes: 2.2.0
+- Transport (optional — the default wss:// lane needs none of these)
+    - @fails-components/webtransport: not installed
+    - @fails-components/webtransport-transport-http3-quiche: not installed
+- Voice (optional)
+    - @livekit/rtc-node: not installed
+    - ffmpeg: not installed (not on PATH (only needed by a voice bot that decodes media))
+```
+
+Reading it:
+
+- **`NOT SATISFIED` on the node row stops everything.** Nothing else matters until you fix it.
+- **`secure random: MISSING`** means every key operation will fail. This is the row that otherwise shows up only as a 20 second `Timed out acquiring key`.
+- **`not installed` under Transport and Voice is normal and healthy.** Those are opt-in extras. A text bot on the default `wss://` lane needs none of them.
+- **`unknown` on a package** means the probe could not resolve it and the report says why in the note. That is a real signal, unlike `missing`.
+
+Paste the whole thing into any bug report.
+
+### The programmatic surface
+
+Every row is available as data, and the individual probes are exported so you can gate on them.
+
+```ts
+import {
+  dependencyReport,
+  generateDependencyReport,
+  hasSecureRandom,
+  secureRandomSource,
+  nodeSatisfiesEngines,
+} from '@cloak-software/bot-sdk';
+
+const report = dependencyReport();
+
+if (!report.runtime.enginesSatisfied) {
+  console.error(`node ${report.runtime.node} does not satisfy ${report.runtime.engines}`);
+  console.error(generateDependencyReport());
+  process.exit(1);
+}
+
+// The RNG probe on its own, and where the global came from.
+console.log(hasSecureRandom(), secureRandomSource());
+
+// The engines predicate, over any version string you like.
+console.log(nodeSatisfiesEngines('v21.7.0')); // false: 21.x never qualifies
+```
+
+<ResponseField name="dependencyReport(deps?)" type="DependencyReport">
+  The same data as `generateDependencyReport()`, structured. Fields: `sdk`, `runtime`, `secureRandom`, `crypto`, `transport`, `voice`.
+</ResponseField>
+
+<ResponseField name="generateDependencyReport(deps?)" type="string">
+  The human-readable form. Returns a string and never prints. Never throws, even on the broken host it exists to describe.
+</ResponseField>
+
+<ResponseField name="hasSecureRandom()" type="boolean">
+  Whether `globalThis.crypto.getRandomValues` is a function right now. Read per call, never cached, because the crypto layer reads it late too.
+</ResponseField>
+
+<ResponseField name="secureRandomSource()" type="'global' | 'node:webcrypto' | 'none'">
+  Where the RNG came from. `'node:webcrypto'` means the SDK's own shim supplied it and the runtime did not.
+</ResponseField>
+
+<ResponseField name="nodeSatisfiesEngines(version?)" type="boolean">
+  Whether a version string satisfies `^20.19.0 || >=22.12.0`. Defaults to `process.version`. Deliberately lenient about an unparseable version.
+</ResponseField>
+
+The package lists the report probes as constants, which is what you want if you are writing your own preflight check:
+
+<ResponseField name="CRYPTO_PACKAGES" type="readonly string[]">
+  `@noble/ciphers`, `@noble/curves`, `@noble/hashes`. Every bot uses these.
+</ResponseField>
+
+<ResponseField name="TRANSPORT_OPTIONAL_PACKAGES" type="readonly string[]">
+  The two WebTransport packages. Absent is normal.
+</ResponseField>
+
+<ResponseField name="VOICE_OPTIONAL_PACKAGES" type="readonly string[]">
+  `@livekit/rtc-node`. Absent is normal.
+</ResponseField>
+
+<ResponseField name="VOICE_DECODER_EXECUTABLE" type="string">
+  `ffmpeg`. Probed for presence on `PATH` only. The doctor never executes it, so it never reports a version.
+</ResponseField>
+
+<ResponseField name="SDK_PACKAGE_NAME" type="string">
+  `@cloak-software/bot-sdk`. The name the report prints, so your own preflight output can match it.
+</ResponseField>
+
+The report's own types are exported too, for when you store or forward the result:
+
+<ResponseField name="DependencyReport" type="interface">
+  The full report. `dependencyReport()` returns this.
+</ResponseField>
+
+<ResponseField name="DependencyInfo" type="interface">
+  One package row inside a report: its name, whether it resolved, and its version when known.
+</ResponseField>
+
+<ResponseField name="SecureRandomSource" type="type">
+  `'global' | 'node:webcrypto' | 'none'`, the return type of `secureRandomSource()`.
+</ResponseField>
+
+<ResponseField name="DoctorDeps" type="interface">
+  The injection bag both report functions accept as `deps?`. It exists so tests can simulate a broken host. You will not normally pass it.
+</ResponseField>
+
+## Node version
+
+`login()` calls the runtime guard before it opens a socket, so an unsupported host fails immediately with a `CloakEnvironmentError` rather than dying much later inside a key operation.
+
+The supported range is `^20.19.0 || >=22.12.0`. Concretely: 20.x needs 20.19.0 or newer, **21.x never qualifies**, 22.x needs 22.12.0 or newer, and 23 and up qualify.
+
+The reason is the crypto stack, not the transport. HPKE draws randomness from `globalThis.crypto.getRandomValues`, which Node 18 leaves undefined in ESM. The default wire is a plain `wss://` WebSocket over the pure-JS `ws` package and `npm install` compiles nothing, so nothing about the transport imposes a floor.
+
+If the guard fires on a host you believe is running a supported Node, the process is probably not running the Node you installed. `generateDependencyReport()` prints the version the guard actually read.
+
+## Secure random
+
+`crypto.getRandomValues must be defined` means a `@noble/*` call reached for randomness and found none. The SDK installs a `globalThis.crypto` shim at import time, so this should be unreachable through the SDK. It is still reachable from your own code, or from another dependency, on a runtime that has no crypto global.
+
+The tell is the `source` column, not the `available` column:
+
+| `secureRandom` | Meaning |
+| --- | --- |
+| `available (global)` | The runtime supplies it. Healthy. |
+| `available (node:webcrypto)` | The SDK's shim supplied it. The runtime itself has none, so anything outside the SDK that reaches for randomness will fail. |
+| `MISSING` | Nothing supplies it. Every key operation will fail. |
+
+This is the row `node -e` fakes. Run the report from a file.
+
+## Keystore failures
+
+All three of these throw before any real work happens, which is deliberate.
+
+<AccordionGroup>
+  <Accordion title="the keystore (…) exists but is corrupt or unreadable">
+    `login()` refuses to start with a fresh identity, because publication is write-once server-side and regenerating would permanently break decryption. **Restore from a backup.** Clear the store only if you also reset the bot's identity server-side. The message names the store, using whatever your adapter's `describe()` returns.
+  </Accordion>
+  <Accordion title="the server already holds a published identity for this bot">
+    The server has your bot's original identity and the local keystore is new, so the freshly generated identity was rejected. Members wrap conversation keys to the original identity, so this bot could never decrypt anything ("Bad MAC"). Point `keystorePath` or your adapter at the keystore from the bot's first run, or reset the bot's identity server-side. If the message adds that no keystore was configured, there is nothing to restore: reset server-side, then set a keystore so the new identity survives.
+  </Accordion>
+  <Accordion title="a NEW bot identity was generated and stored only in process.env">
+    An `envKeystore` with no `onWrite` hook. The identity is gone the moment the process exits, and the next run's replacement is rejected forever. This warning is printed unconditionally, not behind `debug`, because its only other symptom is a bricked bot on the next restart. Do not run past it. See [Keystore backends](/production/keystore-backends).
+  </Accordion>
+</AccordionGroup>
+
+## Transport failures
+
+Every failure in this section belongs to the **opt-in WebTransport lane**. A bot on the default `wss://` lane can hit none of them, and the fix for all of them is available in one line: drop `transport: 'webtransport'` (and the `https://` url) and the bot connects over a plain WebSocket with no native code at all.
+
+`login()` recognizes these on the **first** connect and rethrows them as a `CloakEnvironmentError` carrying a `remedy`, which is one actionable paragraph about the machine rather than the code. Anything it does not recognize propagates unchanged. Reconnects keep their normal backoff and log the remedy under `debug`.
+
+```ts
+import { CloakEnvironmentError, generateDependencyReport } from '@cloak-software/bot-sdk';
+
+try {
+  await client.login();
+} catch (e) {
+  if (e instanceof CloakEnvironmentError) {
+    console.error(e.message);
+    console.error(e.remedy);
+    console.error(generateDependencyReport());
+  }
+  throw e;
+}
+```
+
+You can run the same recognizer over any error yourself:
+
+```ts
+import { diagnoseTransportError } from '@cloak-software/bot-sdk';
+
+const env = diagnoseTransportError(err);
+if (env) console.error(env.message, env.remedy);
+// null means "not a recognized host failure": rethrow the original untouched.
+```
+
+| Signature | Diagnosis |
+| --- | --- |
+| `GLIBC_` in the message or a `cause` | The Quiche native addon needs glibc >= 2.38. Ubuntu 24.04 ships 2.39. Debian bookworm ships 2.36 and is the default family for most Node PaaS images. |
+| `A number was expected` | The WebTransport JS package and the Quiche addon are at skewed versions. Pin **both** to the same exact version, no `^` and no `~`, and add an `overrides` block if the lockfile still disagrees. |
+| `serverCertificateHashes is not an array` | The option was passed with a non-array value. Hosted Cloak uses a public CA certificate, so omit the option entirely rather than passing `undefined`. |
+| `Cannot find package '@fails-components/…'` | The lane was requested but its optional packages are not installed. They are `optionalDependencies`, so a failed native build does not fail `npm install`. Check the install log. |
+
+`diagnoseTransportError` flattens the whole `cause` chain before matching, because the transport wraps the real failure.
+
+## Login rejections
+
+Login failures arrive as codes, not as thrown exceptions once the bot is running. They emit `disconnect`.
+
+| Code | Meaning | Behavior |
+| --- | --- | --- |
+| `-2` | Bad credentials: the token was revoked or regenerated | **Terminal.** The reconnect loop stops. |
+| `-12` | This SDK is below the backend's minimum wire version | **Terminal.** The reconnect loop stops. Update `@cloak-software/bot-sdk` and redeploy. |
+| `-8` | Transient backend error | Keeps retrying with the usual backoff. |
+
+On a terminal rejection the SDK emits `disconnect` and stops. It does not throw, and it does not exit your process, so a bot that only supervises on exit will sit there alive and idle. If you want your supervisor to notice, exit from the handler:
+
+```ts
+client.on('disconnect', (e: unknown) => {
+  const code = (e as { loginCode?: unknown } | null)?.loginCode;
+  if (code === -2 || code === -12) {
+    console.error('[cloak] terminal login rejection', code, '- not retrying');
+    process.exit(1);
+  }
+  console.warn('[cloak] disconnected, reconnecting', e);
+});
+```
+
+Restarting will not fix either terminal code. A `-2` needs a new token, and a `-12` needs a newer SDK. See [What the server must support](/production/backend-requirements) for the gate behind `-12`.
+
+## Key acquisition
+
+`Timed out acquiring key for server …` means the bot asked for a server's conversation key and nobody answered inside the window. Your bot never generates a server key: a human member's client wraps it and uploads it.
+
+Common causes, roughly in order:
+
+1. **No human client was online to answer.** The wrap depends on one online member's client responding to a push. The SDK re-arms while it waits, but an empty server has nobody to ask.
+2. **A peer is on a pre-HPKE client.** When the SDK sees an old-format wrap it appends the peer's id and a cutover hint to the timeout message. That client must upgrade before the bot can hold a key for that server.
+3. **The bot's identity was never published, or was published under a different bot id.** Check the keystore section above.
+4. **No secure RNG.** This is the failure mode that looks like a 20 second timeout instead of an obvious crypto error. Run the dependency report.
+
+## Reading a live bot
+
+A bot that starts and then behaves strangely needs a different set of tools.
+
+### Listen for `error`
+
+This is the single funnel for failures the SDK catches and keeps going from. Without a listener they stay silent by design.
+
+```ts
+import type { CloakClientError } from '@cloak-software/bot-sdk';
+
+client.on('error', (e: CloakClientError) => {
+  console.error(e.source, e.context ?? '', e.message);
+  console.error(e.cause); // the original failure, unwrapped
+});
+```
+
+| `source` | What failed |
+| --- | --- |
+| `listener` | One of your own handlers threw, or returned a promise that rejected. `context` is the event name. |
+| `frame` | An inbound frame could not be dispatched. |
+| `keys` | A key pull, a wrapped-key fetch, or an unwrap failed. |
+
+Three things to know:
+
+- **A handler that throws no longer disappears**, `async` handlers included. The SDK wraps every listener at registration, so a rejected promise surfaces here. Dispatch continues either way.
+- **Registering the listener changes no control flow.** It only makes failures visible.
+- **Because listeners are wrapped, `client.listeners(event)` returns the wrappers, not your original functions.** `off()`, `removeListener()` and `removeAllListeners()` all still work: pass the same function you registered.
+
+Backend denials do not come through here. An awaited action rejects with `CloakActionError`, and a rejected send fires `sendRejected`.
+
+### Listen for `sendRejected`
+
+`send()` is fire-and-forget. Its promise resolves when the frame goes out, so a server-side denial can only arrive as an event.
+
+```ts
+client.on('sendRejected', (r) => {
+  console.error('send rejected', r.code, r.message, r.permission ?? '');
+  // serverId/channelId are attributed best-effort from the most recent send
+  // and are null when the attribution is stale. Treat them as a hint.
+});
+```
+
+Silence is not an acknowledgement. A send that produced no `sendRejected` is not proven delivered.
+
+### Turn on `debug`
+
+```ts
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json',
+  debug: process.env.CLOAK_DEBUG === '1',
+});
+```
+
+`debug: true` logs every frame in and out. The bot token is redacted. It is verbose enough that you want it behind an environment variable rather than on permanently.
+
+### Resolve stack traces
+
+The published `dist/` is minified, but the package ships source maps, so run with:
+
+```bash
+node --enable-source-maps bot.js
+```
+
+A trace then resolves to a real source position instead of `index.js:1:8321`. The maps carry positions only, no source text.
+
+### Watch the wire
+
+`client.raw` is the escape hatch for opcodes the SDK does not map, and the `raw` event is its read side: every inbound frame, verbatim, including the ones the SDK consumes itself. It is a firehose, and it is only emitted when something is listening.
+
+```ts
+client.on('raw', (frame) => {
+  console.log('<-', JSON.stringify(frame).slice(0, 400));
+});
+```
+
+<Note>
+  `ClientOptions.internals` is a test seam for injecting fakes, not stable API. Do not build on it.
+</Note>
+
+## What to put in a bug report
+
+<Steps>
+  <Step title="The dependency report">
+    Run it from a file and paste the whole output. It is the first thing anyone will ask for.
+  </Step>
+  <Step title="The exact error text">
+    Including the `remedy` if it is a `CloakEnvironmentError`, and the `cause` if it is a `CloakClientError`.
+  </Step>
+  <Step title="Which lane you are on">
+    Default `wss://`, or `transport: 'webtransport'`. Almost every host failure belongs to the second.
+  </Step>
+  <Step title="Which keystore backend">
+    `keystorePath`, `envKeystore`, a custom adapter, or none.
+  </Step>
+  <Step title="A debug frame log around the failure">
+    A few frames either side of the moment it went wrong, with the token still redacted by `debug` as it is by default.
+  </Step>
+</Steps>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Known limitations" icon="triangle-exclamation" href="/production/known-limitations">
+    Things that are broken on purpose, so you stop debugging them.
+  </Card>
+  <Card title="What the server must support" icon="server" href="/production/backend-requirements">
+    Failures your bot cannot detect, because they are server-side.
+  </Card>
+  <Card title="Keystore backends" icon="database" href="/production/keystore-backends">
+    Fixing the keystore errors above for good.
+  </Card>
+  <Card title="Errors" icon="circle-exclamation" href="/api-reference/errors">
+    The full error class reference.
+  </Card>
+</CardGroup>

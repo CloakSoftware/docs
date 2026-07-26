@@ -1,9 +1,9 @@
 ---
 title: "Message delivery"
-description: "Your bot hears from every channel it can view, with no per-channel subscription. This is the firehose."
+description: "Your bot hears from every channel it can view, plus its direct messages, with no per-channel subscription. This is the firehose."
 ---
 
-Most chat SDKs make you subscribe to channels one at a time. Cloak does not. When your bot logs in, it starts receiving the live messages of every channel it is permitted to view, across every server it belongs to. This is called the **firehose**.
+Most chat SDKs make you subscribe to channels one at a time. Cloak does not. When your bot logs in, it starts receiving the live messages of every channel it is permitted to view, across every server it belongs to. It also receives its own 1:1 direct messages. This is called the **firehose**.
 
 ## You do not subscribe to channels
 
@@ -11,27 +11,80 @@ Once your bot is running, `messageCreate` fires for messages in any channel it c
 
 ```ts
 client.on('messageCreate', (msg) => {
-  // msg.serverId and msg.channelId tell you where this arrived.
-  if (msg.content.trim() === '!ping') {
-    msg.reply('pong'); // replies into the same channel it came from
+  if (msg.authorId === client.user?.id) return; // skip our own echo
+  if (msg.content.trim() !== '!ping') return;
+  // A plain answer. Use msg.reply() only when you want a real reply.
+  msg.channel.send('pong').catch(console.error);
+});
+```
+
+A single `!ping` handler answers in every channel of every server the bot is in, and in DMs. No channel needs to be selected ahead of time.
+
+<Tip>
+  `msg.channel.send()` is a plain send. `msg.reply()` is a true reply: it renders the quote header and fires a "replied to you" notification that pierces mutes. For a bot that is just answering, `channel.send()` is the right call.
+</Tip>
+
+## Direct messages arrive here too
+
+Inbound 1:1 DMs come through the same `messageCreate` event. There is no second event and no separate listener to register.
+
+A DM message differs in three ways:
+
+- `isDM` is `true`.
+- `serverId` is `null`. A direct message has no server at all.
+- `channelId` equals `dmId`. This is deliberate, so `msg.reply()` and `msg.channel.send()` keep working on a DM without your code branching.
+
+<Warning>
+  `Message.serverId` is `string | null`. Guard it before anything server-scoped. `client.can('message_send', msg.serverId)` does not type-check without a guard, and `client.send(msg.serverId, ...)` would post into nowhere.
+</Warning>
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+
+  if (msg.isDM) {
+    await msg.channel.send('I only take commands in a server.');
+    return;
+  }
+  if (!msg.serverId) return; // narrows the type for everything below
+
+  if (client.can('message_send', msg.serverId)) {
+    await msg.channel.send('pong');
   }
 });
 ```
 
-A single `!ping` handler answers in every channel of every server the bot is in. No channel needs to be selected ahead of time.
+Outbound DMs are `client.sendDM(userId, text, opts?)`, which opens the DM and exchanges its key on first contact. Eligibility is the server's decision and is deny-by-default. See [Direct messages](/guides/direct-messages).
 
 ## Every message knows where it belongs
 
-A `messageCreate` `Message` carries the source location on its payload:
+A `messageCreate` `Message` carries its source location on the payload:
 
-| Field | Meaning |
-| --- | --- |
-| `serverId` | The server the message came from. |
-| `channelId` | The channel within that server. |
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `serverId` | `string \| null` | The source server, or `null` when `isDM` is true. |
+| `channelId` | `string` | The channel. For a DM this is the dm id. |
+| `isDM` | `boolean` | True when this arrived as a direct message. |
+| `dmId` | `string \| null` | The dm id for a DM, `null` otherwise. Always equal to `channelId` when set. |
 
 The SDK tracks the channel's group internally, so `msg.reply()` and `msg.channel.send()` already know where to go. You only reach for [`client.send()`](/api-reference/client#send) when you want to send somewhere other than where a message arrived.
 
-A `systemMessage` additionally carries a `groupId`, since a member join can happen in a channel the bot has not seen traffic from yet. Pass it to `send()` so the reply lands in the right place. See [SystemMessageEvent](/api-reference/types#systemmessageevent).
+A `systemMessage` additionally carries a `groupId`, since a member join can happen in a channel the bot has not seen traffic from yet. Pass it through `SendOptions` so the reply lands in the right place:
+
+```ts
+client.on('systemMessage', (evt) => {
+  if (evt.type !== 'member_join') return;
+  client
+    .send(evt.serverId, evt.channelId, `Welcome, ${evt.actorName || 'friend'}!`, {
+      groupId: evt.groupId,
+    })
+    .catch(console.error);
+});
+```
+
+<Warning>
+  `send()`, `reply()`, and `channel.send()` take an options object as their last argument. The old positional `groupId` was removed in 0.2.0. Write `send(serverId, channelId, text, { groupId })`, never `send(serverId, channelId, text, groupId)`.
+</Warning>
 
 ## Delivery is view-gated
 
@@ -50,7 +103,23 @@ const channels = client.visibleChannelIds(serverId);
 console.log(`Bot can view ${channels.length} channels in ${serverId}`);
 ```
 
-See [`visibleChannelIds()`](/api-reference/client#visiblechannelids) for details.
+`visibleChannelIds()` returns an empty array when no permission verdict has arrived for that server yet. See [`visibleChannelIds()`](/api-reference/client#visiblechannelids).
+
+## Sending is fire-and-forget
+
+Delivery out has a failure path that delivery in does not.
+
+`send()`, `reply()`, `channel.send()`, and `sendCard()` resolve as soon as the frame goes out. They are not acknowledgement channels. A server-side denial does **not** reject the promise. It arrives later on the `sendRejected` event.
+
+```ts
+client.on('sendRejected', ({ code, message, permission, channelId }) => {
+  console.warn(`send denied (${code}): ${message}`, { permission, channelId });
+});
+```
+
+`permission` names the permission the bot was missing, when the code maps to one. `serverId` and `channelId` are attributed best-effort from the most recent send within 30 seconds and are `null` otherwise, so treat them as a hint rather than a fact.
+
+Awaited actions behave differently. `react()`, `delete()`, `kick()`, and the rest reject with a `CloakActionError` when the server denies them. Only the send lane is fire-and-forget.
 
 ## Pre-selecting a channel is optional
 
@@ -60,22 +129,68 @@ You almost never need to select a channel, because the firehose already delivers
 await client.watch(serverId, channelId);
 ```
 
-`watch()` is remembered and re-established automatically after a reconnect. If you are just replying to messages as they arrive, you can ignore it entirely.
+The full signature is `watch(serverId, channelId, groupId?)`. The group is auto-resolved from the server's channel list, so pass it only to skip that resolution round trip.
+
+`watch()` is remembered and re-established automatically after a reconnect. What is remembered is the value you passed, so an auto-resolved group is re-resolved from a fresh cache rather than pinned.
+
+<Note>
+  A `watch()` target is only a preference. If the watched channel was deleted or is no longer selectable while the bot was offline, the SDK drops the watch and continues on the firehose rather than failing the reconnect. A working bot never gets stranded over an optional pre-selection.
+
+  On a fresh `login()`, the SDK also reconciles the watch against the server list. If the watched **server** is gone (the bot was kicked while it was down), it fires `guildDelete` and clears the target.
+</Note>
 
 ## More than messages
 
-The firehose delivers more than new messages. Edits, deletions, reactions, pins, and channel or group changes all arrive as [events](/api-reference/events) too, each carrying its source location the same way.
+The firehose delivers more than new messages. Message edits and deletions, reactions, pins, and channel, group, or server lifecycle changes all arrive as [events](/api-reference/events). Those carry `serverId` and `channelId` the same way a message does.
 
-One thing to keep in mind: these events fire for the bot's own actions as well. When your bot deletes a message, its own `messageDelete` handler runs. Filter by author or actor id where that matters, the same way you skip your bot's own messages in `messageCreate`.
+Three exceptions are worth knowing before you build on them.
+
+<AccordionGroup>
+  <Accordion title="typing carries no location">
+    The `typing` event has `serverId` and `channelId` **always null** today. That is a wire fact, not a decoding gap: the source channel travels in the server's fanout envelope and never reaches the frame. Do not substitute the bot's own selection cursor, which points wherever the bot last sent and has nothing to do with who is typing.
+
+    `typing` is also raw and un-debounced, with no expiry timer, and it fires for the bot's own `sendTyping()` calls. Hold your own map and expire an entry roughly 10 seconds after its last `true` if you want a "who is typing right now" view.
+  </Accordion>
+  <Accordion title="Voice roster events are not firehose">
+    `voiceJoin`, `voiceLeave`, `voiceStateUpdate`, and `voiceConnectionState` are cursor-gated. A bot sees them only for the server it currently has selected or is in voice in. Do not build on them as a firehose. `refreshVoiceRoster(serverId)` forces a fresh snapshot.
+  </Accordion>
+  <Accordion title="Lifecycle events on non-selected servers need a current backend">
+    Routing channel, group, and server lifecycle hooks to a bot for a server it does not have selected requires a Cloak backend carrying the membership-routed server hooks. Against an older backend those events fall back to the bot's currently selected server.
+  </Accordion>
+</AccordionGroup>
+
+### Your bot's own actions come back
+
+These events fire for the bot's own actions as well. When your bot deletes a message, its own `messageDelete` handler runs. When it reacts, its own `reactionUpdate` handler runs. Filter by author or actor id where that matters, the same way you skip your bot's own messages in `messageCreate`.
+
+### Content that cannot be decrypted comes back empty
+
+`messageUpdate.content` and `msg.repliedTo.content` decrypt best-effort. When the key is missing or stale, they are `''`. They are never raw ciphertext, so a blank string means "could not read", not "the user sent nothing".
+
+### Slash-command invocations ride the same event
+
+When an inbound message is a slash-command invocation your registry recognises, the SDK sets `msg.command` and dispatches your handler. If your `messageCreate` handler also does its own text parsing, filter them out:
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.command) return; // already dispatched to a command handler
+  // ...your own text handling
+});
+```
+
+See [Slash commands](/guides/slash-commands).
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Permissions" icon="key" href="/concepts/permissions">
-    What decides which channels are visible.
+    What decides which channels your bot can view.
   </Card>
   <Card title="Events" icon="bell" href="/api-reference/events">
-    Every event the firehose can deliver.
+    Every event the firehose can deliver, with payloads.
+  </Card>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    The DM lane, and what behaves differently there.
   </Card>
   <Card title="Connection lifecycle" icon="arrows-rotate" href="/concepts/connection-lifecycle">
     Reconnects, and what carries across them.

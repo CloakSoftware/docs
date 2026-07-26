@@ -1,0 +1,290 @@
+---
+title: "Rich cards"
+description: "Post an encrypted rich card under your bot's own identity with sendCard()."
+---
+
+`client.sendCard()` puts a rich card on screen without giving up end-to-end encryption and without giving up your bot's identity. The card is encrypted with the same conversation key and the same epoch as the message body, and it rides the ordinary message frame. The server stores it as ciphertext it cannot read. It renders under your bot's own member identity, with the BOT badge and no "not encrypted" notice.
+
+This is the embed lane to default to. The other one is [webhook embeds](/guides/webhook-embeds), which is plaintext server-side.
+
+## Which lane do you want?
+
+Two embed paths exist, with opposite privacy properties. Pick from this table before you write any code.
+
+| | `sendCard()` | `sendEmbed()` and `webhooks.post()` |
+| --- | --- | --- |
+| Encryption | End-to-end, same key and epoch as the body | Plaintext server-side |
+| Identity | Your bot's own, with the BOT badge | A webhook persona |
+| Permission | `message_send`, nothing else | `manage_server` to mint one |
+| Quota | None | 10 creations per account per hour, 15 per channel |
+| Transport | The ordinary message frame | HTTPS POST to the webhook ingress |
+| Server config needed | None | `WEBHOOK_INGRESS_PORT`, `WEBHOOK_PUBLIC_BASE`, an image proxy |
+| Media | Cloak-hosted only | Any URL, rewritten through the server's proxy |
+| Replies and mentions | Yes | No |
+| Per-post persona | No | Yes (`username`, `avatar_url`) |
+| Your bot sees it come back | Yes, as `messageCreate` | No |
+
+**Default to `sendCard()`.** Reach for the webhook lane only when you need one of the three things it alone can do: many personas from one identity, posting with no bot account at all, or reaching clients older than the card rollout.
+
+The two are impossible to confuse by accident. `UnencryptedWebhookPost` requires a literal `unencrypted: true`, and `CardMessage` declares `unencrypted`, `username` and `avatar_url` as `never`, so handing a webhook payload to `sendCard()` is a compile error. `assertCardMessage()` re-checks the same thing at runtime and names the other method, for callers with no compiler.
+
+## Post a card
+
+```ts
+await client.sendCard(serverId, channelId, {
+  content: 'Build #4821 passed on main', // required, and genuine text
+  embed: {
+    title: 'Build #4821 passed',
+    description: '42 tests, 0 failures\nmain @ 9f2a1c, 1m 12s',
+    color: '#22c55e', // or a decimal int, 0x22c55e
+    url: 'https://ci.example.com/runs/4821',
+  },
+});
+```
+
+`sendCard(serverId, channelId, card)` returns `Promise<void>`. The same method is pre-bound on the [server handle](/guides/guild-handle) as `client.guild(serverId).sendCard(channelId, card)`.
+
+It needs `message_send` and nothing else. No webhook, no `manage_server`, no creation quota, and no server-side configuration.
+
+<Note>
+  The advisory `embed_link` permission is not consulted, and structurally cannot be. The server never sees an embed to gate, because it cannot read the payload.
+</Note>
+
+### Where the card goes
+
+`CardMessage` carries the same routing options as [`SendOptions`](/guides/sending-messages), inside the card object rather than as a fourth argument:
+
+<ParamField path="content" type="string" required>
+  Genuine human-readable text. See [content is required](#content-is-required-and-it-is-not-a-shim).
+</ParamField>
+
+<ParamField path="embed" type="BotEmbed" required>
+  Exactly one embed. Clients render one card per message, so an array would let you ship rows that are silently discarded.
+</ParamField>
+
+<ParamField path="groupId" type="string">
+  The channel's group, when the SDK has not already cached it from an inbound frame.
+</ParamField>
+
+<ParamField path="mentions" type="MentionTarget[]">
+  Who to notify. These targets ride the wire in plaintext, exactly as on `send()`: the server routes notification fanout without decrypting anything.
+</ParamField>
+
+<ParamField path="replyTo" type="ReplyTarget">
+  Make the card a true reply. It renders the quote header and fires a "replied to you" notification that pierces mutes. Leave it off when the card is just an answer.
+</ParamField>
+
+### Cards are server-only in v1
+
+A direct message has no server, so `msg.serverId` is `null` on every DM. Guard before you use it:
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.isDM || !msg.serverId) return;
+  // msg.serverId is a string from here on
+});
+```
+
+DM cards are not in v1: a DM key is unepoched by wire contract, so it would need a second encryption site. Reading cards back is not in v1 either. An inbound card arrives as an ordinary `messageCreate` carrying its `content`, and the SDK does not decode the embed for you.
+
+## Content is required, and it is not a shim
+
+`CardMessage.content` must be non-blank genuine text, and the SDK will never synthesize it. It is what history and full-text search index. It is what push notifications and channel previews are built from. It is what a reply quoting the card renders. It is what every surface not wired to the card renderer shows: an export, a new client, the next partial rollout.
+
+A card with blank content is a permanently unfindable, unquotable, preview-less message.
+
+`embedFallbackText(embed)` is the opt-in helper. It returns the title, else the first non-blank line of the description, else the embed url, capped at 256 characters. It throws on an image-only embed rather than inventing a placeholder.
+
+```ts
+import { embedFallbackText } from '@cloak-software/bot-sdk';
+
+const embed = { title: 'Build #4821 passed', color: 0x22c55e };
+await client.sendCard(serverId, channelId, {
+  content: embedFallbackText(embed), // "Build #4821 passed"
+  embed,
+});
+```
+
+## Media must be Cloak-hosted
+
+The four slots a card fetches with no user action are `image.url`, `thumbnail.url`, `author.icon_url` and `footer.icon_url`. Each must have origin exactly `https://media.cloak.chat`. Anything else throws `CloakEmbedError` with `reason: 'media-host'` locally, before a frame leaves your process.
+
+<Warning>
+  There is no option, environment variable or flag that widens the allowed origin, and there will not be one. An SDK that accepted an origin the client strips would manufacture the exact silent failure the rule prevents: a card that sends fine and renders blank.
+</Warning>
+
+Rendering a card fetches its media, which reveals the viewer's IP address to whoever hosts the URL. On this lane that URL is chosen by a third-party bot author, who could also serve different bytes to different viewers or swap the content after the fact, with no new message for moderation to see. Discord solves this by proxying all embed media and rewriting URLs at send time. Cloak's server cannot rewrite anything here, because it cannot read the encrypted embed at all. Refusing third-party media is cheaper than a proxy and strictly stronger.
+
+The **link** slots (`url`, `author.url`, `provider.url`) are unrestricted `http(s)`. Nothing is fetched for them at render, they are tap targets. Link to your docs or your CI freely.
+
+Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. All three are already on that origin. The SDK cannot upload one for you. The common status-card case (title, description, color, a link) needs no media at all.
+
+Check a URL yourself with the two exported helpers:
+
+```ts
+import { isCloakMediaUrl, CLOAK_MEDIA_ORIGIN } from '@cloak-software/bot-sdk';
+
+isCloakMediaUrl('https://media.cloak.chat/uploads/a/logo.png'); // true
+isCloakMediaUrl('https://example.com/logo.png');                // false
+CLOAK_MEDIA_ORIGIN;                                             // 'https://media.cloak.chat'
+```
+
+## Caps
+
+Every cap mirrors the client renderer. Where the renderer truncates or strips a value, `sendCard()` rejects it. A truncated title is a real degradation you would never learn about, and the server cannot tell you anything because it cannot read the payload.
+
+| Field | Type | Cap |
+| --- | --- | --- |
+| `title` | `string` | 256 |
+| `description` | `string` | 2048, plain text and not markdown |
+| `url` | `string` | 2048, link slot |
+| `color` | `number \| string` | integer `0..0xffffff`, or `#rrggbb` |
+| `timestamp` | `string` | 64, ISO-8601 |
+| `author.name`, `provider.name` | `string` | 256 |
+| `author.url`, `provider.url` | `string` | 2048, link slots |
+| `author.icon_url`, `footer.icon_url` | `string` | 2048, media slots |
+| `thumbnail.url`, `image.url` | `string` | 2048, media slots |
+| `footer.text` | `string` | 256 |
+| `fields` | `BotEmbedField[]` | 8 rows |
+| `fields[].name` | `string` | 128 |
+| `fields[].value` | `string` | 512 |
+| Whole payload | JSON | 8 KiB, measured in UTF-8 bytes |
+
+Every value is also exported as a constant. See the [embeds reference](/api-reference/embeds#constants).
+
+An embed must have something renderable, or `sendCard()` throws with `reason: 'empty'`. At least one of `title`, `description`, `thumbnail`, `image`, `author.name`, `provider.name`, `footer.text` or `fields` is required. A card carrying only `url`, `color` and `timestamp` draws nothing at all.
+
+### Fields are desktop-only today
+
+<Warning>
+  `embed.fields` render on desktop only. Mobile drops the rows silently, with no error anywhere and nothing for you to notice. The fields grid is not ported yet.
+
+  Put anything a reader must actually see in `description`, and treat `fields` as decoration until the port lands.
+</Warning>
+
+```ts
+const embed = {
+  title: 'Build #4821 passed',
+  // Every mobile user sees this line. Keep the substance here.
+  description: '42 tests, 0 failures\nmain @ 9f2a1c, 1m 12s',
+  fields: [
+    { name: 'Duration', value: '1m 12s', inline: true },
+    { name: 'Commit', value: '9f2a1c', inline: true },
+  ],
+};
+```
+
+`inline: true` renders the row side by side. `false` is the same as omitting it.
+
+## Three things that do not exist on this lane
+
+Each of these is rejected outright, so you learn at development time rather than shipping a card that renders wrong.
+
+<AccordionGroup>
+  <Accordion title="video">
+    Removed from this lane entirely, not merely restricted to Cloak-hosted media. Desktop renders an embed video inside a sandboxed iframe that allows scripts and same-origin, so a bot-chosen origin would get script execution beside the app. Passing `video` throws.
+  </Accordion>
+  <Accordion title="provider.icon">
+    Cards fetch it, and this lane is deliberately kept out of that fetch site. Use `author.icon_url`, which is a Cloak-hosted media slot.
+  </Accordion>
+  <Accordion title="Unknown keys">
+    The renderer drops them while they still count against the payload budget, so `sendCard()` rejects them instead. `BotEmbed` has no index signature.
+  </Accordion>
+</AccordionGroup>
+
+## Errors
+
+`sendCard()` validates, encrypts and caps the card before it touches the connection cursor, so an invalid card fails without sending anything. The rejection is a `CloakEmbedError` carrying `reason` and the exact offending path in `field`.
+
+```ts
+import { CloakEmbedError } from '@cloak-software/bot-sdk';
+
+try {
+  await client.sendCard(serverId, channelId, card);
+} catch (e) {
+  if (e instanceof CloakEmbedError) {
+    // e.reason: 'shape' | 'content' | 'cap' | 'media-host' | 'empty' | 'wire-cap'
+    // e.field:  'embed.image.url', 'embed.fields[3].value', or undefined
+    console.error(`card refused (${e.reason}) at ${e.field ?? 'the payload'}: ${e.message}`);
+    return;
+  }
+  throw e;
+}
+```
+
+<Warning>
+  Sending is fire-and-forget once the frame is on the wire. A server-side denial does not reject the promise, it arrives on the `sendRejected` event. Code `-11` there means a message sidecar went over the server's 16 KiB wire cap. The local caps exist so that failure is a synchronous throw you can catch instead of an event you have to correlate.
+</Warning>
+
+## A card also suppresses link unfurling
+
+The bot embed wins, and the unfurl runner skips the row. A URL in `content` gets no preview card of its own. Put the link in the embed instead, on `embed.url`.
+
+## A complete card bot
+
+```ts
+import { Client, CloakEmbedError, embedFallbackText } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Without a keystore this bot works once and is bricked on its second run.
+  // See /concepts/keys-and-keystore.
+  keystorePath: './card-bot.cloak-keystore.json',
+  requiredPermissions: ['view_text', 'message_send'],
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.isDM || !msg.serverId) return; // cards are server-only in v1
+  if (msg.content.trim() !== '!build') return;
+
+  const embed = {
+    title: 'Build #4821 passed',
+    description: ['42 tests, 0 failures', 'main @ 9f2a1c, 1m 12s'].join('\n'),
+    color: '#22c55e',
+    url: 'https://ci.example.com/runs/4821',
+    footer: { text: 'ci.example.com' },
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    await client.sendCard(msg.serverId, msg.channelId, {
+      content: embedFallbackText(embed),
+      embed,
+    });
+  } catch (e) {
+    if (e instanceof CloakEmbedError) {
+      console.error(`card refused (${e.reason}) at ${e.field ?? 'the payload'}`);
+      return;
+    }
+    throw e;
+  }
+});
+
+client.on('sendRejected', (r) => console.warn('server refused a send', r.code, r.message));
+client.on('error', (e) => console.error('sdk error', e));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+The SDK ships this as a runnable example with more commentary, including a command that demonstrates the media rejection on purpose. Run it with `npm run example:card`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Cards and embeds reference" icon="code" href="/api-reference/embeds">
+    Every type, helper, error reason and constant on this lane.
+  </Card>
+  <Card title="Webhook embeds" icon="triangle-exclamation" href="/guides/webhook-embeds">
+    The other lane, which is not end-to-end encrypted.
+  </Card>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    Plain text sends, replies, and what fire-and-forget means.
+  </Card>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why every bot you actually run needs a keystore.
+  </Card>
+</CardGroup>

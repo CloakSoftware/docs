@@ -1,0 +1,232 @@
+---
+title: "REST client"
+description: "client.rest, the RestClient class, and every type and constant on the HTTP lane."
+---
+
+The REST lane reaches cloak-rest-api with a short-lived credential minted over the realtime session. For how it works and why it exists, see [The REST lane](/guides/rest-api).
+
+<Warning>
+  The lane is off by default server-side. Until an operator sets `BOT_REST_CREDENTIALS`, the first call rejects with a `CloakActionError` on opcode 638 with code `-7`.
+</Warning>
+
+```ts
+import { RestClient, REST_CREDENTIAL_SKEW_MS, VERIFY_SESSION_PATH, DEFAULT_REST_URL } from '@cloak-software/bot-sdk';
+import type {
+  RestApi,
+  MintedSession,
+  RestCredential,
+  RestClientOptions,
+  RestRequestInit,
+  RestResponseLike,
+  RestFetch,
+} from '@cloak-software/bot-sdk';
+```
+
+## client.rest
+
+```ts
+get rest(): RestApi
+```
+
+The lane hanging off a `Client`. Constructed lazily on first access, and it reuses the client's `restUrl` and `debug` options.
+
+### RestApi
+
+```ts
+interface RestApi {
+  request(method: string, path: string, init?: RestRequestInit): Promise<RestResponseLike>;
+  json<T = unknown>(method: string, path: string, init?: RestRequestInit): Promise<T>;
+  binary(
+    method: string,
+    path: string,
+    init?: RestRequestInit,
+  ): Promise<{ bytes: Uint8Array; header(name: string): string | null }>;
+}
+```
+
+<ResponseField name="request" type="method, path, init?">
+  One authenticated request. Resolves the raw response on 2xx and throws `CloakRestError` otherwise. `path` is origin-relative and includes its mount prefix, for example `/api/files/list` or `/auth/verify-session`.
+</ResponseField>
+
+<ResponseField name="json" type="method, path, init?">
+  `request()` plus a JSON body parse. An empty 2xx body resolves as `null`. A non-JSON body throws `CloakRestError`.
+</ResponseField>
+
+<ResponseField name="binary" type="method, path, init?">
+  `request()` plus the raw bytes and a response-header reader. This is the attachment-download shape, where the wrapped file key and IV ride response headers alongside the ciphertext.
+</ResponseField>
+
+## RestRequestInit
+
+Per-request extras.
+
+<ParamField path="body" type="string">
+  The request body, already serialized.
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Extra request headers, as a `Record<string, string>`.
+</ParamField>
+
+<Note>
+  The `userid` and `verification` auth headers are added by the lane and set last, so a caller cannot override them.
+</Note>
+
+## RestClient
+
+```ts
+class RestClient {
+  constructor(opts: RestClientOptions);
+  credential(): Promise<RestCredential>;
+  request(method: string, path: string, init?: RestRequestInit): Promise<RestResponseLike>;
+  json<T = unknown>(method: string, path: string, init?: RestRequestInit): Promise<T>;
+  binary(method: string, path: string, init?: RestRequestInit): Promise<{ bytes: Uint8Array; header(name: string): string | null }>;
+}
+```
+
+The class behind `client.rest`. It is exported for custom lanes and test doubles. A normal bot uses `client.rest` and never constructs one.
+
+It holds the derived credential, mints it on demand behind a single-flight latch that covers both phases, and refreshes it inside a skew window. The credential is dropped only on a `401`, never on a realtime reconnect, because it is time-bound rather than session-bound.
+
+<Warning>
+  `credential()` returns the derived `verification` value. `Client` deliberately exposes no accessor for it. If you call it, you are holding live session material: do not log it, do not persist it, do not put it in an error.
+</Warning>
+
+### RestClientOptions
+
+<ParamField path="baseUrl" type="string" required>
+  The REST origin, for example `https://api.cloak.chat`. Validated at construction. `https` is required except for `localhost`, `127.0.0.1` and `::1`.
+</ParamField>
+
+<ParamField path="mintSession" type="() => Promise<MintedSession>" required>
+  Phase one, injected. `Client` owns this because only the transport can speak an opcode.
+</ParamField>
+
+<ParamField path="fetchImpl" type="RestFetch">
+  An injected `fetch`. Defaults to `globalThis.fetch`.
+</ParamField>
+
+<ParamField path="now" type="() => number">
+  An injected clock, for tests.
+</ParamField>
+
+<ParamField path="debug" type="boolean">
+  Print a redacting one-line trace per request: method, path and status only.
+</ParamField>
+
+## Types
+
+### MintedSession
+
+What opcode 638 hands back, phase one of the mint.
+
+<ResponseField name="userId" type="string">
+  A dashed uuid string, verbatim off the wire. Never normalized: both digests hash the id exactly as the caller sent it.
+</ResponseField>
+
+<ResponseField name="tokenId" type="string">
+  A dashed uuid string, verbatim off the wire.
+</ResponseField>
+
+<ResponseField name="secret" type="string">
+  The one-time secret. It leaves the server exactly once and is exchanged for the header immediately, then dropped. Never persisted, never logged, never sent as a header.
+</ResponseField>
+
+<ResponseField name="expiresAtMs" type="number">
+  Absolute expiry of the credential row, in milliseconds.
+</ResponseField>
+
+### RestCredential
+
+Phase two's output, and the only thing the request path ever holds.
+
+<ResponseField name="userId" type="string">
+  The same string as `MintedSession.userId`, byte for byte.
+</ResponseField>
+
+<ResponseField name="verification" type="string">
+  The derived request header.
+</ResponseField>
+
+<ResponseField name="expiresAtMs" type="number">
+  Absolute expiry, in milliseconds.
+</ResponseField>
+
+### RestResponseLike
+
+The slice of a `fetch` Response the lane reads. `globalThis.fetch`'s Response satisfies it structurally, and so does a small test double.
+
+```ts
+interface RestResponseLike {
+  status: number;
+  headers: { get(name: string): string | null };
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+```
+
+### RestFetch
+
+```ts
+type RestFetch = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body?: string },
+) => Promise<RestResponseLike>;
+```
+
+## Constants
+
+<ResponseField name="DEFAULT_REST_URL" type="string">
+  `'https://api.cloak.chat'`. A different service from the opcode wire, so `url` and `restUrl` are set independently.
+</ResponseField>
+
+<ResponseField name="VERIFY_SESSION_PATH" type="string">
+  `'/auth/verify-session'`. The bootstrap endpoint, mounted at `/auth` and not under `/api`. It is deliberately not behind the auth middleware, which is what makes it usable to bootstrap.
+</ResponseField>
+
+<ResponseField name="REST_CREDENTIAL_SKEW_MS" type="number">
+  `30000`. How far before the stated expiry the lane re-mints. With the 15 minute credential lifetime, a long-running bot re-mints roughly four times an hour, comfortably under the mint rate limit.
+</ResponseField>
+
+## Client option
+
+<ParamField path="restUrl" type="string">
+  Override the REST origin. Defaults to `DEFAULT_REST_URL`. A bad value throws on the first `client.rest` use, not at construction of the `Client`.
+</ParamField>
+
+## CloakRestError
+
+```ts
+class CloakRestError extends Error {
+  readonly status: number;   // HTTP status, or 0 for a transport failure
+  readonly path: string;     // the path, query string stripped
+  readonly errorCode?: string;
+}
+```
+
+Raised for the HTTP legs only. A refused mint is an opcode failure and rejects as `CloakActionError` with opcode 638 instead. Full field notes are on the [errors reference](/api-reference/errors).
+
+<Note>
+  No credential material is ever quoted into this error, in any field or in `toString()`.
+</Note>
+
+## Wire slots
+
+The opcode 638 reply's column map is exported as `MintRestCredentialIdx`, documented with the rest of the wire constants on the [protocol reference](/api-reference/protocol).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The REST lane" icon="server" href="/guides/rest-api">
+    Why the mint is two phases, and what is reachable.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    `CloakRestError` next to the other classes.
+  </Card>
+  <Card title="Protocol constants" icon="table-list" href="/api-reference/protocol">
+    `MintRestCredentialIdx` and the rest of the wire maps.
+  </Card>
+  <Card title="Client" icon="cube" href="/api-reference/client">
+    `restUrl` among the constructor options.
+  </Card>
+</CardGroup>

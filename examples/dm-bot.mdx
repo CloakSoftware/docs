@@ -1,0 +1,173 @@
+---
+title: "DM echo bot"
+description: "A direct-message bot that opens a DM at startup and echoes every reply. Based on examples/dm-smoke.ts."
+---
+
+This bot does two things. If you give it a user id, it opens a direct message with that user at startup. Then it echoes every DM it receives back as a true reply.
+
+It is the shortest demonstration of the two rules every DM-handling bot needs: direct messages arrive on the same `messageCreate` event as server traffic, and `Message.serverId` is `null` for every one of them.
+
+## The full bot
+
+```ts dm-bot.ts
+import { Client } from '@cloak-software/bot-sdk';
+
+// Optional. Set it to have the bot open a DM with you at startup.
+const target = process.env.DM_TARGET_USER_ID;
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Persists the identity, the DM keys, and the peer-to-dm-id map. Without it
+  // every restart re-runs the key exchange, and (far worse) a regenerated
+  // identity can never be republished: publication is write-once server-side.
+  keystorePath: './dm-bot.cloak-keystore.json',
+  requiredPermissions: ['message_send'],
+});
+
+client.on('ready', async () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  console.log('DM this bot from a Cloak client. You must own it, or share a server with it.');
+  if (!target) {
+    console.log('Set DM_TARGET_USER_ID to also have it open a DM with you at startup.');
+    return;
+  }
+  try {
+    // Lazily runs create plus key exchange, then the send. There is no
+    // separate "open a DM" step to call.
+    await client.sendDM(target, 'hello from dm-bot, reply and I will echo you');
+    console.log(`sent the opening DM to ${target}`);
+  } catch (e) {
+    // The interesting failure: not the owner, and no shared server.
+    console.error('sendDM failed:', (e as Error).message);
+  }
+});
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (!msg.isDM) return; // server traffic is not this bot's business
+
+  console.log(`DM from ${msg.authorName} (${msg.authorId}) in dm ${msg.dmId}: ${msg.content}`);
+  // serverId is null here. Never pass it to a server-scoped call.
+  console.log(`  serverId=${String(msg.serverId)} channelId=${msg.channelId}`);
+
+  try {
+    // reply() routes back into the DM and renders the quote header. No create
+    // and no key exchange: the inbound message proved both already exist.
+    await msg.reply(`echo: ${msg.content || '(could not decrypt, key still in flight?)'}`);
+  } catch (e) {
+    console.error('reply failed:', (e as Error).message);
+  }
+});
+
+// The DM key path reports through the same `error` event as every other
+// internal failure. This changes no control flow. It makes a stalled key
+// exchange visible instead of silent.
+client.on('error', (e) => console.error('[client error]', e.source, e.context, e.message));
+
+client.on('sendRejected', (r) => {
+  // A DM deny carries no routing, so serverId is null and channelId is a hint.
+  console.error(`send rejected (${r.code}): ${r.message}`);
+});
+
+client.on('disconnect', (e) => console.error('disconnected', e));
+
+await client.login();
+```
+
+<Note>
+  The SDK is ESM-only, so your project is an ES module (`"type": "module"` in `package.json`) and top-level `await` is available. Use `client.login().catch(...)` instead if you prefer to keep the failure handling inline.
+</Note>
+
+## Run it
+
+From a checkout of the SDK, put `CLOAK_TOKEN` in a `.env` file and run:
+
+```bash
+npm run example:dm
+```
+
+The source file is `examples/dm-smoke.ts`.
+
+To run your own copy:
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx dm-bot.ts
+
+# or, to also open a DM with yourself at startup:
+CLOAK_TOKEN="botid.tokenid.secret" DM_TARGET_USER_ID="<your user id>" npx tsx dm-bot.ts
+```
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="Who may DM a bot" icon="user-check">
+    The server decides, and it decides deny-by-default. A human may DM a bot only if that human **owns** the bot, or the two **share at least one server**.
+
+    The SDK never pre-computes this. An ineligible target rejects with a `CloakActionError` from the create step, before anything is encrypted or sent, which is why the `sendDM` call above sits in a `try`.
+
+    Group DMs are not supported. A bot holds 1:1 conversations only.
+  </Accordion>
+
+  <Accordion title="DMs arrive on messageCreate with a null serverId" icon="inbox">
+    There is no separate DM event. A direct message fires `messageCreate` with `msg.isDM === true` and `msg.serverId === null`, because a DM has no server at all.
+
+    `msg.dmId` and `msg.channelId` both carry the dm id. That is one deliberate convention: `channelId` is always "the thing this message lives in", so `msg.reply()` and `msg.channel.send()` work without branching.
+
+    This bot inverts the usual guard. It returns on `if (!msg.isDM) return;` because server traffic is not its business. A bot that does server-scoped work needs the opposite line, `if (msg.isDM || !msg.serverId) return;`, before it touches `client.guild()`, `client.can()`, or anything else that takes a server id.
+
+    <Warning>
+      `Message.serverId` became nullable in 0.2.0. Bots written against 0.1.x that assume a non-null `serverId` will pass `null` into server-scoped calls the first time somebody DMs them. TypeScript points at every one of these sites.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="First contact costs a key exchange" icon="key">
+    The first send to a peer creates the DM and mints a conversation key wrapped to that peer's identity. Both the dm id and the key are written to the keystore, so this happens once per peer per keystore, not once per restart.
+
+    Losing the DM half of a keystore is mild: the peer-to-dm map is re-derivable (the create call is idempotent for an existing pair and returns the same id), and a lost DM key means the bot establishes a new one while the peer's older messages stay unreadable.
+
+    Losing the **identity** is not mild, which is why `keystorePath` is set above. See [Keys and the keystore](/concepts/keys-and-keystore).
+  </Accordion>
+
+  <Accordion title="reply() versus channel.send()" icon="reply">
+    Both work in a DM, and neither needs a location: the `Message` already knows where it lives.
+
+    `msg.reply(text)` is a **true reply**. It renders the quote header and fires a "replied to you" notification that pierces a mute. This bot uses it because echoing a specific message is exactly what a reply is for.
+
+    `msg.channel.send(text)` is a plain message into the same conversation, with no quote header and no reply notification. Use that when the bot is simply answering rather than pointing at one message.
+
+    Both take the same options object: `msg.reply(text, { mentions, replyTo, groupId })`. In a DM, `replyTo` works, `groupId` is ignored, and only direct user mentions notify (role, `@everyone`, and `@here` pairs are dropped server-side).
+  </Accordion>
+
+  <Accordion title="What does not work inside a DM" icon="ban">
+    `react()`, `unreact()`, `edit()`, `delete()`, `pin()`, and `unpin()` all reject on a DM message. The backend implements those operations, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. `reply()` and `channel.send()` work normally.
+
+    `msg.repliedTo` is always `null` on a DM. The frame a bot receives carries no reply array, so there is nothing to decode.
+
+    Slash commands are not dispatched from DMs. The structured command lane does not exist on the DM frame, and the menu a client's `/` picker renders is published per server. `messageCreate` still fires, so parse `msg.content` yourself if you want DM commands.
+  </Accordion>
+
+  <Accordion title="Sends are fire-and-forget" icon="paper-plane">
+    A resolved `sendDM()` or `reply()` promise means the frame reached the wire. It does not mean the server accepted it.
+
+    A server-side denial arrives on the `sendRejected` event, never as a rejected promise. Bots are rate-limited server-side, and a throttled send shows up there as code `-9`. In a DM the deny carries no routing, so `serverId` is `null` and `channelId` is a hint rather than a guarantee.
+
+    The `error` event is separate again. It surfaces internal failures the SDK would otherwise swallow, including a key exchange that stalls. Registering a listener changes no control flow.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    Eligibility, the unified `messageCreate`, and DM-specific send semantics.
+  </Card>
+  <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
+    Why a bot with no keystore is bricked on its second run.
+  </Card>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    `send()`, `reply()`, `SendOptions`, and `sendRejected`.
+  </Card>
+  <Card title="Events reference" icon="bell" href="/api-reference/events">
+    Every event this bot listens for.
+  </Card>
+</CardGroup>

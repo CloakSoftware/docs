@@ -1,0 +1,204 @@
+---
+title: "Mentions and replies"
+description: "Ping people with the two-part mention model, read inbound mentions, and send true replies."
+---
+
+A Cloak mention is two independent things, and your bot supplies both. The pill is literal text inside the encrypted message body. The ping is a separate array of targets in `SendOptions`. Send one without the other and you get half a mention. This page covers both halves, what the SDK gives you for reading mentions back, and how true replies work.
+
+<Warning>
+  **Mention targets are not end-to-end encrypted.** Message bodies are. The list of who a message pings is not: it rides the send frame in plaintext because the server has to route notifications without decrypting anything. Anyone with server-side visibility can see who your bot pinged, just not what it said. This is how Cloak works, in every client, not an SDK shortcut. If that matters for a given message, do not mention.
+</Warning>
+
+## The two halves
+
+| Half | What it is | Where it goes |
+|---|---|---|
+| The pill | Literal text inside the encrypted body | Your `text` argument |
+| The ping | An id and a role flag per target | `opts.mentions` |
+
+A ping with no matching text notifies the user but renders no pill. Text with no ping renders a pill but notifies nobody. The SDK deliberately does not scan your outgoing text against a member cache to synthesize pings. Being explicit is the design.
+
+## Ping a user
+
+`userMention()` builds the pill text. `opts.mentions` carries the ping.
+
+```ts
+import { userMention } from '@cloak-software/bot-sdk';
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.content.trim() !== '!ping') return;
+  msg.channel
+    .send(`${userMention(msg.authorId)} pong`, { mentions: [{ userId: msg.authorId }] })
+    .catch((e) => console.error('send failed', e));
+});
+```
+
+`userMention()` accepts a user id string or any object with an `id`, and normalizes both id shapes for you. Cloak ids appear as dashed UUIDs and as raw hex depending on where they came from, so never compare or build them with raw string equality.
+
+## Ping a role, or everyone
+
+Role mentions and the two broadcast mentions work the same way: a text half and a ping half.
+
+```ts
+import { roleMention, EVERYONE, HERE } from '@cloak-software/bot-sdk';
+
+await client.send(serverId, channelId, `${roleMention('Moderators')} heads up`, {
+  mentions: [{ roleId }],
+});
+
+await client.send(serverId, channelId, `${EVERYONE} maintenance in 5`, {
+  mentions: ['everyone'],
+});
+
+await client.send(serverId, channelId, `${HERE} anyone around?`, {
+  mentions: ['here'],
+});
+```
+
+`EVERYONE` and `HERE` are the exported string constants `'@everyone'` and `'@here'`. They are just text: without the matching `mentions` entry they notify nobody.
+
+### MentionTarget
+
+Every entry of `opts.mentions` is one of four shapes.
+
+```ts
+type MentionTarget =
+  | { userId: string }
+  | { roleId: string }
+  | 'everyone'
+  | 'here';
+```
+
+Ids may be dashed or undashed. Targets are deduplicated before they go out, and the server silently discards any id that is not a member of that server.
+
+## How the text renders
+
+User mentions and everything else render on different rules, and it shows up in one place: renames.
+
+<CardGroup cols={2}>
+  <Card title="User mentions are id-keyed" icon="user">
+    `userMention()` emits Cloak's `<@id>` wire entity, so the pill follows the user through nickname and display-name changes. Old messages keep rendering correctly.
+  </Card>
+  <Card title="Roles and broadcasts are name-keyed" icon="users">
+    `roleMention()` emits literal `@Name`. The pill renders only for viewers whose client resolves that role name, and renaming the role stops old messages from rendering it. The ping itself travels by id and is unaffected.
+  </Card>
+</CardGroup>
+
+Single-word role names have to match `[\w-]+` to render as a pill. Multi-word role names work, because clients match the longest role name first.
+
+## Permissions
+
+Role, `@everyone`, and `@here` mentions are gated server-side by `mention_roles`. Pre-gate with `can()` to skip a ping the server would only drop, and remember the check is advisory: the server stays authoritative.
+
+```ts
+if (client.can('mention_roles', serverId)) {
+  await client.send(serverId, channelId, `${EVERYONE} deploying now`, {
+    mentions: ['everyone'],
+  });
+} else {
+  await client.send(serverId, channelId, 'Deploying now.');
+}
+```
+
+## Read mentions on inbound messages
+
+`msg.mentions` and `msg.mentionsMe` are derived from the **decrypted body**, not from a wire field. The sender's ping array is routing metadata the server consumes and never echoes back, so the text is the only source. This is exactly how the desktop and mobile clients decide whether to highlight a message. Fetched history is populated the same way.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.mentionsMe) {
+    msg.channel
+      .send(`${userMention(msg.authorId)} you rang?`, { mentions: [{ userId: msg.authorId }] })
+      .catch((e) => console.error('send failed', e));
+  }
+  if (msg.mentions.everyone) console.log('a broadcast mention went by');
+});
+```
+
+<ResponseField name="msg.mentionsMe" type="boolean">
+  True only when the body carries a `<@id>` entity naming this bot. Direct mentions only.
+</ResponseField>
+
+<ResponseField name="msg.mentions" type="MessageMentions">
+  `{ userIds: string[]; names: string[]; everyone: boolean; here: boolean }`.
+
+  `userIds` holds the normalized ids of every `<@id>` entity in the body. `names` holds every other `@token`, which may be a role, an older-style user mention, or plain text that happens to start with `@`. `everyone` and `here` are the two broadcast flags, matched case-insensitively.
+</ResponseField>
+
+<Note>
+  `mentionsMe` cannot cover role mentions. The SDK does not know which roles the bot holds, because permission verdicts carry an effective rank rather than role ids. Unresolved tokens land in `msg.mentions.names`. Compare them against `client.guild(serverId).fetchRoles()` yourself if a role mention should wake your bot.
+</Note>
+
+### Parse text you got from somewhere else
+
+`parseMentions(content)` is the same function that populates `msg.mentions`. Call it directly on any decrypted string, for example a message body you cached.
+
+```ts
+import { parseMentions } from '@cloak-software/bot-sdk';
+
+const { userIds, names, everyone, here } = parseMentions(storedBody);
+```
+
+`MENTION_ENTITY_RE` is exported for the rare case where you want to find or strip the entities yourself. It is a global regular expression, so reset `lastIndex` before every use.
+
+`mentionPairs(targets)` is also exported. It builds the plaintext wire array that `send()` fills in for you, so you only need it if you are constructing frames by hand.
+
+## True replies
+
+`msg.reply(text, opts?)` is a real reply. It renders the quote header on the original message and fires the "replied to you" notification, which pierces the recipient's mutes. `msg.channel.send(text, opts?)` is a plain message in the same channel. Choose deliberately: a bot answering a command usually wants `channel.send()`.
+
+To reply to a message you are holding rather than handling, pass `replyTo`. Any object with `messageId`, `authorId`, and `createdAt` satisfies the `ReplyTarget` type, and a received `Message` does.
+
+```ts
+await client.send(serverId, channelId, 'as I was saying', { replyTo: someMessage });
+```
+
+<Warning>
+  The reply target must live in the channel you are sending to, and it must carry a `createdAt`. The server re-reads the quoted row by its own send time, so a target without one cannot resolve. An explicit `replyTo` with no `createdAt` rejects with a plain `Error` before anything reaches the wire. `msg.reply()` on a message that somehow lacks `createdAt` degrades to a plain send instead of throwing inside your handler.
+</Warning>
+
+Mentions and replies compose. A reply that should also ping carries both halves.
+
+```ts
+await msg.reply(`${userMention(msg.authorId)} fixed in the next build`, {
+  mentions: [{ userId: msg.authorId }],
+});
+```
+
+### Read the message being replied to
+
+An inbound reply carries `msg.repliedTo`, or `null` when the message is not a reply.
+
+<ResponseField name="msg.repliedTo" type="{ messageId, authorId, content, createdAt } | null">
+  `content` is decrypted with the key for the quoted message's own epoch. When that key is missing it is an empty string, never raw ciphertext. `createdAt` is a `Date` or `null`. On a direct message `repliedTo` is always `null`: the frame a bot receives for a DM carries no reply context to decode.
+</ResponseField>
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (!msg.repliedTo) return;
+  console.log(`${msg.authorName} replied to ${msg.repliedTo.authorId}: ${msg.repliedTo.content}`);
+});
+```
+
+## Mentions in direct messages
+
+`SendOptions` applies in a DM with reduced semantics. Only direct user mentions notify. Role, `@everyone`, and `@here` pairs are dropped server-side. `replyTo` works normally, and `groupId` is meaningless there and ignored.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    The full `SendOptions` object and the fire-and-forget contract.
+  </Card>
+  <Card title="What is encrypted, and what is not" icon="lock" href="/concepts/encryption-lanes">
+    Where mention targets sit in the encryption model.
+  </Card>
+  <Card title="Mention helpers" icon="at" href="/api-reference/mentions">
+    Every exported symbol and type in one place.
+  </Card>
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Why `mention_roles` gates broadcast pings.
+  </Card>
+</CardGroup>

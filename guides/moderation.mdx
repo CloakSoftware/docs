@@ -3,38 +3,82 @@ title: "Moderation"
 description: "Kick, ban, unban, and time out members, and read the ban list."
 ---
 
-Your bot can remove and restrict members through a small set of server-scoped methods on the `Client`. Each one names the server and the target member, and each returns a `Promise<void>` that resolves when the server accepts the action. Every action is re-checked by the server, so a call that lacks the right permission rejects with a `CloakActionError`.
+Your bot removes and restricts members through a small set of server-scoped methods on the `Client`. Each one names the server and the target member. Each returns a `Promise<void>` that resolves when the server accepts the action, and rejects with a `CloakActionError` when the server denies it. The server re-checks every action, so its verdict is the authoritative one even when your own `can()` check passed.
 
-## Kick a member
+## Every moderation call needs a server
 
-`kick()` removes a member from the server. They can rejoin if they have an invite. It requires the `member_kick` permission, a role rank above the target, and a target that is neither the server owner nor the bot itself.
+`Message.serverId` is `string | null`. It is `null` for a direct message, and `messageCreate` delivers direct messages on the same event as channel messages. Moderation is a server concept, so guard before you touch `msg.serverId`.
 
 ```ts
 client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.content.trim() !== '!kick') return;
+  if (msg.isDM || !msg.serverId) return;        // moderation is server-scoped
+  // msg.serverId is a string from here down.
+});
+```
+
+TypeScript flags every unguarded use. Add the guard once at the top of the handler and the rest of the body type-checks.
+
+## Three shared constraints
+
+`kick()`, `ban()`, and `timeout()` are gated the same way. All three require:
+
+- The matching permission: `member_kick`, `member_ban`, or `member_timeout`.
+- A role rank above the target. Equal rank is not enough.
+- A target that is neither the server owner nor the bot itself.
+
+Failing any of them rejects with a `CloakActionError` carrying the server's own code and message. `err.permission` is set only when the denial maps to a named permission, so a rank failure or a self-target failure leaves it `undefined`.
+
+## Kick a member
+
+`kick()` removes a member from the server. They can rejoin with a new invite.
+
+```ts
+import { CloakActionError } from '@cloak-software/bot-sdk';
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return;
+
+  const [cmd, targetUserId] = msg.content.trim().split(/\s+/);
+  if (cmd !== '!kick' || !targetUserId) return;
+
   try {
     await client.kick(msg.serverId, targetUserId);
-    await msg.reply('Kicked.');
+    await msg.channel.send('Kicked.');
   } catch (err) {
-    await msg.reply('Could not kick that member.');
+    if (err instanceof CloakActionError) {
+      await msg.channel.send(`Could not kick that member: ${err.message}`);
+    }
   }
 });
 ```
 
+<Note>
+  The acknowledgement uses `msg.channel.send()`, a plain send into the same channel. `msg.reply()` posts a true reply: it renders a quote header and fires a mute-piercing "replied to you" notification on the person who ran the command. Use `reply()` when the quote is the point, and `channel.send()` when the bot is just answering.
+</Note>
+
 ## Ban a member
 
-`ban()` kicks the member and records a ban, so the account cannot rejoin until you unban it. It requires the `member_ban` permission. The `reason` argument is optional and the server caps it at 256 characters.
+`ban()` kicks the member and records a ban, so the account cannot rejoin until you unban it.
 
 ```ts
 await client.ban(serverId, userId, 'Repeated spam in #general');
 ```
 
-The reason is stored with the ban and comes back later through `fetchBans()`. You can omit it entirely:
+The `reason` argument is optional. The server caps it at 256 characters and rejects a longer one outright, so truncate before you send.
+
+```ts
+await client.ban(serverId, userId, reason.slice(0, 256));
+```
+
+You can omit it entirely:
 
 ```ts
 await client.ban(serverId, userId);
 ```
+
+The reason is stored with the ban and comes back later through `fetchBans()`.
 
 ## Unban a member
 
@@ -45,26 +89,28 @@ await client.unban(serverId, userId);
 ```
 
 <Note>
-  On some older Cloak servers `unban()` additionally requires owner or admin standing. On an up-to-date server the `member_ban` permission is enough.
+  On some older Cloak servers `unban()` additionally requires owner or admin standing, and answers with a distinct code when the bot has neither. On an up-to-date server the `member_ban` permission is enough.
 </Note>
 
 ## Time out a member
 
-`timeout()` mutes a member for a duration you set in seconds. While timed out, the member cannot send messages or add reactions. It requires the `member_timeout` permission. Passing `0` lifts the timeout.
+`timeout()` mutes a member for a duration you set in seconds. While timed out, the member cannot send messages or add reactions in that server. Passing `0` lifts the timeout.
 
 ```ts
 // Time out for ten minutes.
 await client.timeout(serverId, userId, 600);
 ```
 
-`removeTimeout()` lifts a member's timeout and is equivalent to calling `timeout()` with `0` seconds.
+The duration is floored to a whole number of seconds and clamped at zero, so fractional and negative values never reach the wire.
+
+`removeTimeout()` lifts a member's timeout. It calls `timeout()` with `0` seconds.
 
 ```ts
 await client.removeTimeout(serverId, userId);
 ```
 
 <Warning>
-  `timeout()` requires an up-to-date Cloak server. On an older server the call does not resolve, it times out instead. Confirm the server supports timeouts before relying on this action, and wrap the call so a hang does not block your handler.
+  `timeout()` needs a current Cloak server. An older server drops the frame instead of answering it, so the promise neither resolves nor rejects: it hangs until the transport timeout fires. A `try/catch` does not shorten that wait. Confirm the server supports timeouts before you build a command around it.
 </Warning>
 
 ## Read the ban list
@@ -75,7 +121,7 @@ await client.removeTimeout(serverId, userId);
 const bans = await client.fetchBans(serverId);
 for (const ban of bans) {
   const name = ban.username ?? 'unknown account';
-  console.log(`${name} (${ban.userId}): ${ban.reason}`);
+  console.log(`${name} (${ban.userId}): ${ban.reason || '(no reason)'}`);
 }
 ```
 
@@ -86,7 +132,7 @@ Each `BanInfo` carries the fields below.
 </ResponseField>
 
 <ResponseField name="username" type="string | null">
-  The account's name, or `null` when the account no longer resolves.
+  The account's name, resolved server-side, or `null` when the account no longer resolves.
 </ResponseField>
 
 <ResponseField name="bannedAt" type="Date | null">
@@ -103,7 +149,7 @@ Each `BanInfo` carries the fields below.
 
 ## Pre-gate with can()
 
-Before firing a moderation action, you can check `can()` to skip work the server would only reject. Use the permission that the action requires, such as `member_ban` for `ban()`, `unban()`, and `fetchBans()`.
+Before firing a moderation action, check `can()` to skip work the server would only reject. Use the permission the action requires: `member_kick` for `kick()`, and `member_ban` for `ban()`, `unban()`, and `fetchBans()`.
 
 ```ts
 if (client.can('member_ban', serverId)) {
@@ -112,45 +158,57 @@ if (client.can('member_ban', serverId)) {
 ```
 
 <Warning>
-  `can()` is advisory. It reflects the last grant the server sent, and the server re-checks every action and remains the authority. Never treat a passing `can()` as a guarantee. Always handle a `CloakActionError` from the action itself.
+  `can()` is advisory. It reflects the last permission verdict the server sent, and it returns `false` when no verdict has arrived yet. The server re-checks every action and remains the authority. Never treat a passing `can()` as a guarantee, and always handle a `CloakActionError` from the action itself.
 </Warning>
 
-When an action is denied, the rejected error is a `CloakActionError`. If the denial maps to a named permission, its `.permission` field tells you which one was missing.
+`can()` also cannot see the two constraints that are not permissions. Role rank and owner status are knowable only to the server, so a rank failure surfaces as a rejection that no pre-gate can predict.
+
+## Read the denial
+
+When an action is denied, the rejected error is a `CloakActionError`. It carries the opcode, the raw server code, and a readable message. If the denial maps to a named permission, `.permission` tells you which one was missing.
 
 ```ts
+import { CloakActionError } from '@cloak-software/bot-sdk';
+
 try {
   await client.kick(serverId, userId);
 } catch (err) {
   if (err instanceof CloakActionError) {
-    console.error(`kick denied${err.permission ? ` (needs ${err.permission})` : ''}`);
+    console.error(`kick denied${err.permission ? ` (needs ${err.permission})` : ''}: ${err.message}`);
+  } else {
+    throw err;
   }
 }
 ```
+
+A denial for insufficient rank, a self-target, or an owner target leaves `.permission` undefined. Read `.message` in that case.
 
 ## Use the guild() handle
 
 Every moderation method is also available on the `guild()` handle, which binds a `serverId` once so you do not repeat it on each call.
 
 ```ts
-const guild = client.guild(serverId);
-await guild.timeout(userId, 600);
-await guild.kick(userId);
-const bans = await guild.fetchBans();
+const g = client.guild(serverId);
+await g.timeout(userId, 600);
+await g.kick(userId);
+const bans = await g.fetchBans();
 ```
+
+The handle changes nothing about permissions, return types, or errors. It only removes the repeated first argument.
 
 ## Next
 
 <CardGroup cols={2}>
-  <Card title="BanInfo type" icon="user-lock" href="/api-reference/types#baninfo">
-    Every field on a recorded ban.
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    What decides whether an action is allowed, and why can() is advisory.
   </Card>
-  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Catch and read a CloakActionError.
   </Card>
-  <Card title="Permissions" icon="key" href="/concepts/permissions">
-    What decides whether an action is allowed.
+  <Card title="Members and roles" icon="users" href="/guides/members-and-roles">
+    Read the roles you are ranking against.
   </Card>
-  <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
-    Bind a serverId once and drop the argument.
+  <Card title="Moderation bot" icon="gavel" href="/examples/moderation-bot">
+    A runnable bot that uses every method on this page.
   </Card>
 </CardGroup>

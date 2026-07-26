@@ -5,6 +5,8 @@ description: "Your bot declares what it needs. A human approves what it gets. He
 
 Permissions on Cloak follow a simple rule: a bot **declares** the capabilities it wants, and a **human approves** a subset per server when adding it. Declaring is a request, not a grant.
 
+There are 31 permissions, with wire codes 0 through 30. You declare and query them by name. The complete list lives in the [permissions reference](/api-reference/permissions).
+
 ## Declare what your bot needs
 
 Pass the permissions your bot needs to the `Client` constructor. The SDK sends this list to the server when your bot logs in.
@@ -12,11 +14,26 @@ Pass the permissions your bot needs to the `Client` constructor. The SDK sends t
 ```ts
 const client = new Client({
   token: process.env.CLOAK_TOKEN!,
+  keystorePath: './bot.cloak-keystore.json',
   requiredPermissions: ['message_send', 'view_text', 'reaction_add'],
 });
 ```
 
 This is your bot's manifest. It tells servers what the bot is asking for. It does not give the bot anything on its own.
+
+<Warning>
+  The manifest is best-effort and never blocks login. If the server refuses it, the SDK routes the failure to the `error` event and carries on, so a bot can be online with no manifest registered and no exception thrown. Register an `error` listener if you want to see it.
+
+  One refusal is worth naming: the server validates every code before it writes anything, and answers on the first code it does not recognise **without writing any of them**. A single unknown code discards the whole manifest, `message_send` included. That is reachable when the SDK knows a permission a given backend does not.
+</Warning>
+
+```ts
+client.on('error', (err) => {
+  console.warn(`[cloak] ${err.source}${err.context ? `:${err.context}` : ''}`, err.message);
+});
+```
+
+A bot with no `requiredPermissions` at all sends no manifest. That is fine for a bot that only reads, and it is what the quickstart bot does.
 
 ## A human approves the grant
 
@@ -30,7 +47,7 @@ The server sends your bot its resolved permissions per server. The SDK caches th
 
 ### Listen for updates
 
-The `permissionsUpdate` event fires whenever a server resolves or changes your bot's grant.
+The `permissionsUpdate` event fires whenever a server resolves or changes your bot's grant. It is a live push, not a login-only event: a permission change mid-session arrives here.
 
 ```ts
 client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
@@ -38,15 +55,24 @@ client.on('permissionsUpdate', ({ serverId, effectiveRank, ...perms }) => {
 });
 ```
 
+`effectiveRank` is the bot's effective rank in that server, carried alongside the named booleans on the same `PermissionSet`.
+
 ### Check before you act
 
 `can()` is an advisory check. Use it to avoid firing an action the server would only reject.
 
 ```ts
-if (client.can('message_send', msg.serverId)) {
-  await msg.reply('pong');
-}
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return;
+  if (msg.isDM || !msg.serverId) return; // verdicts are server-keyed
+  if (!client.can('message_send', msg.serverId)) return;
+  await msg.channel.send('pong');
+});
 ```
+
+<Warning>
+  `can(permission, serverId)` takes a non-nullable `string`, and `Message.serverId` is `string | null`. Guard on `msg.isDM` or on `msg.serverId` first. Without the guard the example does not compile under strict TypeScript, and at runtime it would return `false` for every DM, so the bot would go quiet there with no error.
+</Warning>
 
 ### Read the full set
 
@@ -59,6 +85,16 @@ if (set?.member_ban) {
 }
 ```
 
+## When the grant is populated
+
+`login()` awaits the permission verdicts for every server the bot is already in before it emits `ready`. So `can()` and `permissions()` are already populated inside a `ready` handler, and you do not need to wait a round trip.
+
+`undefined` from `permissions()` is for a server the bot joined later, before its verdict landed.
+
+<Note>
+  With no verdict, `can()` returns **false** and `visibleChannelIds()` returns an empty array. Absence reads as denied, not as unknown. A `false` therefore means either "denied" or "no verdict yet", and your code usually wants to treat both the same way.
+</Note>
+
 ## Advisory means the server decides
 
 `can()`, `permissions()`, and `visibleChannelIds()` reflect the last grant the server sent. They exist so your bot can pre-gate its own commands, which keeps it from firing actions that will bounce.
@@ -67,21 +103,57 @@ if (set?.member_ban) {
   These checks are advisory. The server re-checks every action and remains the authority. Never treat a passing `can()` as a guarantee, and never rely on it for security decisions. It is a courtesy to your own code, not an enforcement point.
 </Warning>
 
+The runtime counterparts are where a real denial shows up:
+
+- Awaited actions (`react()`, `delete()`, `kick()`, `ban()`, and the rest) reject with a `CloakActionError`. Its `permission` field names the permission the bot lacked, when the code maps to one.
+- Sends are fire-and-forget, so a denied send cannot reject. It arrives on the `sendRejected` event, which also carries a `permission` field.
+
+```ts
+client.on('sendRejected', ({ code, message, permission }) => {
+  console.warn(`send denied (${code}): ${message}`, permission ?? '');
+});
+```
+
 ## Administrator implies everything
 
 The `administrator` permission is special. If a bot holds it in a server, `can()` returns `true` for every other permission in that server.
 
+## `voice_listen` is the one to read twice
+
+One permission does not behave like the rest, and its failure mode is silence.
+
+Joining voice and hearing voice are separate grants. `voice_connect` (plus channel-level view) gets the bot into a voice channel. `voice_listen` decides whether it is sent any media, and whether it is given a key that could decrypt any.
+
+Without `voice_listen`:
+
+- The bot joins normally. `joinVoice()` succeeds.
+- The bot publishes normally. A music or TTS bot works perfectly, and that is the intended configuration, not a degraded one.
+- The bot receives nothing, and holds only its own one-way frame key, so it is cryptographically unable to decrypt any member.
+- Nothing errors. Silence is the only symptom.
+
+`selfDeafened` is not the answer to "can I hear". It mirrors what the SDK put in the join frame and says nothing about the grant. To ask the real question, use `client.can('voice_listen', serverId)` (advisory, and remember `false` also covers "no verdict yet"), or read the bot's own entry in `voiceRoster(channelId)`.
+
+Grant `voice_listen` deliberately in the other direction too: a bot that holds it is given the room key and can decrypt everyone in the channel. That is what the permission means. See [Voice keys and scopes](/voice/keys).
+
 ## Permission names
 
-You declare and query permissions by name. The full list of names, such as `message_send`, `member_ban`, `manage_channels`, and `administrator`, lives in the [permissions reference](/api-reference/permissions).
+You declare and query permissions by name: `message_send`, `member_ban`, `manage_channels`, `administrator`, and 27 more. The names are stable, and the integer codes they map to are the wire contract.
+
+`PERMISSION_CODES` (name to code), `PERMISSION_NAMES` (code-indexed), and `decodePermArray()` are exported if you need to work with the codes directly. The full table, all 31 rows, is in the [permissions reference](/api-reference/permissions).
 
 ## Next
 
 <CardGroup cols={2}>
+  <Card title="Permissions reference" icon="list" href="/api-reference/permissions">
+    All 31 names and codes in one table.
+  </Card>
   <Card title="Message delivery" icon="tower-broadcast" href="/concepts/message-delivery">
     Permissions decide which channels your bot can view.
   </Card>
-  <Card title="Permissions reference" icon="list" href="/api-reference/permissions">
-    Every permission name in one place.
+  <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
+    `CloakActionError`, `sendRejected`, and the `error` event.
+  </Card>
+  <Card title="Voice keys and scopes" icon="microphone" href="/voice/keys">
+    What `voice_listen` actually changes.
   </Card>
 </CardGroup>
