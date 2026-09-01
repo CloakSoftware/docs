@@ -60,7 +60,7 @@ Everything `register()` rejects, it rejects synchronously, in your own stack tra
 
 `user`, `channel` and `role` values travel as **opaque id strings** in v1. The SDK does no resolution and the clients do no argument autocomplete, so read them with `getString()` and normalize before comparing them to anything.
 
-There is no `attachment` type. Declaring one throws at `register()` with the reason: upload is closed to bots, so an attachment option could never be filled on the bot's side.
+There is no `attachment` type. Declaring one throws at `register()`: command invocations cannot carry a file in v1, so the option could never be filled. Sending and receiving files is its own lane, see [File attachments](/guides/file-attachments).
 
 ### Choices
 
@@ -180,8 +180,8 @@ client.on('messageCreate', (msg) => {
 
 There are two lanes, and your handler cannot tell them apart beyond `ctx.source`.
 
-| | Structured (`commandData`) | Text |
-|---|---|---|
+|  | Structured (`commandData`) | Text |
+| --- | --- | --- |
 | Where it lives | An encrypted sidecar on the message frame | The message's readable content |
 | Addresses one bot | Yes, it carries the target bot's id | No |
 | Produced by | A client's `/` picker, or `client.sendCommand()` | Anyone typing `/play ...` into a channel |
@@ -203,7 +203,7 @@ The practical consequence is that a client which has not yet shipped its `/` pic
 
 The formatter and the parser are inverses over this grammar:
 
-```
+```text
 /<name> [args...]
 
 args are, in declared order:
@@ -219,7 +219,7 @@ Booleans accept true/false/yes/no/1/0 (case-insensitive).
 
 Against the `/volume` declaration above, all of these parse:
 
-```
+```text
 /volume loud announce:true
 /volume quiet no
 /volume normal
@@ -281,7 +281,7 @@ Publication is best-effort and never blocks login. A rejection or a transport fa
 ## Registry caps
 
 | Cap | Value |
-|---|---|
+| --- | --- |
 | Commands per bot | 50 |
 | Options per command | 25 |
 | Choices per option | 25 |
@@ -341,12 +341,15 @@ await client.login();
   <Card title="Commands reference" icon="terminal" href="/api-reference/commands">
     Every export from the commands module, with the caps and the parser helpers.
   </Card>
+
   <Card title="What is encrypted, and what is not" icon="lock" href="/concepts/encryption-lanes">
     Why the menu is plaintext while the invocation body is not.
   </Card>
+
   <Card title="Command bot example" icon="robot" href="/examples/command-bot">
     The runnable version of this page.
   </Card>
+
   <Card title="Events" icon="bolt" href="/api-reference/events#commanderror">
     `commandError`, `sendRejected`, and the rest of the event map.
   </Card>

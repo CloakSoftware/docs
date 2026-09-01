@@ -34,7 +34,7 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
 ### Identity and storage
 
 <ParamField path="token" type="string" required>
-  Your bot token, in the form `botid.tokenid.secret`. Create it in the Cloak app under **Settings > My Bots**. Treat it like a password. Read it from an environment variable, never hardcode it.
+  Your bot token, in the form `botid.tokenid.secret`. Create it in the Cloak app under **Settings \> My Bots**. Treat it like a password. Read it from an environment variable, never hardcode it.
 </ParamField>
 
 <ParamField path="keystorePath" type="string">
@@ -57,11 +57,11 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
   The permissions your bot declares it needs, sent to the server on login. Declaring is a request, not a grant. A human approves a subset per server, and the resolved grant arrives on [`permissionsUpdate`](/api-reference/events#permissionsupdate). See [Permissions](/concepts/permissions).
 </ParamField>
 
-<ParamField path="commandPrefix" type="string" default="/">
+<ParamField path="commandPrefix" default="/" type="string">
   The prefix the text lane of the slash-command parser matches. Only the text lane uses it. A structured invocation carries the command name outright and is prefix-independent. See [Slash commands](/guides/slash-commands).
 </ParamField>
 
-<ParamField path="webhookName" type="string" default="Bot">
+<ParamField path="webhookName" default="Bot" type="string">
   Display name for the webhook that [`sendEmbed()`](#sendembed) mints. Cosmetic only. Reuse is matched on creator plus channel, never on name, so renaming this does not orphan an existing webhook.
 </ParamField>
 
@@ -69,7 +69,7 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
   An injected `fetch` for the webhook ingress, for tests or a proxy. Defaults to `globalThis.fetch`. This is the only outbound HTTP the SDK performs on its own.
 </ParamField>
 
-<ParamField path="debug" type="boolean" default="false">
+<ParamField path="debug" default="false" type="boolean">
   Logs every frame the SDK sends and receives, with your bot token redacted. Useful while developing, noisy in production.
 </ParamField>
 
@@ -82,15 +82,15 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
     The connection endpoint. Defaults to the hosted service on the lane implied by `transport`: `DEFAULT_URL` for `'ws'`, `DEFAULT_WEBTRANSPORT_URL` for `'webtransport'`. A `wss://` url speaks the WebSocket lane, an `https://` url the WebTransport lane.
   </ParamField>
 
-  <ParamField path="transport" type="'ws' | 'webtransport'" default="ws">
+  <ParamField path="transport" default="ws" type="'ws' | 'webtransport'">
     Which wire to speak. The default WebSocket lane rides the pure-JavaScript `ws` package, so `npm install` compiles nothing. `'webtransport'` needs the optional Quiche packages installed. See [Installing](/install).
   </ParamField>
 
-  <ParamField path="allowInsecure" type="boolean" default="false">
+  <ParamField path="allowInsecure" default="false" type="boolean">
     Permit a plain `ws://` url, which sends the bot token in cleartext. Local development stacks only.
   </ParamField>
 
-  <ParamField path="idleTimeoutMs" type="number" default="60000">
+  <ParamField path="idleTimeoutMs" default="60000" type="number">
     Treat the connection as dead after this long with no inbound data, then reconnect. Defaults to `60000` on the WebSocket lane and is disabled on WebTransport, which has its own QUIC idle timeout. `0` disables it.
   </ParamField>
 
@@ -194,7 +194,7 @@ await client.send(serverId, channelId, `${userMention(msg.authorId)} on it`, {
 });
 ```
 
-[`SendOptions`](/api-reference/types#sendoptions) is `{ groupId?, mentions?, replyTo? }`.
+[`SendOptions`](/api-reference/types#sendoptions) is `{ groupId?, mentions?, replyTo?, poll?, threadId? }`. Pass `threadId` to target a thread of the channel, and `poll` to attach a native poll to the message. See [Threads](/guides/threads) and [Polls](/guides/polls).
 
 <Warning>
   The fourth argument is an options object. It was a positional `groupId` before 0.2.0, and that form is gone. `send(s, c, text, groupId)` becomes `send(s, c, text, { groupId })`.
@@ -226,7 +226,7 @@ Inside a DM, `replyTo` works, and role, `@everyone`, and `@here` mention pairs a
 sendCard(serverId: string, channelId: string, card: CardMessage): Promise<void>
 ```
 
-Posts a rich card. This is the **encrypted** embed lane and the one to reach for by default: the card is encrypted with the same conversation key and epoch as the message body, and it renders under your bot's own identity. It requires `message_send` and nothing else.
+Posts a rich card. This is the **encrypted** embed lane and the one to reach for by default: the card is encrypted with the same conversation key and epoch as the message body, and it renders under your bot's own identity. It requires `message_send`, and current backends also enforce `embed_link`: the server cannot read the payload, but it can see that the embed slot is present, and a denial arrives as `-12` on [`sendRejected`](/api-reference/events#sendrejected). Declare both in `requiredPermissions`.
 
 `card.content` is required and must be non-blank. Card media must be Cloak-hosted, and anything else throws a `CloakEmbedError` locally before a frame leaves your process. See [Rich cards](/guides/rich-cards) and [Embeds](/api-reference/embeds).
 
@@ -288,7 +288,7 @@ This writes an account-level status to a database column, so it survives reconne
 setAvatar(iconUrl: string | null, miniIconUrl?: string | null): Promise<void>
 ```
 
-Sets or clears the bot's avatar from an already-hosted image url. `miniIconUrl` defaults to `iconUrl`. Passing `null` clears both. Urls are capped at 512 characters server-side. The SDK never uploads images, because file upload is closed to bots.
+Sets or clears the bot's avatar from an already-hosted image url. `miniIconUrl` defaults to `iconUrl`. Passing `null` clears both. Urls are capped at 512 characters server-side. The SDK does not upload avatar images, so give it a url that is already hosted. Attaching files to messages is a separate lane: see [`sendFile()`](#sendfile).
 
 ## History and reads
 
@@ -311,6 +311,10 @@ fetchMessages(
 Reads message history for a channel, returned oldest to newest and auto-paginated. Requires `message_read_history`. Cursors are a `Date` or a `Message`, never a message id, because Cloak message ids are random UUIDs and not time-sortable. `around` returns a single window and is not auto-paged.
 
 Content decrypts per row against the key for that row's own epoch, and is `''` (never raw ciphertext) when the key is missing. Returned messages are fully actionable and carry `pinned`. See [Message history](/guides/message-history).
+
+<Note>
+  `fetchMessages()` reads a **channel's** history. It cannot address a thread's history yet, so past thread replies are not readable; only live thread messages arrive, on `messageCreate`. See [Known limitations](/production/known-limitations).
+</Note>
 
 ### messageLocation
 
@@ -359,6 +363,163 @@ fetchMembers(serverId: string): Promise<Member[]>
 </Warning>
 
 Enumerates a server's members. See [Member](/api-reference/types#member) and [Members and roles](/guides/members-and-roles).
+
+## Files
+
+End-to-end encrypted file attachments. These ride the REST lane (`client.rest`), which is off until the server operator enables bot REST credentials, and the grant write requires `upload_file`. See [File attachments](/guides/file-attachments).
+
+### sendFile
+
+```ts
+sendFile(
+  serverId: string,
+  channelId: string,
+  file: { name: string; bytes: Buffer; contentType?: string },
+  opts?: SendOptions & { text?: string },
+): Promise<void>
+```
+
+Encrypts and uploads the file, writes the share grant, then sends a message carrying its `[file:id:name]` token on the ordinary `send()` path. If the grant is refused, the upload is deleted and the call rejects, so a message never references an attachment nobody can open. All of [`SendOptions`](/api-reference/types#sendoptions) applies, including `threadId`.
+
+### sendFileDM
+
+```ts
+sendFileDM(
+  userId: string,
+  file: { name: string; bytes: Buffer; contentType?: string },
+  opts?: SendOptions & { text?: string },
+): Promise<void>
+```
+
+The DM twin of `sendFile()`. The file key is wrapped under the pairwise DM key and granted to the recipient. First contact pays the same one-time setup as [`sendDM()`](#senddm).
+
+### downloadAttachment
+
+```ts
+downloadAttachment(fileId: string, serverId?: string | null): Promise<{ bytes: Buffer }>
+```
+
+Downloads and decrypts an attachment referenced by [`msg.attachments`](/api-reference/types#message). Pass the message's `serverId`; for a DM attachment that is `null`, which is correct.
+
+## Threads
+
+Threads fork out of text channels, and a thread's replies are ordinary messages whose channel is the thread. Send into one with `send(serverId, parentChannelId, text, { threadId })`. See [Threads](/guides/threads) for the model and the thread permissions.
+
+### createThread
+
+```ts
+createThread(
+  serverId: string,
+  channelId: string,
+  opts: {
+    title: string;
+    starter?: Pick<Message, 'messageId' | 'authorId' | 'createdAt'>;
+    isPrivate?: boolean;
+    autoArchiveMinutes?: number;
+  },
+): Promise<{ threadId: string }>
+```
+
+Creates a thread on a text channel. `title` is end-to-end encrypted and capped at 100 characters. Anchor it to an existing message by passing `starter` (a received `Message` fits); omit it for a standalone thread. Requires `create_public_thread`, or `create_private_thread` with `isPrivate`. `autoArchiveMinutes` is `0` (the channel default) or one of `60`, `1440`, `4320`, `10080`.
+
+### fetchThreads
+
+```ts
+fetchThreads(
+  serverId: string,
+  channelId: string,
+  opts?: {
+    sort?: 'activity' | 'created';
+    includeArchived?: boolean;
+    onlyMine?: boolean;
+    onlyJoined?: boolean;
+    before?: Date | number;
+    limit?: number;
+  },
+): Promise<{ threads: ThreadInfo[]; hasMore: boolean }>
+```
+
+Pages a channel's threads, active first by default. Private threads are filtered to membership server-side, and `manage_threads` sees all. `before` continues a page from the previous page's oldest sort key.
+
+<Note>
+  Thread enumeration exists, but a thread's **message history** is not addressable yet: [`fetchMessages()`](#fetchmessages) reads the parent channel only. See [Known limitations](/production/known-limitations).
+</Note>
+
+### joinThread
+
+```ts
+joinThread(serverId: string, channelId: string, threadId: string): Promise<void>
+```
+
+Joins a thread, the "follow" surface. A firehose bot already receives every visible thread's messages either way. A private thread cannot be self-joined: its member list is the ACL, and someone inside must add the bot.
+
+### leaveThread
+
+```ts
+leaveThread(serverId: string, channelId: string, threadId: string): Promise<void>
+```
+
+Leaves a thread. Sending into it later auto-rejoins, Discord-parity.
+
+### fetchThreadMembers
+
+```ts
+fetchThreadMembers(serverId: string, channelId: string, threadId: string): Promise<ThreadMember[]>
+```
+
+A thread's member list: any viewer on public threads, members or `manage_threads` on private ones.
+
+### threadParent
+
+```ts
+threadParent(threadId: string): string | undefined
+```
+
+The parent text channel of a thread the SDK has seen, from its thread index. Synchronous and best-effort.
+
+## Polls
+
+Poll **creation** rides `send(serverId, channelId, text, { poll })`. The three methods below act on an existing poll and take the message's location, so a `Message`'s own ids are exactly what to pass. There is no vote method: the backend refuses a bot vote by design, so bots create, close, and read polls, and only humans vote. See [Polls](/guides/polls).
+
+### closePoll
+
+```ts
+closePoll(
+  serverId: string,
+  channelId: string,
+  messageId: string,
+  opts?: { groupId?: string; threadId?: string },
+): Promise<void>
+```
+
+Closes a poll now: creator or `message_manage`. Sets the close time to now and broadcasts the final tally, which doubles as the reveal for a hidden poll.
+
+### fetchPollState
+
+```ts
+fetchPollState(
+  serverId: string,
+  channelId: string,
+  messageId: string,
+  opts?: { groupId?: string; threadId?: string },
+): Promise<PollStateSnapshot>
+```
+
+Reads a poll's current tally. Nothing fires server-side when a poll's end time passes, so a reader who wants the final (or hidden-poll) numbers asks, and this is the ask. Counts are `null` while a hidden poll is still open. The reply also fires [`pollUpdate`](/api-reference/events#pollupdate).
+
+### fetchPollVoters
+
+```ts
+fetchPollVoters(
+  serverId: string,
+  channelId: string,
+  messageId: string,
+  optionIndex: number,
+  opts?: { groupId?: string; threadId?: string },
+): Promise<string[]>
+```
+
+Who picked one option of an identified poll. The refusals are the feature's promises, surfaced verbatim: an anonymous poll is never served, creator included, and a hidden poll refuses while still open.
 
 ## Moderation
 
@@ -668,12 +829,15 @@ See [The guild() handle](/guides/guild-handle).
   <Card title="Events" icon="bell" href="/api-reference/events">
     All 32 events a Client emits.
   </Card>
+
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">
     Message, SendOptions, Member, and the rest.
   </Card>
+
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Every error class an action can reject with.
   </Card>
+
   <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
     Bind a server id once.
   </Card>

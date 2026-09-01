@@ -15,6 +15,7 @@ A Cloak bot can sit in a voice channel, see who else is there, and publish audio
   <Card title="Control plane" icon="signal" href="/voice/joining">
     Join and leave voice channels, read the roster, react to members coming and going, set the bot's own mute flag. Pure JavaScript. No native dependency, no extra install, works on any supported Node host including Alpine.
   </Card>
+
   <Card title="Audio media layer" icon="waveform" href="/voice/audio">
     Publish sound into the channel, and (with the right grant) decrypt what members say. Opt-in. Needs an optional native engine at an exact version, plus a patch you apply in your own app.
   </Card>
@@ -48,7 +49,7 @@ Three separate grants, and they do three different things.
 `voice_connect` plus channel view gets the bot **in**. Hearing is a separate, third decision. A bot is deaf by default and publishing is unaffected by that: a music or text-to-speech bot works perfectly while deaf, and that is the intended configuration rather than a degraded one.
 
 <Note>
-  `voice_listen` (code 30) and `event_invite` (code 29) are the two newest permissions. See [Permission names](/api-reference/permissions) for the complete list.
+  `voice_listen` is code 30 of the 43 permissions. See [Permission names](/api-reference/permissions) for the complete list.
 </Note>
 
 ## What a voice bot can do
@@ -77,12 +78,15 @@ Three separate grants, and they do three different things.
   <Card title="Joining voice" icon="phone" href="/voice/joining">
     The control plane: join, leave, roster, events. No native dependency.
   </Card>
+
   <Card title="Voice keys and scopes" icon="key" href="/voice/keys">
     Where the frame key comes from, and the one line of code that produces silence.
   </Card>
+
   <Card title="Publishing audio" icon="music" href="/voice/audio">
     `VoiceMediaSession`, the player, and the resource helpers.
   </Card>
+
   <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
     The mandatory engine patch, host requirements, and a symptom-to-cause table.
   </Card>

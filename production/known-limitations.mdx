@@ -48,6 +48,12 @@ The backend implements most of these operations for DMs, but their result hooks 
 
 Not implemented. The group-DM lane has a different, versioned key model. 1:1 DMs are the whole DM surface today.
 
+### Thread message history
+
+[`fetchThreads()`](/api-reference/client#fetchthreads) enumerates a channel's threads, but a thread's **message history** is not readable: [`fetchMessages()`](/api-reference/client#fetchmessages) addresses the parent channel only. The wire allows it, and the SDK just has not built the paging against the entered-thread cursor yet.
+
+The practical consequence: a bot only sees thread replies that arrive live on `messageCreate`. After a restart, past thread replies cannot be recovered, so state derived from them (a bridge's exact reaction bookkeeping, for example) cannot be rebuilt from history the way channel state can. Expected to change in a later release.
+
 ### The REST lane is off by default
 
 `client.rest` is disabled server-side. The first call rejects with a message saying the flag is unset. When an operator does enable it, the credential is scoped behind a default-deny allowlist that denies the custom-emoji and audit-log reads, which is why the SDK ships no `fetchCustomEmojis()` and no `fetchAuditLog()`. See [What the server must support](/production/backend-requirements).
@@ -78,7 +84,7 @@ They remain on the type for compatibility with code written before the removal.
 
 ### A bot cannot detect a voice encryption failure
 
-The voice media engine surfaces **no per-participant end-to-end encryption failure state**. The generic encryption-error event carries no identity, missing-key and decryption-failed conditions are dropped, and a keyless frame decryptor retries quietly forever. The one per-participant event that exists reports that frames are *marked* encrypted and stays true through the exact key and identity mismatch cases you would want it to catch.
+The voice media engine surfaces **no per-participant end-to-end encryption failure state**. The generic encryption-error event carries no identity, missing-key and decryption-failed conditions are dropped, and a keyless frame decryptor retries quietly forever. The one per-participant event that exists reports that frames are _marked_ encrypted and stays true through the exact key and identity mismatch cases you would want it to catch.
 
 So **a bot cannot detect that nobody can decrypt it**, and a listening bot cannot detect that it is failing to decrypt someone. Silence is the only symptom, and nothing reports it.
 
@@ -114,7 +120,7 @@ Rendering a card fetches its media, which reveals the **viewer's IP address** to
 
 There is deliberately **no option, environment variable or flag** that widens the allowed origin. The link slots (`url`, `author.url`, `provider.url`) are unrestricted, because nothing is fetched for them at render.
 
-Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. A bot-side upload helper is designed but not shipped, because it needs the REST lane that is disabled server-side.
+Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. [File attachments](/guides/file-attachments) do not produce card media: `sendFile()` uploads end-to-end encrypted blobs, not publicly fetchable media on that origin.
 
 ### `fields` render on desktop only
 
@@ -132,6 +138,7 @@ Two properties you have to design around rather than work around.
   <Accordion title="There is no ephemerality">
     An invocation is a normal message encrypted with the channel's key. **Every member holding that key can read every invocation**, and it is a durable message row. There is no "only you can see this". Ephemeral responses need a different key lane and are a later version. Do not fake them by deleting the message afterwards.
   </Accordion>
+
   <Accordion title="The registry menu is plaintext server-side">
     Command names, descriptions, option names and choice labels are stored and served **unencrypted**, so that a client's picker can render them without holding a key. Never put a secret, an internal hostname, or a customer name in a command description or a choice label.
   </Accordion>
@@ -156,12 +163,15 @@ Two more mechanics worth knowing: register commands **before** `login()`, becaus
   <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
     Symptom-indexed triage for the failures you can see.
   </Card>
+
   <Card title="What the server must support" icon="server" href="/production/backend-requirements">
     The server-side half of this list.
   </Card>
+
   <Card title="Deploying a bot" icon="rocket" href="/production/deploying">
     Getting a bot onto a host without tripping over the keystore.
   </Card>
+
   <Card title="Changelog and migration" icon="clock-rotate-left" href="/changelog">
     What changed in 0.2.0, including the breaking changes.
   </Card>
