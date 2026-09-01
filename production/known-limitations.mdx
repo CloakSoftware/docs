@@ -48,12 +48,6 @@ The backend implements most of these operations for DMs, but their result hooks 
 
 Not implemented. The group-DM lane has a different, versioned key model. 1:1 DMs are the whole DM surface today.
 
-### Thread message history
-
-[`fetchThreads()`](/api-reference/client#fetchthreads) enumerates a channel's threads, but a thread's **message history** is not readable: [`fetchMessages()`](/api-reference/client#fetchmessages) addresses the parent channel only. The wire allows it, and the SDK just has not built the paging against the entered-thread cursor yet.
-
-The practical consequence: a bot only sees thread replies that arrive live on `messageCreate`. After a restart, past thread replies cannot be recovered, so state derived from them (a bridge's exact reaction bookkeeping, for example) cannot be rebuilt from history the way channel state can. Expected to change in a later release.
-
 ### The REST lane is off by default
 
 `client.rest` is disabled server-side. The first call rejects with a message saying the flag is unset. When an operator does enable it, the credential is scoped behind a default-deny allowlist that denies the custom-emoji and audit-log reads, which is why the SDK ships no `fetchCustomEmojis()` and no `fetchAuditLog()`. See [What the server must support](/production/backend-requirements).
@@ -155,6 +149,7 @@ Two more mechanics worth knowing: register commands **before** `login()`, becaus
 | An embed posted fine but has no images | A server-side image-proxy setting. See [What the server must support](/production/backend-requirements). |
 | The bot disconnected once and never retried | A terminal login rejection, `-2` or `-12`. Retrying cannot fix either. |
 | Events for a server the bot has not selected do not arrive | Requires a backend with membership-routed hooks. |
+| A thread history read rejects instead of returning rows | The server answered with the parent channel's messages, which means the backend does not support thread history. Handing those back as the thread's would be worse. See [What the server must support](/production/backend-requirements). |
 | `WebTransport` fails on your PaaS image | That lane needs glibc 2.38 or newer. The default `wss://` lane needs nothing. |
 
 ## Next

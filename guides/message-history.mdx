@@ -106,7 +106,7 @@ const context = await client.fetchMessages(serverId, channelId, {
   Return a single window of about 50 messages straddling the cursor. Not auto-paginated.
 </ParamField>
 
-<ParamField path="limit" type="number" default="50">
+<ParamField path="limit" default="50" type="number">
   How many messages to keep. Applies to `before`, `after`, and a cursorless read. `around` ignores it for paging.
 </ParamField>
 
@@ -114,9 +114,40 @@ const context = await client.fetchMessages(serverId, channelId, {
   The channel's group, where you already know it.
 </ParamField>
 
+<ParamField path="threadId" type="string">
+  Read a thread's history rather than the channel's. `channelId` is then the thread's **parent** text channel. See [Read a thread's history](#read-a-threads-history).
+</ParamField>
+
 <Info>
   The whole paged read runs as one serialized action, so the channel selection cannot move mid-read. You get a consistent slice even when several pages are fetched under the hood.
 </Info>
+
+## Read a thread's history
+
+Pass `threadId` to read a thread instead of a channel. Address it the way a send does: the thread's **parent** text channel as `channelId`, the thread id in the options.
+
+```ts
+const backlog = await client.fetchMessages(serverId, parentChannelId, {
+  threadId,
+  limit: 200,
+});
+```
+
+This matters most after a restart. Only live thread messages arrive on `messageCreate`, so a bot that derives state from thread replies (a bridge tracking reactions, for example) has no other way to rebuild it.
+
+Everything on this page applies unchanged: the same cursors, the same auto-paging, the same `message_read_history` permission, the same per-row decryption. What differs is what comes back. Rows carry `threadId` and `threadParentId`, and their `channelId` is the thread rather than the parent, exactly as live thread messages report themselves. That is what makes acting on a fetched row stay inside the thread.
+
+```ts
+for (const msg of backlog) {
+  if (msg.content === '!resolved') await msg.react('✅'); // reacts in the thread
+}
+```
+
+<Note>
+  Thread history needs a Cloak server that supports it. On an older backend the read falls back to the parent channel's messages, and the SDK rejects rather than returning them under the thread's name. See [What the server must support](/production/backend-requirements).
+</Note>
+
+See [Threads](/guides/threads) for the rest of the thread surface.
 
 ## Returned messages are live
 
@@ -154,7 +185,7 @@ const readable = history.filter((msg) => msg.content !== '');
 
 A bot only holds keys from the epochs it was present for, so history from before it joined, or from before a key cycle, commonly reads as `''`.
 
-## Requires the message_read_history permission
+## Requires the message\_read\_history permission
 
 `fetchMessages` requires the `message_read_history` permission. If the server has not granted it, the promise rejects with a `CloakActionError` whose `.permission` is `'message_read_history'`.
 
@@ -218,13 +249,16 @@ if (where?.serverId) {
   <Card title="The Message object" icon="message" href="/api-reference/types#message">
     Everything a returned message can do.
   </Card>
+
   <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
     Why DM history is out of scope, and what you get instead.
   </Card>
+
   <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
     How mentions and mentionsMe are derived.
   </Card>
+
   <Card title="Permissions" icon="key" href="/concepts/permissions">
-    What message_read_history grants and how.
+    What message\_read\_history grants and how.
   </Card>
 </CardGroup>

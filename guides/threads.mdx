@@ -44,7 +44,20 @@ client.on('threadDelete', (t) => console.log('thread gone', t));
 
 Archiving is computed lazily server-side from `autoArchiveMinutes`; sending into an archived thread simply revives it. Thread messages never expire.
 
-## Reading and membership
+## Read a thread's history
+
+`fetchMessages()` takes a `threadId` and pages the thread's own messages, addressed the same way a send is: the **parent** channel id plus the thread. This is what lets a bot recover state across a restart, since only live thread messages arrive on `messageCreate`.
+
+```ts
+const backlog = await client.fetchMessages(serverId, parentChannelId, {
+  threadId,
+  limit: 200,
+});
+```
+
+Every cursor works exactly as it does on a channel (`before`, `after`, `around`, `limit`), and it needs the same `message_read_history` permission. Rows come back with `threadId` and `threadParentId` set, so acting on one stays inside the thread. See [Message history](/guides/message-history).
+
+## Enumeration and membership
 
 `fetchThreads(serverId, channelId)` lists a channel's threads, `joinThread` / `leaveThread` manage the bot's membership, and `fetchThreadMembers` reads a thread's roster. Message actions (react, edit, delete, pin) on thread messages route through the thread automatically.
 

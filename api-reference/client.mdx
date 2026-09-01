@@ -304,6 +304,7 @@ fetchMessages(
     around?: Date | Message;
     limit?: number;
     groupId?: string;
+    threadId?: string;
   },
 ): Promise<Message[]>
 ```
@@ -312,8 +313,22 @@ Reads message history for a channel, returned oldest to newest and auto-paginate
 
 Content decrypts per row against the key for that row's own epoch, and is `''` (never raw ciphertext) when the key is missing. Returned messages are fully actionable and carry `pinned`. See [Message history](/guides/message-history).
 
+<ParamField path="threadId" type="string">
+  Read this **thread's** history instead of the channel's. Address it exactly as [`send()`](#send) does: the thread's **parent** text channel as `channelId`, the thread id here. Every cursor above behaves identically over the thread's own messages, and the same `message_read_history` permission applies.
+
+  Returned rows carry `threadId` and `threadParentId`, and their `channelId` is the thread, matching how live thread messages report themselves. So `reply()`, `react()` and `edit()` on a fetched row act inside the thread rather than the parent channel.
+</ParamField>
+
+```ts
+// Recover a thread's backlog after a restart.
+const backlog = await client.fetchMessages(serverId, parentChannelId, {
+  threadId,
+  limit: 200,
+});
+```
+
 <Note>
-  `fetchMessages()` reads a **channel's** history. It cannot address a thread's history yet, so past thread replies are not readable; only live thread messages arrive, on `messageCreate`. See [Known limitations](/production/known-limitations).
+  Thread history needs a Cloak server that supports it. Against an older backend the call rejects rather than quietly returning the **parent channel's** messages, because that is what the wire falls back to. See [Known limitations](/production/known-limitations).
 </Note>
 
 ### messageLocation
@@ -403,7 +418,7 @@ Downloads and decrypts an attachment referenced by [`msg.attachments`](/api-refe
 
 ## Threads
 
-Threads fork out of text channels, and a thread's replies are ordinary messages whose channel is the thread. Send into one with `send(serverId, parentChannelId, text, { threadId })`. See [Threads](/guides/threads) for the model and the thread permissions.
+Threads fork out of text channels, and a thread's replies are ordinary messages whose channel is the thread. Send into one with `send(serverId, parentChannelId, text, { threadId })`, and read one with `fetchMessages(serverId, parentChannelId, { threadId })`. See [Threads](/guides/threads) for the model and the thread permissions.
 
 ### createThread
 
@@ -442,7 +457,7 @@ fetchThreads(
 Pages a channel's threads, active first by default. Private threads are filtered to membership server-side, and `manage_threads` sees all. `before` continues a page from the previous page's oldest sort key.
 
 <Note>
-  Thread enumeration exists, but a thread's **message history** is not addressable yet: [`fetchMessages()`](#fetchmessages) reads the parent channel only. See [Known limitations](/production/known-limitations).
+  This enumerates threads, not their contents. To read the messages inside one, pass its id to [`fetchMessages()`](#fetchmessages) as `opts.threadId`.
 </Note>
 
 ### joinThread

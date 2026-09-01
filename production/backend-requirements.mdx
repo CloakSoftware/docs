@@ -79,15 +79,23 @@ These are not settings. They are whether the server you are talking to is recent
   <Accordion title="Server member lists: fetchMembers() is broken everywhere today">
     A backend change made op-30 direct-message-only, so a server-scoped request produces **no reply frame of any kind**, not even an error code. `fetchMembers()` neither resolves nor rejects. It hangs until the transport timeout. This affects every bot on every server, and it is blocked on a backend rebuild. There is no version of the server today where it works. See [Known limitations](/production/known-limitations).
   </Accordion>
+
   <Accordion title="timeout(): needs a backend that routes op-160">
     `timeout()` and `removeTimeout()` require `member_timeout` **and** a server carrying the timeout plan. Older servers drop the opcode, so the call times out rather than resolving. A working server acknowledges it.
   </Accordion>
+
   <Accordion title="Reaction and pin acks: need the numeric bot ack">
     `react()`, `unreact()`, `pin()` and `unpin()` await a numeric ack that a backend has to send. Without it the awaited action cannot resolve, because the same opcode also carries the broadcast hook and the SDK will not accept a broadcast as its own acknowledgement.
   </Accordion>
+
   <Accordion title="Cross-server events: need membership-routed hooks">
     Reaction, channel, group and server lifecycle events reaching a bot for a server it has not selected requires a backend with membership-routed server hooks. On an older server, `serverId` and `channelId` on those events fall back to the bot's current selection cursor, which is a less useful answer.
   </Accordion>
+
+  <Accordion title="Thread message history: needs the thread-channels plan">
+    Reading a thread's history, [`fetchMessages()`](/api-reference/client#fetchmessages) with `opts.threadId`, requires a backend that honors the thread target on the two history opcodes. This is the rare case that fails **loudly**: on an older server the read falls back to the parent channel's messages, and rather than hand those back as the thread's, the SDK rejects with an error naming the cause. Everything else about threads (creating, sending, receiving, enumerating) is unaffected.
+  </Accordion>
+
   <Accordion title="The slash-command menu: needs the bot command registry">
     `login()` publishes your registered command menu so a human's `/` picker can list it. This needs a backend running the bot-command-registry work. Against an older backend the frame goes nowhere and the SDK carries on: publication is best-effort and never blocks login, and every command still dispatches over the text lane. See [Slash commands](/guides/slash-commands).
   </Accordion>
@@ -103,12 +111,15 @@ The wire format is stable and backward-compatible. A backend that is missing one
   <Card title="Known limitations" icon="triangle-exclamation" href="/production/known-limitations">
     The client-side half of the same honesty.
   </Card>
+
   <Card title="When a bot will not start" icon="stethoscope" href="/production/troubleshooting">
     Symptom-indexed triage for the failures you can see.
   </Card>
+
   <Card title="The REST lane" icon="cloud-arrow-up" href="/guides/rest-api">
     What `client.rest` is for, once an operator enables it.
   </Card>
+
   <Card title="Webhook embeds" icon="image" href="/guides/webhook-embeds">
     The lane the image proxy applies to.
   </Card>
