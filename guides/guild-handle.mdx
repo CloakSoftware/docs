@@ -128,8 +128,16 @@ All of these are covered in [Moderation](/guides/moderation), including the role
 
 ### Channels and groups
 
+<ParamField path="fetchChannels" type="() => Promise<ChannelInfo[]>">
+  List this server's visible channels, with each one's name, group, and type.
+</ParamField>
+
+<ParamField path="getChannel" type="(channelId: string) => ChannelInfo | undefined">
+  One channel from the cache, read synchronously, or `undefined` if the bot has not seen it.
+</ParamField>
+
 <ParamField path="createChannel" type="(name: string, groupId: string, type?: number) => Promise<string>">
-  Create a channel inside a group and resolve to its new id.
+  Create a channel inside a group and resolve to its new id. `type` defaults to `0`, a text channel.
 </ParamField>
 
 <ParamField path="editChannel" type="(channelId: string, groupId: string, name: string) => Promise<void>">
@@ -271,12 +279,15 @@ Every call above delegates to the flat client, so if you already know the flat m
   <Card title="Moderation" icon="gavel" href="/guides/moderation">
     Kicks, bans, and timeouts in full.
   </Card>
+
   <Card title="Channels and groups" icon="folder-tree" href="/guides/channels-and-groups">
     Create, edit, and move channels and groups.
   </Card>
+
   <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
     SendOptions, and why a send is fire-and-forget.
   </Card>
+
   <Card title="Client reference" icon="book" href="/api-reference/client">
     Every flat method the handle binds.
   </Card>

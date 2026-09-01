@@ -509,6 +509,86 @@ interface MessageLocation {
   The message's send time in milliseconds, or `null`.
 </ResponseField>
 
+## ChannelInfo
+
+One channel of a server, returned by [`fetchChannels()`](/api-reference/client#fetchchannels) and [`getChannel()`](/api-reference/client#getchannel).
+
+```ts
+interface ChannelInfo {
+  id: string;
+  name: string;
+  groupId: string;
+  type: number;
+  order: number;
+  lastMessageAt: Date | null;
+}
+```
+
+<ResponseField name="id" type="string">
+  The channel's normalized id, in the same shape as every other id the SDK hands you.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The channel's name.
+</ResponseField>
+
+<ResponseField name="groupId" type="string">
+  The channel's group, which the Cloak clients call a category. This is the value `SendOptions.groupId` and `deleteChannel()` want.
+</ResponseField>
+
+<ResponseField name="type" type="number">
+  What kind of channel this is. Compare against [`ChannelType`](#channeltype).
+
+  Deliberately a plain `number` rather than a narrowed union, so a channel kind newer than your installed SDK still appears in the list with its wire code intact instead of being dropped or mislabelled.
+</ResponseField>
+
+<ResponseField name="order" type="number">
+  The channel's sort position within its group.
+</ResponseField>
+
+<ResponseField name="lastMessageAt" type="Date | null">
+  When the channel last received a message, or `null` if it never has. Always `null` on channel kinds that do not carry messages.
+</ResponseField>
+
+<Note>
+  The channel list is filtered server-side to what your bot may view, so an absent channel is one the bot cannot see rather than one that does not exist. The SDK does no permission math of its own.
+</Note>
+
+## ChannelType
+
+The named channel-type codes, for comparing against [`ChannelInfo.type`](#channelinfo) and for passing to [`createChannel()`](/api-reference/client#createchannel).
+
+```ts
+const ChannelType = {
+  TEXT: 0,
+  VOICE: 1,
+  CALENDAR: 2,
+  BOARD: 3,
+  FORUM: 4,
+  TICKET: 5,
+} as const;
+```
+
+```ts
+import { ChannelType, channelTypeName } from '@cloak-software/bot-sdk';
+
+const channels = await client.fetchChannels(serverId);
+const voice = channels.filter((c) => c.type === ChannelType.VOICE);
+
+channelTypeName(1); // 'VOICE'
+channelTypeName(99); // undefined
+```
+
+Text and voice are the two your bot is most likely to care about: text channels are where `send()` works, and voice channels are what [`joinVoice()`](/api-reference/client#joinvoice) accepts.
+
+<Note>
+  This list is what Cloak ships today, and it grows. Treat an unrecognized `type` as a channel kind your SDK predates rather than as bad data. `channelTypeName(code)` returns the name for a known code and `undefined` for anything else, which is the cheapest way to tell the two apart.
+</Note>
+
+<Warning>
+  A channel created before Cloak had channel types carries no type on the wire. The SDK reports those as `ChannelType.TEXT`, which is what they are and what every Cloak client treats them as. You will never see a `null` here.
+</Warning>
+
 ## VoiceConnection
 
 Your bot's own voice membership, returned by [`joinVoice()`](/api-reference/client#joinvoice) and [`voiceConnection()`](/api-reference/client#voiceconnection).

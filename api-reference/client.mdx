@@ -586,7 +586,39 @@ Lifts a member's timeout. Equivalent to `timeout()` with `0` seconds.
 
 ## Channels and groups
 
-All of these require `manage_channels` and reject with [`CloakActionError`](/api-reference/errors) on a server deny. See [Channels and groups](/guides/channels-and-groups).
+Reading the channel list needs no permission beyond being able to see the server. Every method from [`createChannel`](#createchannel) down requires `manage_channels`. All of them reject with [`CloakActionError`](/api-reference/errors) on a server deny. See [Channels and groups](/guides/channels-and-groups).
+
+### fetchChannels
+
+```ts
+fetchChannels(serverId: string): Promise<ChannelInfo[]>
+```
+
+Lists a server's channels in the server's own order. Each entry is a [`ChannelInfo`](/api-reference/types#channelinfo), carrying `id`, `name`, `groupId`, `type`, `order`, and `lastMessageAt`.
+
+Compare `type` against [`ChannelType`](/api-reference/types#channeltype) to tell a text channel from a voice one.
+
+```ts
+import { ChannelType } from '@cloak-software/bot-sdk';
+
+const channels = await client.fetchChannels(serverId);
+const voice = channels.filter((c) => c.type === ChannelType.VOICE);
+const general = channels.find((c) => c.name === 'general');
+```
+
+The list is filtered server-side to the channels your bot may view, so a channel that is absent is one the bot cannot see rather than one that does not exist. A server with no channels at all resolves to an empty array rather than rejecting.
+
+This fetches rather than reading a cache, and deliberately so: the channel list arrives as a server push that carries no server id, so the call issues the selection itself and attributes the rows it gets back to that server. It also seeds `getChannel()`.
+
+### getChannel
+
+```ts
+getChannel(serverId: string, channelId: string): ChannelInfo | undefined
+```
+
+One channel from the cache, read synchronously, or `undefined`. The cache is seeded by `fetchChannels()` and kept current by `createChannel()` and the [channel lifecycle events](/api-reference/events#channelcreate), so a hit is accurate.
+
+A miss is not proof the channel does not exist, only that the bot has not seen it yet. Call `fetchChannels()` when you need an authoritative answer.
 
 ### createChannel
 
@@ -594,7 +626,7 @@ All of these require `manage_channels` and reject with [`CloakActionError`](/api
 createChannel(serverId: string, name: string, groupId: string, channelType?: number): Promise<string>
 ```
 
-Creates a channel in a group and returns the new channel's id. `channelType` defaults to `0`, a text channel.
+Creates a channel in a group and returns the new channel's id. `channelType` defaults to `0`, a text channel; pass a [`ChannelType`](/api-reference/types#channeltype) value such as `ChannelType.VOICE` for anything else. The new channel is added to the [`getChannel()`](#getchannel) cache.
 
 ### editChannel
 
@@ -809,7 +841,7 @@ The handle exposes `id`, plus:
 | History | `fetchMessages(channelId, opts?)` |
 | Moderation | `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans` |
 | Reads | `fetchRoles()`, `fetchMembers()` |
-| Channels | `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup` |
+| Channels | `fetchChannels()`, `getChannel(channelId)`, `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup` |
 | Voice | `joinVoice(channelId, opts?)`, `refreshVoiceRoster()` |
 | Webhooks | `webhooks.list`, `.create`, `.edit`, `.regenerate`, `.delete`, `.post` |
 | Permissions | `can(perm)`, `permissions()`, `visibleChannelIds()` |
