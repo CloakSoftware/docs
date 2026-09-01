@@ -5,7 +5,7 @@ description: "All 31 permission names you can declare or check, their wire codes
 
 Permissions are referenced by name throughout the SDK. You declare them in [`requiredPermissions`](/api-reference/client#constructor-options), check them with [`can()`](/api-reference/client#can), and read them from a [`PermissionSet`](#permissionset). The names below are the exact strings to use.
 
-There are **31 permissions, codes 0 through 30**. Names are what you write; the integer codes are the wire contract, and they matter only if you decode a raw grant yourself.
+There are **43 permissions, codes 0 through 42**. Names are what you write; the integer codes are the wire contract, and they matter only if you decode a raw grant yourself.
 
 For how declaring and granting work together, see the [Permissions concept](/concepts/permissions).
 
@@ -51,6 +51,7 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 | `view_text` | 1 | View text channels. Required to receive their messages. |
 | `view_voice` | 2 | View voice channels. |
 | `message_read_history` | 20 | Read past messages in a channel. |
+| `member_list` | 32 | View the member list. |
 
 <Note>
   `view_text` is what puts a text channel on your bot's [firehose](/concepts/message-delivery). Without it in a given channel, your bot does not receive that channel's messages at all.
@@ -67,6 +68,28 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 | `reaction_add` | 18 | Add reactions to messages. |
 | `mention_roles` | 19 | Mention roles. |
 | `commands` | 21 | Use commands. |
+| `send_tts` | 33 | Send text-to-speech messages. |
+| `send_voice_message` | 34 | Send voice memos. |
+
+## Threads
+
+| Name | Code | Controls |
+| --- | --- | --- |
+| `create_public_thread` | 39 | Create public threads. |
+| `create_private_thread` | 40 | Create private threads. |
+| `send_in_thread` | 41 | Send messages inside threads. |
+| `manage_threads` | 42 | Archive, lock, rename, and delete any thread, and see private threads uninvited. |
+
+New in SDK 0.3.0, and what [`createThread()`](/api-reference/client#createthread) and thread sends gate on. See [Threads](/guides/threads).
+
+## Operations
+
+| Name | Code | Controls |
+| --- | --- | --- |
+| `operations_view` | 35 | View the operations space. |
+| `operations_staff_content` | 36 | See staff-only operations content. |
+| `operations_manage` | 37 | Manage operations settings and tickets. |
+| `operations_protected_identity` | 38 | See protected reporter identities. |
 
 ## Members
 
@@ -90,6 +113,7 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 | `members_deafen` | 27 | Deafen members in voice. |
 | `members_move` | 28 | Move members between voice channels. |
 | `voice_listen` | 30 | Receive other members' voice media. |
+| `soundboard_use` | 31 | Play soundboard sounds. |
 
 <Warning>
   **`voice_listen` is the permission that decides whether your bot can hear anything.** `voice_connect` does not imply it.
@@ -118,18 +142,18 @@ const needed: PermissionName[] = ['view_text', 'message_send'];
 ### PermissionName
 
 ```ts
-type PermissionName = 'administrator' | 'view_text' | /* ...29 more... */ | 'voice_listen';
+type PermissionName = 'administrator' | 'view_text' | /* ...41 more... */ | 'manage_threads';
 ```
 
-A union of all 31 names, so you get autocomplete and compile-time checking.
+A union of all 43 names, so you get autocomplete and compile-time checking.
 
-### PERMISSION_CODES
+### PERMISSION\_CODES
 
 ```ts
 const PERMISSION_CODES: Record<PermissionName, number>
 ```
 
-Maps each name to its wire code, `0` through `30`.
+Maps each name to its wire code, `0` through `42`.
 
 ```ts
 import { PERMISSION_CODES } from '@cloak-software/bot-sdk';
@@ -137,7 +161,7 @@ import { PERMISSION_CODES } from '@cloak-software/bot-sdk';
 PERMISSION_CODES.message_send; // 14
 ```
 
-### PERMISSION_NAMES
+### PERMISSION\_NAMES
 
 ```ts
 const PERMISSION_NAMES: PermissionName[]
@@ -151,7 +175,7 @@ Every name, indexed **by wire code**: `PERMISSION_NAMES[14]` is `'message_send'`
 type PermissionSet = { effectiveRank: number } & Record<PermissionName, boolean>;
 ```
 
-The resolved capability set for one server: 31 named booleans plus a numeric rank. You get one from [`permissions(serverId)`](/api-reference/client#permissions), and the same shape is spread into the [`permissionsUpdate`](/api-reference/events#permissionsupdate) payload.
+The resolved capability set for one server: 43 named booleans plus a numeric rank. You get one from [`permissions(serverId)`](/api-reference/client#permissions), and the same shape is spread into the [`permissionsUpdate`](/api-reference/events#permissionsupdate) payload.
 
 <ResponseField name="effectiveRank" type="number">
   The bot's effective rank in the server. Moderation actions compare ranks: your bot cannot kick, ban, or time out a member whose rank is not below its own.
@@ -192,13 +216,16 @@ if (set.message_send) { /* ... */ }
   <Card title="Permissions concept" icon="key" href="/concepts/permissions">
     How declaring and granting fit together.
   </Card>
+
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Reading the permission a denial names.
   </Card>
+
   <Card title="Client" icon="book" href="/api-reference/client">
     can(), permissions(), and visibleChannelIds().
   </Card>
+
   <Card title="Voice keys" icon="microphone" href="/voice/keys">
-    Why voice_listen decides what a bot hears.
+    Why voice\_listen decides what a bot hears.
   </Card>
 </CardGroup>
