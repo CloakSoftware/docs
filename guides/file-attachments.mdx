@@ -1,0 +1,81 @@
+---
+title: "File attachments"
+description: "Send and receive end-to-end encrypted files with sendFile, sendFileDM, and downloadAttachment."
+---
+
+Your bot can attach files to channel messages and DMs, and open the files humans post. Attachments are end-to-end encrypted: the blob is AES-256-GCM encrypted under a fresh per-file key before upload, the key travels as a conversation-wrapped grant the server cannot open, and the message itself just carries a `[file:<id>:<name>]` token inside its encrypted body on the ordinary `send()` path.
+
+<Warning>
+  Attachments ride the REST lane (`client.rest`), which is **off until the server operator enables bot REST credentials**. Until then every call here rejects with the lane's "disabled server-side" error. See [The REST lane](/guides/rest-api). The grant write also requires the `upload_file` permission in the target server.
+</Warning>
+
+## Send a file to a channel
+
+```ts
+import { readFile } from 'node:fs/promises';
+
+await client.sendFile(serverId, channelId,
+  { name: 'report.pdf', bytes: await readFile('report.pdf') },
+  { text: 'weekly report' });
+```
+
+`sendFile` encrypts, uploads, writes the share grant, and only then sends the message. If the grant is refused it deletes the upload and rejects, so a message never references an attachment nobody can open. Thread sends work too: pass `{ threadId }` in the options like any other send.
+
+## Send a file in a DM
+
+```ts
+await client.sendFileDM(userId, { name: 'log.txt', bytes });
+```
+
+Same shape, different grant: the key is wrapped under the pairwise DM key and granted to the recipient's user id. First contact pays the same one-time setup as `sendDM()`.
+
+## Receive and download
+
+Incoming attachments are parsed out of the decrypted body and exposed on the message:
+
+```ts
+client.on('messageCreate', async (msg) => {
+  for (const ref of msg.attachments) {
+    const { bytes } = await client.downloadAttachment(ref.fileId, msg.serverId);
+    await writeFile(ref.name, bytes); // ref.name is untrusted sender text
+  }
+});
+```
+
+`msg.attachments` is parse-only: an entry proves the sender **named** a file, not that your bot may read it. Authorization happens at download time, against the grant the server holds.
+
+<Note>
+  Grants are epoch-tagged. `downloadAttachment` reads the epoch off the grant and acquires that epoch's key when the keystore lacks it, so files shared before your bot's current epoch still open. After a server **root key cycle**, older attachments are permanently unopenable. That is the rotation design, not a bug.
+</Note>
+
+## Limits and metering
+
+Per-file and total-storage limits are the **bot owner's plan tier**, not a bot-specific number, and bot transfers are metered by a rolling bandwidth window in both directions. The server's verdict surfaces verbatim as a `CloakRestError`:
+
+| `errorCode` | Meaning |
+| --- | --- |
+| `file_too_large` | Over the owner's per-file limit |
+| `storage_exceeded` | The owner's storage pool is full (shared across the owner and all their bots) |
+| `bot_bandwidth_exceeded` | The rolling window is spent; the 429 body carries `retry_after_seconds`, and the SDK never auto-retries it |
+
+A download can also fail with a "pre-060 raw-key grant" error: the file was shared by an outdated client using the legacy raw-key format, and its owner must re-share it. The SDK never produces raw-key grants itself.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="The REST lane" icon="globe" href="/guides/rest-api">
+    The credential these calls ride, and why it is off by default.
+  </Card>
+
+  <Card title="What is encrypted, and what is not" icon="lock" href="/concepts/encryption-lanes">
+    Where attachments sit among Cloak's encryption lanes.
+  </Card>
+
+  <Card title="Crypto reference" icon="key" href="/api-reference/crypto">
+    `fileCipher`, `parseFileKeyGrant`, and the exported grant helpers.
+  </Card>
+
+  <Card title="Handling errors" icon="triangle-exclamation" href="/guides/handling-errors">
+    `CloakRestError` and reading `errorCode`.
+  </Card>
+</CardGroup>
