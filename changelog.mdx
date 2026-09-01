@@ -3,7 +3,23 @@ title: "Changelog and migration"
 description: "What changed in 0.2.0, what it breaks in a 0.1.x bot, and the checklist for moving across."
 ---
 
-The current version is `0.2.0`. Check what you have with `npm ls @cloak-software/bot-sdk`.
+The current version is `0.3.0`. Check what you have with `npm ls @cloak-software/bot-sdk`.
+
+## 0.3.0
+
+No breaking changes. Everything in this release is additive, and a 0.2.0 bot runs unmodified.
+
+### Added
+
+- **File attachments.** `sendFile()`, `sendFileDM()`, `downloadAttachment()`, and `Message.attachments`. End-to-end encrypted, conversation-wrapped key grants, limits billed to the bot owner's plan, transfers metered by a rolling bandwidth window. Rides the REST lane, so it needs the server operator to have enabled bot REST credentials. See [File attachments](/guides/file-attachments).
+- **Threads.** `createThread()`, sending with `{ threadId }`, `Message.threadId` / `Message.threadParentId`, `fetchThreads()`, `joinThread()` / `leaveThread()`, `fetchThreadMembers()`, and the `threadUpdate` / `threadDelete` events. Reactions, edits, pins, polls, and attachments all work inside threads. See [Threads](/guides/threads).
+- **Polls.** Create with `SendOptions.poll`, read with `Message.poll`, plus `fetchPollState()`, `closePoll()`, `fetchPollVoters()`, and the `pollUpdate` event. Bots never vote: the server refuses a bot vote before reading a single row, and the SDK ships no vote API. See [Polls](/guides/polls).
+- **Permissions 31 through 42.** The declared-permission table now covers the full backend range, including `soundboard_use`, `member_list`, `send_tts`, `send_voice_message`, the four operations codes, and the four thread codes (`create_public_thread`, `create_private_thread`, `send_in_thread`, `manage_threads`).
+- **Distribution.** Not an SDK surface, but new alongside this release: the developer portal and bot invite links. See [Distribute your bot](/distributing).
+
+### Changed
+
+- `CloakRestError` now carries the response body verbatim, so metering verdicts (`bot_bandwidth_exceeded` with `retry_after_seconds`, `file_too_large`, `storage_exceeded`) surface unmodified. The SDK never auto-retries a 429.
 
 ## 0.2.0
 
@@ -149,12 +165,15 @@ The default WebSocket lane is live-verified too, through an integration harness 
   <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
     The current send surface, options object and all.
   </Card>
+
   <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
     Why `serverId` went nullable, and what a DM message can and cannot do.
   </Card>
+
   <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
     Pills, pings, and when a true reply is the right call.
   </Card>
+
   <Card title="Install and requirements" icon="download" href="/install">
     The supported Node range and why it is what it is.
   </Card>

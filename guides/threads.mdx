@@ -1,0 +1,73 @@
+---
+title: "Threads"
+description: "Create threads, send into them, and answer messages inside them. Everything a message can do works in a thread."
+---
+
+Threads fork out of text channels. A thread's replies are ordinary messages whose channel IS the thread, so everything the SDK does to a message (encryption, reactions, edits, polls, replies, attachments) works inside threads unchanged. Thread permissions are their own axis: `create_public_thread`, `create_private_thread`, `send_in_thread`, and `manage_threads`, declared in `requiredPermissions` like any other.
+
+## Create a thread and talk in it
+
+```ts
+client.on('messageCreate', async (msg) => {
+  if (msg.content !== '!triage') return;
+  const { threadId } = await client.createThread(msg.serverId!, msg.channelId, {
+    title: 'triage', starter: msg,
+  });
+  await client.send(msg.serverId!, msg.channelId, 'tracking here', { threadId });
+});
+```
+
+`createThread` takes the parent channel and an options object: `title` (1 to 100 chars), an optional `starter` message to anchor to (one message spawns at most one thread, ever), `isPrivate`, and `autoArchiveMinutes` (0 for the channel default, or 60 / 1440 / 4320 / 10080).
+
+Sending into a thread is the ordinary `send()` with the **parent** channel id plus `{ threadId }`. Under the hood the SDK enters the thread once and caches that position until the cursor moves, so a run of sends into one thread pays the setup once.
+
+## Receive thread messages
+
+Thread traffic arrives on the same `messageCreate` firehose, gated on the parent channel's visibility. A thread message has `msg.threadId` set (and `msg.channelId` equal to it: the thread is where the message lives), while `msg.threadParentId` is the parent text channel.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.threadId && msg.content === '!status') void msg.reply('all green');
+});
+```
+
+`msg.reply()` inside a thread routes back into that thread. In the rare case the SDK has not yet learned the thread's parent (`msg.threadParentId === null`), `reply()` rejects with a clear error rather than posting into the wrong container.
+
+## Lifecycle events
+
+`threadUpdate` fires with a decoded thread row (title decrypted best-effort) on creation, activity, flag flips, and membership moves; `threadDelete` fires on deletion. Private threads are ACL-only: your bot receives their traffic only while it is on the member list, and being removed arrives as a `threadDelete`.
+
+```ts
+client.on('threadUpdate', (t) => console.log('thread', t.threadId, t.title));
+client.on('threadDelete', (t) => console.log('thread gone', t));
+```
+
+Archiving is computed lazily server-side from `autoArchiveMinutes`; sending into an archived thread simply revives it. Thread messages never expire.
+
+## Reading and membership
+
+`fetchThreads(serverId, channelId)` lists a channel's threads, `joinThread` / `leaveThread` manage the bot's membership, and `fetchThreadMembers` reads a thread's roster. Message actions (react, edit, delete, pin) on thread messages route through the thread automatically.
+
+## Deny codes
+
+Thread sends gate on `send_in_thread` (the ordinary `-6` deny on `sendRejected`); a locked thread answers `-18`, a deleted one `-19`, and a private thread the bot is not a member of `-21`.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    The send path threads ride, including `SendOptions`.
+  </Card>
+
+  <Card title="Polls" icon="square-poll-vertical" href="/guides/polls">
+    Polls work inside threads too.
+  </Card>
+
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Declaring the four thread permissions.
+  </Card>
+
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    `threadUpdate` and `threadDelete` payloads.
+  </Card>
+</CardGroup>

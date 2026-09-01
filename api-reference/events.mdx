@@ -35,6 +35,9 @@ client.on('messageCreate', (msg) => {
 | `messageDelete` | `{ messageId, serverId, channelId }` | A message was deleted. |
 | `reactionUpdate` | `{ messageId, reactionId, count, userId, serverId, channelId }` | A reaction was added or removed. |
 | `pinUpdate` | `{ messageId, pinned, serverId, channelId }` | A message was pinned or unpinned. |
+| `pollUpdate` | `{ messageId, counts, totalVoters, serverId, channelId }` | A visible poll's tally changed or was revealed. |
+| `threadUpdate` | `ThreadInfo` | A thread was created or changed, or its membership moved. |
+| `threadDelete` | `{ threadId, serverId }` | A thread was deleted, or the bot lost access to a private one. |
 | `typing` | `{ userId, isTyping, serverId, channelId }` | Someone started or stopped typing. |
 | `sendRejected` | `{ code, message, permission?, serverId, channelId, frame }` | The server denied a `send()`. |
 | `channelCreate` | `{ channelId, name, groupId, type, serverId }` | A channel was created. |
@@ -159,6 +162,28 @@ client.on('pinUpdate', ({ messageId, pinned }) => {
   console.log(`message ${messageId} ${pinned ? 'pinned' : 'unpinned'}`);
 });
 ```
+
+## Polls and threads
+
+New in 0.3.0. See [Polls](/guides/polls) and [Threads](/guides/threads).
+
+### pollUpdate
+
+Fires when a visible, non-hidden poll's tally changes, and when a poll is closed and its final numbers broadcast. `counts` is `null` for a hidden poll that has not revealed yet, and counts are always absolute server totals, never deltas.
+
+```ts
+client.on('pollUpdate', (p) => {
+  console.log(`${p.messageId}: ${p.counts?.join(' / ') ?? 'hidden'} (${p.totalVoters ?? '?'} voters)`);
+});
+```
+
+### threadUpdate
+
+Fires with a decoded thread row (title decrypted best-effort) on thread creation, activity, flag changes, and membership moves.
+
+### threadDelete
+
+Fires when a thread is deleted. For a private thread, being removed from its member list also arrives as a `threadDelete`, because the thread stops existing from the bot's point of view.
 
 ## Typing
 
@@ -372,12 +397,15 @@ This is a firehose and it is emitted only when something is listening, so it cos
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">
     The shape of each event payload.
   </Card>
+
   <Card title="Client" icon="book" href="/api-reference/client">
     The methods you call in response.
   </Card>
+
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Every error class, and what reaches which channel.
   </Card>
+
   <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
     Why messageCreate needs a guard.
   </Card>

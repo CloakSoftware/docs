@@ -26,7 +26,8 @@
         "pages": [
           "index",
           "quickstart",
-          "install"
+          "install",
+          "distributing"
         ]
       },
       {
@@ -49,7 +50,10 @@
           "guides/editing-and-pinning",
           "guides/message-history",
           "guides/direct-messages",
-          "guides/typing-presence-and-profile"
+          "guides/typing-presence-and-profile",
+          "guides/file-attachments",
+          "guides/threads",
+          "guides/polls"
         ]
       },
       {

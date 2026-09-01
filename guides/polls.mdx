@@ -1,0 +1,74 @@
+---
+title: "Polls"
+description: "Create native polls, read live tallies, close them, and list voters. Bots never vote."
+---
+
+Native polls keep Cloak's encryption split: what a poll SAYS (the question and option labels) is encrypted with the same conversation key as the message body and never parsed server-side; what a poll IS structurally (option count, window, flags) is plaintext, because the server must validate and tally votes. That split is what makes two of the flags real promises rather than client courtesy: an `anonymous` poll's voter identities are never served (the creator included), and a `hidden` poll's counts are withheld from every frame until it closes.
+
+## Create a poll
+
+A poll rides an ordinary `send()`:
+
+```ts
+await client.send(serverId, channelId, 'Lunch vote', {
+  poll: {
+    question: 'Where to?',
+    options: ['pizza', 'sushi', 'salad'],
+    maxSelections: 1,
+    durationMs: 60 * 60 * 1000, // up to 32 days; omit for the full window
+    anonymous: true,
+  },
+});
+```
+
+Bounds match the human clients exactly: 2 to 10 options, a 300-character question, 100-character options, a window up to 32 days. A locally invalid poll throws `CloakPollError` before anything is sent; a server-side deny arrives as `-15` (missing the create-polls capability) or `-16` (malformed) on `sendRejected`. Poll messages never expire.
+
+<Warning>
+  **Bots never vote.** The server refuses the vote opcode from any bot session with code `-9` before reading a single row: one owner's bots must not be extra ballots. The SDK ships no vote API at all. Bots create, close, and read polls; only humans fill them in.
+</Warning>
+
+## Read a poll
+
+A message carrying a poll (live or from history) exposes `msg.poll`: `state` is the server's structure (absolute tallies, `counts: null` while a hidden poll is open, `myVotes` always `[]` for a bot) and `data` is the decrypted question and labels (`null` when undecryptable, never ciphertext).
+
+Live tallies arrive as `pollUpdate` events whenever someone votes on a visible, non-hidden poll:
+
+```ts
+client.on('pollUpdate', (p) => {
+  console.log(`${p.messageId}: ${p.counts?.join(' / ') ?? 'hidden'} (${p.totalVoters ?? '?'} voters)`);
+});
+```
+
+Counts are always absolute server totals, never deltas you must infer.
+
+## Close and inspect
+
+Closing is lazy: nothing fires server-side when the window passes. Read the final numbers with `fetchPollState()` (which is also the hidden-poll reveal after close), end one early with `closePoll()` (the creator or `message_manage`; this broadcasts the final tally), and list an identified poll's voters per option with `fetchPollVoters()`:
+
+```ts
+const state = await client.fetchPollState(serverId, channelId, messageId);
+await client.closePoll(serverId, channelId, messageId);
+const voters = await client.fetchPollVoters(serverId, channelId, messageId, 0);
+```
+
+`fetchPollVoters` hard-refuses anonymous polls (`-8`) and hidden polls that are still open (`-9` on that opcode), for everyone, the creator included. All three take an optional `{ threadId }` for polls living inside threads.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    The send path polls ride.
+  </Card>
+
+  <Card title="Threads" icon="comments" href="/guides/threads">
+    Polls work inside threads too.
+  </Card>
+
+  <Card title="What is encrypted, and what is not" icon="lock" href="/concepts/encryption-lanes">
+    Why the question is ciphertext but the tally is not.
+  </Card>
+
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    The `pollUpdate` payload.
+  </Card>
+</CardGroup>

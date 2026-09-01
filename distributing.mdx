@@ -1,0 +1,58 @@
+---
+title: "Distribute your bot"
+description: "Manage bots in the developer portal, mint invite links, and let any server admin install your bot."
+---
+
+You no longer need the Cloak app to manage a bot, and other people no longer need to own your bot to install it. The developer portal handles the lifecycle, and invite links handle distribution.
+
+## The developer portal
+
+[developer.cloak.chat](https://developer.cloak.chat) is the web home for your bots. Sign in with your Cloak account to:
+
+- **Create bots** and get the token (shown once, exactly like the in-app flow).
+- **Regenerate or revoke tokens.** Revoking also rotates the bot's key epochs, so a leaked token goes deaf everywhere.
+- **Set the profile**: avatar, a description (shown on the install consent screen), and a homepage URL.
+- **Mint and revoke invite links** (below).
+- **Watch usage**: storage against the owner pool, the bandwidth window, and daily message counts.
+
+The in-app flow (Settings, My Bots) keeps working; the portal is a superset.
+
+<Note>
+  The Permissions tab shows the manifest your bot declares in `requiredPermissions` when it connects. The portal cannot edit it: the code that runs is the thing that asks, by design. A bot that has never connected shows an empty manifest, and its invite links cannot preselect anything yet, so connect once before you share a link.
+</Note>
+
+## Invite links
+
+An invite link lets **any** server admin install your bot, Discord-style. Mint one on the portal's Install tab: pick the subset of your declared manifest to preselect, and you get a URL shaped like:
+
+```text
+https://cloak.chat/bots/<code>
+```
+
+What the person clicking it sees: a landing page with your bot's name, avatar, description, and requested permissions, then (in the app) a consent screen where they pick one of their servers and approve a permission set. The preselection from your link is a starting point only; the admin approves whatever subset they choose, bounded by your declared manifest and their own grantable set. Administrator can only ever be granted by a server's owner.
+
+Links are unlimited-use and never expire. Revoke one on the Install tab and it dies everywhere immediately: the landing page shows an invalid-invite card and in-app consent refuses the code.
+
+## What installation means
+
+Installing a bot into a server hands it that server's encryption key, scoped by the role the approval mints. The consent screen says this in plain words, because it is the whole ballgame on an end-to-end encrypted platform: admins should only add bots they trust, and your description is your chance to earn that. See [How bots work](/concepts/how-bots-work).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Create a bot and get it talking first.
+  </Card>
+
+  <Card title="Permissions" icon="key" href="/concepts/permissions">
+    Declaration versus grant, and what admins actually approve.
+  </Card>
+
+  <Card title="Deploying a bot" icon="server" href="/production/deploying">
+    Run it somewhere permanent before you share the link.
+  </Card>
+
+  <Card title="Bot Developer Terms" icon="scale-balanced" href="/legal/developer-terms">
+    The rules that come with distribution.
+  </Card>
+</CardGroup>
