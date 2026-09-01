@@ -50,7 +50,9 @@
           "guides/message-history",
           "guides/direct-messages",
           "guides/typing-presence-and-profile",
-          "guides/file-attachments"
+          "guides/file-attachments",
+          "guides/threads",
+          "guides/polls"
         ]
       },
       {
