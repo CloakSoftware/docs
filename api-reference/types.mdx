@@ -28,6 +28,10 @@ interface Message {
   } | null;
   mentions: MessageMentions;
   mentionsMe: boolean;
+  attachments: FileAttachment[];
+  poll: MessagePoll | null;
+  threadId: string | null;
+  threadParentId: string | null;
   reply(text: string, opts?: SendOptions): Promise<void>;
   channel: { send(text: string, opts?: SendOptions): Promise<void> };
   react(reactionId: string): Promise<void>;
@@ -101,6 +105,22 @@ interface Message {
   `@everyone` and `@here` are `mentions.everyone` and `mentions.here`. A **role** mention cannot be resolved here, because the SDK does not know which roles your bot holds. Role names surface in `mentions.names` for you to check yourself.
 </ResponseField>
 
+<ResponseField name="attachments" type="FileAttachment[]">
+  The `[file:id:name]` attachment references carried by this message's decrypted body, in order. Parse-only: an entry proves the sender named a file, not that your bot may read it. Download with [`downloadAttachment()`](/api-reference/client#downloadattachment). See [File attachments](/guides/file-attachments).
+</ResponseField>
+
+<ResponseField name="poll" type="MessagePoll | null">
+  The native poll this message carries, or `null` for a plain message. `poll.state` is the server's plaintext structure; `poll.data` is the decrypted question and labels, best-effort, and `null` (never ciphertext) when the key is missing. Watch [`pollUpdate`](/api-reference/events#pollupdate) for tallies. See [Polls](/guides/polls).
+</ResponseField>
+
+<ResponseField name="threadId" type="string | null">
+  The thread this message was sent into, or `null` for a channel or DM message. When set, `channelId` is the same id: a thread's replies are ordinary messages whose channel is the thread, and `reply()` and `channel.send()` route back into it. See [Threads](/guides/threads).
+</ResponseField>
+
+<ResponseField name="threadParentId" type="string | null">
+  The thread's parent text channel, when the SDK knows it, resolved from its thread index. In practice `null` only when event ordering breaks; `reply()` on a thread message needs it and rejects without it.
+</ResponseField>
+
 <ResponseField name="pinned" type="boolean">
   Whether the message is pinned, when known. Present on messages from [`fetchMessages()`](/api-reference/client#fetchmessages) and after a [`pinUpdate`](/api-reference/events#pinupdate).
 </ResponseField>
@@ -166,6 +186,8 @@ interface SendOptions {
   groupId?: string;
   mentions?: MentionTarget[];
   replyTo?: ReplyTarget;
+  poll?: PollCreate;
+  threadId?: string;
 }
 ```
 
@@ -185,6 +207,14 @@ interface SendOptions {
 
 <ResponseField name="replyTo" type="ReplyTarget">
   Makes this send a true reply: it renders the quote header and fires the "replied to you" notification.
+</ResponseField>
+
+<ResponseField name="poll" type="PollCreate">
+  Attach a native poll to this message. The question and option labels are end-to-end encrypted; the structure (option count, window, flags) is plaintext, because the server validates and tallies votes. Server sends need the create-polls capability, DM polls are ungated, and bots never vote: the backend refuses a bot vote by design. See [Polls](/guides/polls).
+</ResponseField>
+
+<ResponseField name="threadId" type="string">
+  Target this send at a thread of the channel. Pass the parent text channel as `channelId` and the thread's id here. Requires `send_in_thread`; a locked, deleted, or inaccessible private thread denies on [`sendRejected`](/api-reference/events#sendrejected). Not valid on DM sends. See [Threads](/guides/threads).
 </ResponseField>
 
 <Warning>
@@ -252,16 +282,17 @@ The payload of a [`systemMessage`](/api-reference/events#systemmessage) event.
 
 ```ts
 interface SystemMessageEvent {
-  type: 'member_join' | 'bot_add' | 'unknown';
+  type: 'member_join' | 'bot_add' | 'thread_created' | 'unknown';
   actorId: string;
   actorName: string;
   serverId: string;
   channelId: string;
   groupId?: string;
+  threadId?: string;
 }
 ```
 
-<ResponseField name="type" type="'member_join' | 'bot_add' | 'unknown'">
+<ResponseField name="type" type="'member_join' | 'bot_add' | 'thread_created' | 'unknown'">
   Which system event this is.
 </ResponseField>
 
@@ -283,6 +314,10 @@ interface SystemMessageEvent {
 
 <ResponseField name="groupId" type="string">
   The group of the source channel, where known. Pass it to `send()` so the message lands in the right channel. It can be `undefined` if the channel's group has not been seen yet.
+</ResponseField>
+
+<ResponseField name="threadId" type="string">
+  For `type: 'thread_created'`: the new thread's id. `channelId` is the parent text channel the system row lives in; the thread's title arrives on its own [`threadUpdate`](/api-reference/events#threadupdate). See [Threads](/guides/threads).
 </ResponseField>
 
 ## Member
@@ -589,7 +624,7 @@ interface BotUser {
 
 ## PermissionSet
 
-The resolved capability set for one server: 31 named booleans plus a numeric rank. Returned by [`permissions()`](/api-reference/client#permissions) and spread into the [`permissionsUpdate`](/api-reference/events#permissionsupdate) payload.
+The resolved capability set for one server: 43 named booleans plus a numeric rank. Returned by [`permissions()`](/api-reference/client#permissions) and spread into the [`permissionsUpdate`](/api-reference/events#permissionsupdate) payload.
 
 ```ts
 type PermissionSet = { effectiveRank: number } & Record<PermissionName, boolean>;
@@ -603,12 +638,15 @@ Documented in full, with every permission name, on [Permissions](/api-reference/
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Every error class an action can reject with.
   </Card>
+
   <Card title="Permissions" icon="list" href="/api-reference/permissions">
-    All 31 permission names.
+    All 43 permission names.
   </Card>
+
   <Card title="Events" icon="bell" href="/api-reference/events">
     Where these types come from.
   </Card>
+
   <Card title="Client" icon="book" href="/api-reference/client">
     The methods that return them.
   </Card>

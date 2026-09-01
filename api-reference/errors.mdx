@@ -88,7 +88,7 @@ Every awaited action the server can refuse:
 
 ### When there is no named permission
 
-Some denials are permission-shaped but do not map to one of the 31 [named permissions](/api-reference/permissions). Pinning is the clearest example: it is gated by a channel-level pin permission that has no name in the vocabulary. `permission` is `undefined` there, and `message` still explains what happened.
+Some denials are permission-shaped but do not map to one of the 43 [named permissions](/api-reference/permissions). Pinning is the clearest example: it is gated by a channel-level pin permission that has no name in the vocabulary. `permission` is `undefined` there, and `message` still explains what happened.
 
 ```ts
 try {
@@ -280,7 +280,7 @@ Two are **terminal** and stop the loop, because retrying cannot fix either:
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `-2` | The bot token was revoked or regenerated. | Issue a new token in **Settings > My Bots** and redeploy. |
+| `-2` | The bot token was revoked or regenerated. | Issue a new token in **Settings \> My Bots** and redeploy. |
 | `-12` | This SDK is below the backend's minimum wire version. | Upgrade `@cloak-software/bot-sdk` and redeploy. |
 
 `-8` is a transient backend error and keeps retrying with backoff. If your bot goes quiet and no `reconnecting` follows a `disconnect`, you are looking at `-2` or `-12`. See [Connection lifecycle](/concepts/connection-lifecycle).
@@ -299,12 +299,15 @@ An exported helper that maps a raw `(opcode, code)` pair to the same message and
   <Card title="Handling errors" icon="shield-halved" href="/guides/handling-errors">
     The catch-and-report pattern in practice.
   </Card>
+
   <Card title="Permissions" icon="key" href="/api-reference/permissions">
     What the permission field points at.
   </Card>
+
   <Card title="Events" icon="bell" href="/api-reference/events">
     The error and sendRejected events.
   </Card>
+
   <Card title="Troubleshooting" icon="wrench" href="/production/troubleshooting">
     Environment failures and their remedies.
   </Card>

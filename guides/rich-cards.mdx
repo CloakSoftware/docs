@@ -11,11 +11,11 @@ This is the embed lane to default to. The other one is [webhook embeds](/guides/
 
 Two embed paths exist, with opposite privacy properties. Pick from this table before you write any code.
 
-| | `sendCard()` | `sendEmbed()` and `webhooks.post()` |
+|  | `sendCard()` | `sendEmbed()` and `webhooks.post()` |
 | --- | --- | --- |
 | Encryption | End-to-end, same key and epoch as the body | Plaintext server-side |
 | Identity | Your bot's own, with the BOT badge | A webhook persona |
-| Permission | `message_send`, nothing else | `manage_server` to mint one |
+| Permission | `message_send`, plus `embed_link` on current backends | `manage_server` to mint one |
 | Quota | None | 10 creations per account per hour, 15 per channel |
 | Transport | The ordinary message frame | HTTPS POST to the webhook ingress |
 | Server config needed | None | `WEBHOOK_INGRESS_PORT`, `WEBHOOK_PUBLIC_BASE`, an image proxy |
@@ -44,11 +44,11 @@ await client.sendCard(serverId, channelId, {
 
 `sendCard(serverId, channelId, card)` returns `Promise<void>`. The same method is pre-bound on the [server handle](/guides/guild-handle) as `client.guild(serverId).sendCard(channelId, card)`.
 
-It needs `message_send` and nothing else. No webhook, no `manage_server`, no creation quota, and no server-side configuration.
+It needs `message_send` plus, on current backends, `embed_link`. No webhook, no `manage_server`, no creation quota, and no server-side configuration.
 
-<Note>
-  The advisory `embed_link` permission is not consulted, and structurally cannot be. The server never sees an embed to gate, because it cannot read the payload.
-</Note>
+<Warning>
+  **Current backends enforce `embed_link` on this lane.** The server never reads the payload, but it does see that the encrypted embed slot is present, and that presence is what it gates. A denial arrives as **`-12` on the `sendRejected` event**, not as a rejected promise: `sendCard()` is fire-and-forget and resolves once the frame is written. Declare `embed_link` in `requiredPermissions` so the consent modal pre-checks it at invite. Older backends ignore the permission entirely.
+</Warning>
 
 ### Where the card goes
 
@@ -117,7 +117,7 @@ Rendering a card fetches its media, which reveals the viewer's IP address to who
 
 The **link** slots (`url`, `author.url`, `provider.url`) are unrestricted `http(s)`. Nothing is fetched for them at render, they are tap targets. Link to your docs or your CI freely.
 
-Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. All three are already on that origin. The SDK cannot upload one for you. The common status-card case (title, description, color, a link) needs no media at all.
+Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. All three are already on that origin. [`sendFile()`](/guides/file-attachments) does not help here: it produces end-to-end encrypted attachments, not publicly fetchable media on that origin. The common status-card case (title, description, color, a link) needs no media at all.
 
 Check a URL yourself with the two exported helpers:
 
@@ -184,9 +184,11 @@ Each of these is rejected outright, so you learn at development time rather than
   <Accordion title="video">
     Removed from this lane entirely, not merely restricted to Cloak-hosted media. Desktop renders an embed video inside a sandboxed iframe that allows scripts and same-origin, so a bot-chosen origin would get script execution beside the app. Passing `video` throws.
   </Accordion>
+
   <Accordion title="provider.icon">
     Cards fetch it, and this lane is deliberately kept out of that fetch site. Use `author.icon_url`, which is a Cloak-hosted media slot.
   </Accordion>
+
   <Accordion title="Unknown keys">
     The renderer drops them while they still count against the payload budget, so `sendCard()` rejects them instead. `BotEmbed` has no index signature.
   </Accordion>
@@ -213,7 +215,7 @@ try {
 ```
 
 <Warning>
-  Sending is fire-and-forget once the frame is on the wire. A server-side denial does not reject the promise, it arrives on the `sendRejected` event. Code `-11` there means a message sidecar went over the server's 16 KiB wire cap. The local caps exist so that failure is a synchronous throw you can catch instead of an event you have to correlate.
+  Sending is fire-and-forget once the frame is on the wire. A server-side denial does not reject the promise, it arrives on the `sendRejected` event. Code `-11` there means a message sidecar went over the server's 16 KiB wire cap, and `-12` means the bot lacks `embed_link`. The local caps exist so that failure is a synchronous throw you can catch instead of an event you have to correlate.
 </Warning>
 
 ## A card also suppresses link unfurling
@@ -230,7 +232,7 @@ const client = new Client({
   // Without a keystore this bot works once and is bricked on its second run.
   // See /concepts/keys-and-keystore.
   keystorePath: './card-bot.cloak-keystore.json',
-  requiredPermissions: ['view_text', 'message_send'],
+  requiredPermissions: ['view_text', 'message_send', 'embed_link'],
 });
 
 client.on('messageCreate', async (msg) => {
@@ -278,12 +280,15 @@ The SDK ships this as a runnable example with more commentary, including a comma
   <Card title="Cards and embeds reference" icon="code" href="/api-reference/embeds">
     Every type, helper, error reason and constant on this lane.
   </Card>
+
   <Card title="Webhook embeds" icon="triangle-exclamation" href="/guides/webhook-embeds">
     The other lane, which is not end-to-end encrypted.
   </Card>
+
   <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
     Plain text sends, replies, and what fire-and-forget means.
   </Card>
+
   <Card title="Keys and the keystore" icon="key" href="/concepts/keys-and-keystore">
     Why every bot you actually run needs a keystore.
   </Card>

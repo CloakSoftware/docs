@@ -41,7 +41,7 @@ import {
 </ParamField>
 
 <ParamField path="permission" type="PermissionName | undefined">
-  The named permission the bot was missing, when the denial maps to one of the [31 permissions](/api-reference/permissions). Undefined otherwise.
+  The named permission the bot was missing, when the denial maps to one of the [43 permissions](/api-reference/permissions). Undefined otherwise.
 </ParamField>
 
 <ParamField path="opcode" type="number">
@@ -286,12 +286,15 @@ For normal handling you rarely need it: the error you caught already carries bot
   <Card title="Errors reference" icon="triangle-exclamation" href="/api-reference/errors">
     Every field on every error class.
   </Card>
+
   <Card title="Permissions" icon="key" href="/concepts/permissions">
     What decides whether an action is allowed.
   </Card>
+
   <Card title="Events" icon="tower-broadcast" href="/api-reference/events">
     The full payload of `error` and `sendRejected`.
   </Card>
+
   <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
     Why delivery has no acknowledgement.
   </Card>

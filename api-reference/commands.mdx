@@ -140,9 +140,9 @@ type CommandOptionType =
 
 `user`, `channel` and `role` values are **opaque id strings**. The SDK does no resolution and the clients do no argument autocomplete, so read them with `getString()` and normalize before comparing.
 
-There is no `attachment` type. Declaring one throws at `register()`: upload is closed to bots, so an attachment option could never be filled on the bot's side.
+There is no `attachment` type. Declaring one throws at `register()`: command invocations cannot carry a file in v1, so the option could never be filled. Sending and receiving files is its own lane, see [File attachments](/guides/file-attachments).
 
-### COMMAND_OPTION_TYPE_CODES
+### COMMAND\_OPTION\_TYPE\_CODES
 
 The integer code each option type is published under.
 
@@ -255,7 +255,7 @@ What `CommandRegistry.parseFromText()` returns. `'none'` covers both "not an inv
 Every cap is checked locally, so a violation surfaces at your call site instead of as a rejected frame later. The declaration caps throw at `register()`; `MAX_COMMAND_WIRE` rejects the `sendCommand()` promise before the frame is built.
 
 | Export | Value | What it limits |
-|---|---|---|
+| --- | --- | --- |
 | `MAX_COMMANDS_PER_BOT` | `50` | Commands in one registry |
 | `MAX_OPTIONS_PER_COMMAND` | `25` | Options in one declaration |
 | `MAX_CHOICES_PER_OPTION` | `25` | Entries in one `choices` list |
@@ -268,7 +268,7 @@ Every cap is checked locally, so a violation surfaces at your call site instead 
   Command and option names are capped at 32 characters by `^[a-z0-9_-]{1,32}$`, enforced by `validateDeclaration()`. The constant and the regex behind that rule are internal and are not exported, so do not write an import for them.
 </Note>
 
-### DEFAULT_COMMAND_PREFIX
+### DEFAULT\_COMMAND\_PREFIX
 
 ```ts
 const DEFAULT_COMMAND_PREFIX = '/';
@@ -276,7 +276,7 @@ const DEFAULT_COMMAND_PREFIX = '/';
 
 The text lane's default prefix, and the default for every `prefix` parameter below. Override it per client with `ClientOptions.commandPrefix`. The structured lane carries the command name outright and is prefix-independent.
 
-### COMMAND_DATA_VERSION
+### COMMAND\_DATA\_VERSION
 
 ```ts
 const COMMAND_DATA_VERSION = 1;
@@ -410,12 +410,15 @@ decodeCommandData(json: string, registry?: CommandLookup): CommandData | null
   <Card title="Slash commands" icon="terminal" href="/guides/slash-commands">
     The guide: declaring, dispatching, publishing, and the two lanes.
   </Card>
+
   <Card title="Client" icon="plug" href="/api-reference/client">
     `client.commands`, `sendCommand()`, and `ClientOptions.commandPrefix`.
   </Card>
+
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">
     `Message`, `SendOptions`, and the rest of the shapes a handler touches.
   </Card>
+
   <Card title="Events" icon="bolt" href="/api-reference/events#commanderror">
     `commandError` and `sendRejected`.
   </Card>

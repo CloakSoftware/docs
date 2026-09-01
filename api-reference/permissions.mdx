@@ -49,7 +49,7 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 | Name | Code | Controls |
 | --- | --- | --- |
 | `view_text` | 1 | View text channels. Required to receive their messages. |
-| `view_voice` | 2 | View voice channels. |
+| `view_voice` | 2 | View voice channels. Joining one is gated separately, see the note below. |
 | `message_read_history` | 20 | Read past messages in a channel. |
 | `member_list` | 32 | View the member list. |
 
@@ -57,13 +57,17 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
   `view_text` is what puts a text channel on your bot's [firehose](/concepts/message-delivery). Without it in a given channel, your bot does not receive that channel's messages at all.
 </Note>
 
+<Note>
+  `view_voice` does not gate joining a voice channel. The backend's channel-level view check for a voice join runs on a ladder whose server baseline column is `view_text`, so a voice bot declares `view_text` alongside `voice_connect`. See [Joining voice](/voice/joining#permissions).
+</Note>
+
 ## Messaging
 
 | Name | Code | Controls |
 | --- | --- | --- |
-| `message_send` | 14 | Send messages. Also all that [`sendCard()`](/api-reference/client#sendcard) needs. |
+| `message_send` | 14 | Send messages. |
 | `message_manage` | 15 | Manage other members' messages, such as deleting them. |
-| `embed_link` | 16 | Post links that render as unfurled previews. |
+| `embed_link` | 16 | Post links that render as unfurled previews. Current backends also enforce it for [`sendCard()`](/api-reference/client#sendcard). |
 | `upload_file` | 17 | Attach files. |
 | `reaction_add` | 18 | Add reactions to messages. |
 | `mention_roles` | 19 | Mention roles. |

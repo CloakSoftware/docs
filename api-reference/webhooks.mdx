@@ -57,7 +57,7 @@ webhooks.create(
 
 Mints a webhook on a channel and returns its one-time delivery URL. Requires `manage_server`. Capped at 15 per channel and 10 creations per account per hour.
 
-`icon` and `miniIcon` are already-hosted image URLs. The SDK never uploads, because file upload is closed to bots. The server sanitizes them on write: a non-Cloak URL is rewritten through the image proxy, or dropped when the proxy is unconfigured.
+`icon` and `miniIcon` are already-hosted image URLs; the SDK does not upload webhook icons for you. The server sanitizes them on write: a non-Cloak URL is rewritten through the image proxy, or dropped when the proxy is unconfigured.
 
 ### edit
 
@@ -303,12 +303,15 @@ A delivery failure, meaning the HTTPS POST itself. A CRUD denial on `list`, `cre
   <Card title="Webhook embeds" icon="triangle-exclamation" href="/guides/webhook-embeds">
     The guide: what you give up, the low-privilege path, and server prerequisites.
   </Card>
+
   <Card title="Cards and embeds" icon="id-card" href="/api-reference/embeds">
     The encrypted lane, which most bots should use instead.
   </Card>
+
   <Card title="Errors" icon="bug" href="/api-reference/errors">
     Every error class the SDK raises, and which surface raises it.
   </Card>
+
   <Card title="The guild() handle" icon="server" href="/guides/guild-handle">
     The same webhook surface, pre-bound to one server.
   </Card>
