@@ -1,0 +1,131 @@
+---
+title: "Modals"
+description: "Open a form on the clicker's screen in reply to a button, and receive what they typed as a second interaction."
+---
+
+A modal is a form your bot opens in reply to a click. It travels only on the response lane, never inside a card, so there is no way to post a form directly: someone clicks a button first, your bot answers that click with `showModal()`, and the submit arrives as a second `interaction` with `kind: 'modal'`.
+
+New in 0.4.0. Read [Buttons and selects](/guides/components) first: a modal is one of the three answers to a click.
+
+## Open a modal
+
+```ts
+client.on('interaction', async (i) => {
+  if (i.kind === 'button' && i.customId === 'report') {
+    await i.showModal({
+      title: 'Report a problem',
+      customId: 'report-form',
+      inputs: [
+        { customId: 'where', label: 'Where did it happen?', style: 'short', maxLength: 100 },
+        { customId: 'what', label: 'What happened?', style: 'paragraph', maxLength: 1000 },
+      ],
+    });
+  }
+});
+```
+
+`showModal(def)` is a terminal response, like `ack()` and `ephemeral()`. It validates `def` locally with `assertModal()` before anything is encrypted, and a bad definition rejects with a [`CloakComponentError`](/api-reference/embeds#cloakcomponenterror). A second response on the same interaction rejects with a `CloakClientError` whose `source` is `'interaction'`.
+
+### ModalDefinition
+
+```ts
+interface ModalDefinition {
+  title: string;         // 1 to 45 characters
+  customId: string;      // 1 to 100 characters; comes back as the submit's customId
+  inputs: ModalInput[];  // 1 to 5 inputs, unique customIds
+}
+
+interface ModalInput {
+  customId: string;      // 1 to 100 characters; the key in Interaction.fields
+  label: string;         // 1 to 45 characters
+  style: 'short' | 'paragraph';
+  placeholder?: string;  // up to 100 characters
+  required?: boolean;    // default true
+  minLength?: number;    // 0 to 4000, never above maxLength
+  maxLength?: number;    // 1 to 4000
+  value?: string;        // pre-filled text, up to 4000 characters
+}
+```
+
+`short` is a single line. `paragraph` is a multi-line box. The clicker's app enforces `required`, `minLength`, and `maxLength` before it submits.
+
+## Receive the submit
+
+The submit arrives as a fresh `interaction`:
+
+| Field | Value on a modal submit |
+| --- | --- |
+| `kind` | `'modal'` |
+| `customId` | The modal's `customId`, not the button's |
+| `fields` | The typed text keyed by input `customId` |
+| `values` | Empty |
+| `parentId` | The id of the click that opened the modal |
+| `messageId` | The message the original button lives on |
+| `userId` | Who submitted, which is who clicked |
+
+```ts
+client.on('interaction', async (i) => {
+  if (i.kind !== 'modal' || i.customId !== 'report-form') return;
+
+  const where = i.fields.where ?? '';
+  const what = i.fields.what ?? '';
+  await i.ephemeral({ content: `Filed. Where: ${where.slice(0, 40)}. Thanks.` });
+});
+```
+
+Answer the submit exactly once too: it is its own interaction, with its own 15 minute window and its own pending state on the clicker's screen. `ack()` is the right answer when there is nothing to say back.
+
+Cancelling the modal sends nothing. Your bot is not told, and there is nothing to clean up: the original click was already answered by `showModal()`.
+
+## Tie the submit to the click
+
+`parentId` is how you connect the form to whatever the button was about. The cheapest pattern is to carry the subject in the modal's `customId` itself, since it comes back verbatim.
+
+```ts
+client.on('interaction', async (i) => {
+  if (i.kind === 'button' && i.customId.startsWith('reject:')) {
+    const requestId = i.customId.slice('reject:'.length);
+    await i.showModal({
+      title: 'Reason for rejecting',
+      customId: `reject-form:${requestId}`,
+      inputs: [{ customId: 'reason', label: 'Reason', style: 'paragraph', required: true, maxLength: 500 }],
+    });
+    return;
+  }
+
+  if (i.kind === 'modal' && i.customId.startsWith('reject-form:')) {
+    const requestId = i.customId.slice('reject-form:'.length);
+    await i.ack();
+    await recordRejection(requestId, i.userId, i.fields.reason);
+  }
+});
+```
+
+When you need more state than fits in 100 characters, key a map by the click's interaction id when you open the modal and look it up by `parentId` on the submit. Expire entries after 15 minutes, because that is when the server forgets the click.
+
+## What a modal cannot do
+
+- It cannot be posted on its own. It is always the answer to a click.
+- It carries text inputs only. There are no selects or buttons inside a modal.
+- It cannot pre-fill from anything but `value`.
+- It is not stored anywhere. Reloading the app while a modal is open dismisses it, and nothing arrives at your bot.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Buttons and selects" icon="square-check" href="/guides/components">
+    The click that opens a modal, and the other two answers.
+  </Card>
+
+  <Card title="Approval bot" icon="code" href="/examples/approval-bot">
+    A modal collects a denial reason in a complete bot.
+  </Card>
+
+  <Card title="Cards and embeds reference" icon="book" href="/api-reference/embeds">
+    `ModalDefinition`, `assertModal()`, and every cap.
+  </Card>
+
+  <Card title="Types" icon="brackets-curly" href="/api-reference/types#interaction">
+    The full `Interaction` shape.
+  </Card>
+</CardGroup>

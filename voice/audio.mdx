@@ -1,6 +1,6 @@
 ---
-title: "Publishing audio"
-description: "Turn a voice credential into sound in the channel with VoiceMediaSession, VoicePlayer, and the resource helpers."
+title: "Publishing and receiving audio"
+description: "Turn a voice credential into sound in the channel with VoiceMediaSession, VoicePlayer, and the resource helpers, and receive decrypted member audio in room scope."
 ---
 
 The audio layer is opt-in. It needs the native media engine installed at an exact version and patched, which is a one-time setup step in your own app.
@@ -86,9 +86,21 @@ VoiceMediaSession.attach(options: VoiceMediaOptions): Promise<VoiceMediaSession>
   Whether the bot joined deafened. Purely diagnostic: it lets `attach()` warn about the one combination that silently breaks a listening bot.
 </ParamField>
 
-<ParamField path="sampleRate" type="number" default="48000" />
+<ParamField path="sampleRate" type="number" default="48000">
+  The publish format: what `session.player` expects from an `AudioResource`.
+</ParamField>
 
-<ParamField path="channels" type="number" default="2" />
+<ParamField path="channels" type="number" default="2">
+  The publish channel count.
+</ParamField>
+
+<ParamField path="receiveSampleRate" type="number" default="48000">
+  Room scope only. The sample rate every received `PcmFrame` arrives at. The engine resamples. Fixed at attach. See [Receiving audio](#receiving-audio).
+</ParamField>
+
+<ParamField path="receiveChannels" type="number" default="1">
+  Room scope only. The channel count of every received `PcmFrame`. The engine downmixes or upmixes. Fixed at attach. Mono is the default because a voice channel is mono at the source and speech-to-text input wants mono.
+</ParamField>
 
 <ParamField path="debug" type="boolean" default="false">
   Logs which key fingerprint was installed under which identity. Never logs key material.
@@ -131,7 +143,10 @@ Every step fails closed, because every failure mode in this path is otherwise si
 | `scope` | `'participant' \| 'room'` | Read-only. Not something a bot picks. |
 | `installedIdentities` | `readonly string[]` | Every identity this session filed a key for. In participant scope this is exactly one. |
 | `setVoiceKey(next)` | `Promise<void>` | Re-pin. See [Voice keys and scopes](/voice/keys). |
-| `detach()` | `Promise<void>` | Stop the pump, unpublish, disconnect. |
+| `detach()` | `Promise<void>` | Stop the pump, unpublish, disconnect. Ends every receive iterable with a normal return. |
+| `on('audio', fn)` / `off('audio', fn)` | `this` | Room scope only. One event per subscribed remote audio track. See [Receiving audio](#receiving-audio). |
+| `audio()` | `AsyncIterable<ParticipantFrame>` | Room scope only. Every live participant's frames, merged. |
+| `setSubscribed(identity, on)` | `Promise<void>` | Room scope only. Opt out of one participant's audio, and back in. |
 
 ## Playing audio
 
@@ -258,6 +273,103 @@ When a server grants `voice_listen`, the key lane hands your bot the room key an
 - **Handle the scope in your key update handler.** A grant or revoke arrives at the same key version, and `setVoiceKey()` detaches and throws on a scope change.
 
 Read [Voice keys and scopes](/voice/keys) before you ship a bot that listens.
+
+## Receiving audio
+
+In room scope, the session hands decrypted member audio out as PCM frames. The security property, stated in full: a bot **without** `voice_listen` holds only its own frame key and is cryptographically unable to decrypt any member; a bot **granted** `voice_listen` can decrypt everyone in the channel, by design. Never state the first clause without the second.
+
+Every receive entry point is room scope only. In participant scope, `session.on('audio', ...)`, `session.audio()`, and `session.setSubscribed()` all **throw** with the message "this session holds a participant-scope key and can decrypt nobody; receive needs voice_listen". They never install a listener that quietly never fires.
+
+### Per participant
+
+One `audio` event fires per subscribed remote audio track. Video tracks are ignored. The payload is a [`ParticipantAudio`](/api-reference/voice#participantaudio): the participant's identity and a `frames` iterable of [`PcmFrame`](/api-reference/voice#pcmframe).
+
+```ts
+import { VoiceMediaSession, pcmFrameBytes } from '@cloak-software/bot-sdk';
+
+const conn = await client.joinVoice(serverId, voiceChannelId, { deafened: false });
+const voiceKey = await client.voiceKeys.acquireVoiceKey(serverId);
+if (voiceKey.scope !== 'room') throw new Error('this bot needs voice_listen to hear anyone');
+
+const session = await VoiceMediaSession.attach({
+  url: conn.url,
+  token: conn.token,
+  botId: client.user!.id,
+  serverId,
+  voiceKey,
+  keys: client.voiceKeys,
+  deafened: conn.selfDeafened,
+  receiveSampleRate: 16000, // the engine resamples; default 48000
+  receiveChannels: 1,       // default 1
+});
+
+session.on('audio', async ({ identity, frames }) => {
+  for await (const frame of frames) {
+    // frame.data is interleaved signed 16-bit PCM, frame.samplesPerChannel * frame.channels long
+    handle(identity, pcmFrameBytes(frame));
+  }
+  // A normal return: the track was unsubscribed, or the session detached.
+});
+```
+
+A `PcmFrame` is `{ data: Int16Array, sampleRate, channels, samplesPerChannel }`, already resampled to the session's receive format. `data` is a copy out of the engine, so it is safe to keep after the next frame arrives. When several consumers share a session, they all see the same `data`: read it, or convert it with `pcmFrameBytes()`, but do not write into it.
+
+### Everyone at once
+
+`session.audio()` merges every live participant into one iterable, tagged by identity. Participants who arrive later join the merge, and one who leaves drops out of it. Any number of concurrent `audio()` consumers may run, and each sees every frame.
+
+```ts
+for await (const { identity, frame } of session.audio()) {
+  meter(identity, frame.data);
+}
+// Ends with a normal return on detach(). A `break` releases every stream this loop held open.
+```
+
+### Opt out of one participant
+
+In room scope every remote track is subscribed at connect. `setSubscribed(identity, false)` is how a bot stops hearing one person, and `true` brings them back.
+
+```ts
+await session.setSubscribed(identity, false); // ends that identity's iterable now, with a normal return
+await session.setSubscribed(identity, true);  // a fresh `audio` event, with a fresh iterable
+```
+
+It rejects when no participant with that identity is in the room. An identity is the participant's normalized Cloak user id, which is what `voiceJoin` and [`voiceRoster()`](/api-reference/client#voiceroster) report as `userId`.
+
+### Piping to ffmpeg
+
+`pcmFrameBytes(frame)` returns the frame as interleaved little-endian signed 16-bit bytes, which is the layout `ffmpeg -f s16le`, a WAV data chunk, and raw-PCM speech-to-text inputs expect. Here it feeds ffmpeg over stdin to write one file per participant.
+
+```ts
+import { spawn } from 'node:child_process';
+import { pcmFrameBytes } from '@cloak-software/bot-sdk';
+
+session.on('audio', async ({ identity, frames }) => {
+  const ffmpeg = spawn('ffmpeg', [
+    '-f', 's16le', '-ar', '16000', '-ac', '1', // must match receiveSampleRate / receiveChannels
+    '-i', 'pipe:0',
+    `${identity}.ogg`,
+  ], { stdio: ['pipe', 'ignore', 'inherit'] });
+
+  for await (const frame of frames) {
+    if (!ffmpeg.stdin.write(pcmFrameBytes(frame))) {
+      await new Promise((resolve) => ffmpeg.stdin.once('drain', resolve));
+    }
+  }
+  ffmpeg.stdin.end();
+});
+```
+
+The SDK ships no recorder, no file sink, and no transcription helper. `pcmFrameBytes()` is the whole of what it does with received audio. What a bot does with decrypted member audio is your business and your users' consent problem, and the second clause of the security property still holds: a `voice_listen` bot decrypts everyone, by design.
+
+### The rules
+
+- **Every iterable ends with a normal return, never a throw.** That is true on track unsubscribe, on `setSubscribed(identity, false)`, on `detach()`, and on the detach a scope change forces. A muted track yields nothing and stays open.
+- **At most one live iterable per identity.** A later re-subscribe for the same identity fires a **new** `audio` event with a new iterable, and a duplicate subscribe ends the old one first.
+- **Pull-driven and bounded.** Nothing is read from the engine until a consumer asks. The underlying stream opens on first demand and is released when the last consumer leaves. A consumer slower than real time is capped at 500 frames (5 seconds at the engine's 10 ms frame size) before the oldest frame is dropped, so a slow consumer hears a gap rather than a growing delay.
+- **Break out of loops you are done with.** An iterator you hold open without reading leaves frames in the engine's own queue, which the engine does not bound. `return()`, which is what `break` does, releases it.
+- **The receive format is fixed at attach.** The engine does the resampling. The SDK never touches the samples.
+- **Join non-deafened.** The subscribe grant is baked into the credential at join time. A deafened `voice_listen` bot hears silence no matter what, and `attach()` warns about exactly that combination.
 
 ## A complete music bot
 

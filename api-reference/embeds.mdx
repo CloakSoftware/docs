@@ -8,14 +8,34 @@ Everything on this page belongs to `client.sendCard()`, the end-to-end encrypted
 ```ts
 import {
   CloakEmbedError,
+  CloakComponentError,
   CLOAK_MEDIA_ORIGIN,
   isCloakMediaUrl,
   assertCardMessage,
+  assertComponents,
+  assertModal,
   encodeBotEmbed,
+  encodeCardEnvelope,
+  parseCardEnvelope,
   embedFallbackText,
   MAX_EMBED_JSON,
 } from '@cloak-software/bot-sdk';
-import type { BotEmbed, BotEmbedField, CardMessage, CloakEmbedErrorReason } from '@cloak-software/bot-sdk';
+import type {
+  BotEmbed,
+  BotEmbedField,
+  CardMessage,
+  CardEdit,
+  MessageCard,
+  EphemeralMessage,
+  ActionRow,
+  Button,
+  StringSelect,
+  SelectOption,
+  ModalDefinition,
+  ModalInput,
+  CloakEmbedErrorReason,
+  CloakComponentErrorReason,
+} from '@cloak-software/bot-sdk';
 ```
 
 ## sendCard
@@ -27,7 +47,29 @@ client.guild(serverId).sendCard(channelId: string, card: CardMessage): Promise<v
 
 Requires `message_send`. The card is encrypted with the same conversation key and epoch as `card.content` and rides the ordinary message frame.
 
-The returned promise rejects with `CloakEmbedError` when the card is invalid, before anything is sent and before the connection cursor moves. It does **not** reject on a server-side denial: sending is fire-and-forget, and denials arrive on the `sendRejected` event.
+The returned promise rejects with `CloakEmbedError` when the card is invalid, or `CloakComponentError` when its rows are, before anything is sent and before the connection cursor moves. It does **not** reject on a server-side denial: sending is fire-and-forget, and denials arrive on the `sendRejected` event.
+
+## editCard
+
+```ts
+client.editCard(
+  serverId: string,
+  channelId: string,
+  messageId: string,
+  card: CardEdit,
+  opts: { createdAt: Date; pinned?: boolean; groupId?: string; threadId?: string; postId?: string },
+): Promise<void>
+
+msg.editCard(card: CardEdit): Promise<void>
+```
+
+Replaces a message's card, embed and component rows together, and re-encrypts its text in the same edit. Author-only server-side, like `edit()`. `CardEdit` is `Pick<CardMessage, 'content' | 'embed' | 'components'>`: the same three fields, without the routing keys, which the edit takes from the message.
+
+`opts.createdAt` is required because the edit addresses the row by its send time. A received `Message` carries it, which is why `msg.editCard(card)` is the convenient form. `opts.pinned` should mirror the message's current pin state (`false` when unknown). `threadId` and `postId` are mutually exclusive.
+
+The text and the card are encrypted from one context, so pass the message's current `content` to leave the text as it was. Pass `components: []` to strip the rows after a decision. The replacement arrives on [`messageUpdate`](/api-reference/events#messageupdate) as `card`. A server that predates cards ignores the card slot and edits only the text.
+
+Rejects locally with a plain `Error` when `createdAt` is missing, with `CloakEmbedError` or `CloakComponentError` on an invalid card, and with [`CloakActionError`](/api-reference/errors#cloakactionerror) on a server deny. See [Buttons and selects](/guides/components#retire-the-controls).
 
 ## CardMessage
 
@@ -37,12 +79,24 @@ The payload passed to `sendCard()`.
   Genuine human-readable text, non-blank. It is what search indexes, what push notifications and channel previews are built from, what a reply quoting this card renders, and what any surface not wired to the card renderer shows. The SDK never synthesizes it. `embedFallbackText()` derives one line if you want it.
 </ResponseField>
 
-<ResponseField name="embed" type="BotEmbed" required>
-  Exactly one embed. Clients render one card per message.
+<ResponseField name="embed" type="BotEmbed">
+  Exactly one embed. Clients render one card per message. Required unless `components` is present: a components-only card is a message with rows under its text and no embed at all.
+</ResponseField>
+
+<ResponseField name="components" type="ActionRow[]">
+  Up to 5 rows of buttons and string selects rendered under the card. Their presence is what selects the [v2 envelope](#the-two-envelopes). Validated by `assertComponents()`. Clicks arrive on the [`interaction`](/api-reference/events#interaction) event. See [Buttons and selects](/guides/components).
 </ResponseField>
 
 <ResponseField name="groupId" type="string">
   The channel's group, when it is not already cached from an inbound frame.
+</ResponseField>
+
+<ResponseField name="threadId" type="string">
+  Post the card into a thread of `channelId`, the thread's parent. Mutually exclusive with `postId`.
+</ResponseField>
+
+<ResponseField name="postId" type="string">
+  Post the card into a forum post of `channelId`, the parent forum channel. Mutually exclusive with `threadId`. See [Forums](/guides/forums).
 </ResponseField>
 
 <ResponseField name="mentions" type="MentionTarget[]">
@@ -123,6 +177,185 @@ Field names are wire names, in `snake_case`. Do not camelCase them.
 
 There is no index signature. Unknown keys are rejected, because the renderer drops them while they still count against the payload budget. `video` is rejected by name.
 
+## Components
+
+The rows a card may carry under its embed. Every type here is pure data: no client state, no I/O.
+
+### ActionRow
+
+```ts
+interface ActionRow {
+  type: 'row';
+  components: Component[];  // up to 5 buttons, or exactly one select
+}
+
+type Component = Button | StringSelect;
+```
+
+A row holding a select holds nothing else. An empty row is refused.
+
+### Button
+
+<ResponseField name="type" type="'button'" required />
+
+<ResponseField name="style" type="ButtonStyle" required>
+  `'primary'`, `'secondary'`, `'success'`, `'danger'`, or `'link'`.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  1 to 80 characters.
+</ResponseField>
+
+<ResponseField name="customId" type="string">
+  1 to 100 characters. Required for every style but `'link'`, where it must be absent. What the `interaction` handler switches on. Opaque to everyone but the bot, and readable by every member holding the conversation key.
+</ResponseField>
+
+<ResponseField name="url" type="string">
+  `'link'` style only: an absolute `https` URL, up to 2048 characters. The client opens it through its trusted-link path and the click never reaches the bot. Nothing is fetched for it at render.
+</ResponseField>
+
+<ResponseField name="emoji" type="string">
+  Exactly one unicode emoji, rendered ahead of the label. `isSingleEmoji()` is the check.
+</ResponseField>
+
+<ResponseField name="disabled" type="boolean" />
+
+### StringSelect
+
+<ResponseField name="type" type="'select'" required />
+
+<ResponseField name="customId" type="string" required>
+  1 to 100 characters.
+</ResponseField>
+
+<ResponseField name="placeholder" type="string">
+  Up to 150 characters.
+</ResponseField>
+
+<ResponseField name="minValues" type="number">
+  1 to 25, default 1. Never above `maxValues`.
+</ResponseField>
+
+<ResponseField name="maxValues" type="number">
+  1 to 25, default 1. Never above the option count.
+</ResponseField>
+
+<ResponseField name="disabled" type="boolean" />
+
+<ResponseField name="options" type="SelectOption[]" required>
+  1 to 25 options with unique `value`s.
+</ResponseField>
+
+### SelectOption
+
+<ResponseField name="label" type="string" required>
+  1 to 100 characters.
+</ResponseField>
+
+<ResponseField name="value" type="string" required>
+  1 to 100 characters, unique within the select. What arrives in `Interaction.values`.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Up to 100 characters.
+</ResponseField>
+
+<ResponseField name="emoji" type="string">
+  Exactly one unicode emoji.
+</ResponseField>
+
+<ResponseField name="default" type="boolean" />
+
+### ModalDefinition
+
+What `Interaction.showModal()` opens. It travels only on the response lane, never inside a card. See [Modals](/guides/modals).
+
+<ResponseField name="title" type="string" required>
+  1 to 45 characters.
+</ResponseField>
+
+<ResponseField name="customId" type="string" required>
+  1 to 100 characters. Comes back as the modal interaction's `customId`.
+</ResponseField>
+
+<ResponseField name="inputs" type="ModalInput[]" required>
+  1 to 5 inputs with unique `customId`s.
+</ResponseField>
+
+### ModalInput
+
+<ResponseField name="customId" type="string" required>
+  1 to 100 characters. The key in `Interaction.fields`.
+</ResponseField>
+
+<ResponseField name="label" type="string" required>
+  1 to 45 characters.
+</ResponseField>
+
+<ResponseField name="style" type="'short' | 'paragraph'" required />
+
+<ResponseField name="placeholder" type="string">
+  Up to 100 characters.
+</ResponseField>
+
+<ResponseField name="required" type="boolean">
+  Default `true`.
+</ResponseField>
+
+<ResponseField name="minLength" type="number">
+  0 to 4000, never above `maxLength`.
+</ResponseField>
+
+<ResponseField name="maxLength" type="number">
+  1 to 4000.
+</ResponseField>
+
+<ResponseField name="value" type="string">
+  Pre-filled text, up to 4000 characters.
+</ResponseField>
+
+### EphemeralMessage
+
+What `Interaction.ephemeral()` shows the clicker alone.
+
+```ts
+interface EphemeralMessage {
+  content: string;          // up to 2000 characters; may be empty when an embed or rows carry the point
+  embed?: BotEmbed;
+  components?: ActionRow[];
+}
+```
+
+Never stored anywhere. It must carry something to show: an empty `content` with no embed and no rows is refused with `reason: 'empty'`. Rows inside it are clickable, and their clicks carry the original message id plus a `parentId` naming the interaction that produced the reply.
+
+### MessageCard
+
+The parsed card a received message carries on [`Message.card`](/api-reference/types#message), and the `card` field on [`messageUpdate`](/api-reference/events#messageupdate).
+
+```ts
+interface MessageCard {
+  embeds: BotEmbed[];
+  components: ActionRow[];
+}
+```
+
+Every embed that survived the read-side validator, plus the component rows. A v1 card yields one embed and no rows. A v2 card yields either or both. The same caps and the same media rule are enforced on read as on write, and a card that fails them is `null` on the message, never a partial card.
+
+## The two envelopes
+
+The plaintext inside the encrypted card slot has two shapes, and the SDK picks between them by whether the card carries rows.
+
+| | v1 | v2 |
+| --- | --- | --- |
+| Shape | A JSON **array**: `[{ ...embed, type: 'rich' }]` | A JSON **object**: `{ v: 2, embeds: [embed], components: [row, ...] }` |
+| Emitted when | The card has no `components` | The card has at least one row |
+| `embeds` | Always one | May be empty, for a components-only card |
+| A client from before 0.4.0 | Renders it unchanged | Drops the whole card and shows only the message's text `content` |
+
+The rule exists so that a component-free card keeps working on every client that ever rendered one. It also means a card with rows degrades to its `content` on an older client, with no embed and no buttons, which is one more reason `content` must be genuine text.
+
+`encodeCardEnvelope({ embed?, components? })` makes the pick and is what `sendCard()`, `createForumPost()`, and `editCard()` call. `parseCardEnvelope(plain)` is the read side: it accepts both shapes and returns a `MessageCard` or `null`, never throwing. Both are exported for raw-frame authors.
+
 ## BotEmbedField
 
 <ResponseField name="name" type="string" required>
@@ -179,7 +412,55 @@ isCloakMediaUrl(raw: unknown): boolean
 assertCardMessage(card: CardMessage): void
 ```
 
-The runtime half of the `CardMessage` type. `sendCard()` calls it for you. Call it yourself to validate a card built from untrusted input before you queue a send. It throws on the first problem it finds, in a deliberate order: shape, then `content`, then unknown keys, then caps, then the media rule, then link schemes, then "nothing renderable".
+The runtime half of the `CardMessage` type. `sendCard()` calls it for you. Call it yourself to validate a card built from untrusted input before you queue a send. It throws on the first problem it finds, in a deliberate order: rows (when present), then shape, then `content`, then unknown keys, then caps, then the media rule, then link schemes, then "nothing renderable". A components-only card is refused for a bad row, never for a missing embed.
+
+### assertComponents
+
+```ts
+assertComponents(rows: unknown): asserts rows is ActionRow[]
+```
+
+The runtime half of `ActionRow[]`. Throws `CloakComponentError` on the first violation of any cap in the [Components](#components) section. `sendCard()`, `createForumPost()`, `editCard()`, and `Interaction.ephemeral()` call it for you. Everything it accepts renders: it is a strict refinement of the client parser, which drops a card whole on a violation.
+
+### assertModal
+
+```ts
+assertModal(def: unknown): asserts def is ModalDefinition
+```
+
+The runtime half of `ModalDefinition`. `Interaction.showModal()` calls it before anything is encrypted.
+
+### parseComponents
+
+```ts
+parseComponents(raw: unknown): ActionRow[] | null
+```
+
+The read side of `assertComponents()`: the validated rows, or `null` on any violation. Never throws.
+
+### encodeCardEnvelope
+
+```ts
+encodeCardEnvelope(parts: { embed?: BotEmbed; components?: ActionRow[] }): string
+```
+
+Serializes a validated card to the plaintext the wire carries, picking [v1 or v2](#the-two-envelopes) by whether rows are present, and enforces `MAX_EMBED_JSON`. Validate first; this only serializes and caps.
+
+### parseCardEnvelope
+
+```ts
+parseCardEnvelope(plain: string): MessageCard | null
+```
+
+Parses a decrypted card plaintext of either shape into a `MessageCard`, or `null` on any violation. Strict caps on both shapes. Never throws.
+
+### encodeEphemeral
+
+```ts
+encodeEphemeral(e: EphemeralMessage): string
+```
+
+Validates and serializes an ephemeral reply. `Interaction.ephemeral()` calls it for you.
 
 ### encodeBotEmbed
 
@@ -220,6 +501,26 @@ Thrown locally, before anything reaches the wire. It is the only place a bot aut
 | `'empty'` | Nothing renderable left, so the client would draw no card at all |
 | `'wire-cap'` | The ciphertext exceeded `MAX_EMBED_WIRE` |
 
+## CloakComponentError
+
+Thrown locally when a component row, a modal definition, or an ephemeral reply's rows are refused, before anything reaches the wire. The same reasoning as `CloakEmbedError`: the server cannot read the envelope, and the client parser drops a bad card silently, so this is the only place you can be told.
+
+<ResponseField name="name" type="string">
+  Always `'CloakComponentError'`.
+</ResponseField>
+
+<ResponseField name="reason" type="CloakComponentErrorReason">
+  `'shape'` for a wrong type, an unknown key, a missing required key, or a duplicate id. `'cap'` for a value over one of the pinned caps.
+</ResponseField>
+
+<ResponseField name="field" type="string | undefined">
+  The offending path, for example `'components[1].components[0].label'` or `'modal.inputs[2].customId'`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  A remedy-carrying explanation, prefixed with `[cloak-sdk]`.
+</ResponseField>
+
 ## Constants
 
 Every cap mirrors a client renderer constant. Where the renderer truncates or strips a value, `sendCard()` rejects it.
@@ -241,7 +542,26 @@ Every cap mirrors a client renderer constant. Where the renderer truncates or st
 | `MAX_EMBED_URLS` | `8` | Total URLs across all slots. A conforming embed has seven slots, so this never binds |
 | `MAX_FALLBACK_TEXT` | `256` | The output of `embedFallbackText()` |
 
-`MAX_EMBED_JSON` sits below the server's own 16 KiB sidecar cap on the ciphertext, because base64 expands by roughly four thirds. `MAX_EMBED_WIRE` is reachable only by a payload that already failed `MAX_EMBED_JSON`. Both exist so an oversize card is a local synchronous throw rather than a `sendRejected` event with code `-11` arriving later.
+`MAX_EMBED_JSON` sits below the server's own 16 KiB sidecar cap on the ciphertext, because base64 expands by roughly four thirds. `MAX_EMBED_WIRE` is reachable only by a payload that already failed `MAX_EMBED_JSON`. Both exist so an oversize card is a local synchronous throw rather than a `sendRejected` event with code `-11` arriving later. `MAX_EMBED_JSON` applies to the whole envelope, embed and rows together.
+
+### Component constants
+
+| Constant | Value | Applies to |
+| --- | --- | --- |
+| `MAX_ACTION_ROWS` | `5` | Rows per card |
+| `MAX_BUTTONS_PER_ROW` | `5` | Buttons per row |
+| `MAX_BUTTON_LABEL` | `80` | `Button.label` |
+| `MAX_BUTTON_URL` | `2048` | `Button.url` |
+| `MAX_CUSTOM_ID` | `100` | Every `customId`: button, select, modal, and modal input |
+| `MAX_SELECT_PLACEHOLDER` | `150` | `StringSelect.placeholder` |
+| `MAX_SELECT_OPTIONS` | `25` | Options per select, and the ceiling on `minValues` and `maxValues` |
+| `MAX_SELECT_OPTION_TEXT` | `100` | `SelectOption.label` and `SelectOption.value` |
+| `MAX_SELECT_OPTION_DESCRIPTION` | `100` | `SelectOption.description` |
+| `MAX_MODAL_TEXT` | `45` | `ModalDefinition.title` and `ModalInput.label` |
+| `MAX_MODAL_INPUTS` | `5` | Inputs per modal |
+| `MAX_MODAL_PLACEHOLDER` | `100` | `ModalInput.placeholder` |
+| `MAX_MODAL_VALUE` | `4000` | `ModalInput.value`, `minLength`, and `maxLength` |
+| `MAX_EPHEMERAL_CONTENT` | `2000` | `EphemeralMessage.content` |
 
 ## Next
 
@@ -249,8 +569,8 @@ Every cap mirrors a client renderer constant. Where the renderer truncates or st
   <Card title="Rich cards" icon="id-card" href="/guides/rich-cards">
     The guide: lane choice, media rules, and a complete bot.
   </Card>
-  <Card title="Webhooks reference" icon="code" href="/api-reference/webhooks">
-    The plaintext lane's types, caps and errors.
+  <Card title="Buttons and selects" icon="square-check" href="/guides/components">
+    Rows, clicks, the three answers, and `editCard()` in practice.
   </Card>
   <Card title="Errors" icon="triangle-exclamation" href="/api-reference/errors">
     Every error class the SDK raises.

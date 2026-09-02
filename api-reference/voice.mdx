@@ -121,6 +121,11 @@ class VoiceMediaSession {
   get installedIdentities(): readonly string[];
   setVoiceKey(next: VoiceKeyValue): Promise<void>;
   detach(): Promise<void>;
+  // Room scope only. Every one of these throws in participant scope.
+  on<K extends keyof VoiceMediaSessionEvents>(event: K, listener: (...args: VoiceMediaSessionEvents[K]) => void): this;
+  off<K extends keyof VoiceMediaSessionEvents>(event: K, listener: (...args: VoiceMediaSessionEvents[K]) => void): this;
+  audio(): AsyncIterable<ParticipantFrame>;
+  setSubscribed(identity: string, on: boolean): Promise<void>;
 }
 ```
 
@@ -147,8 +152,22 @@ Requires the optional native engine. See [Voice runtime](/voice/runtime).
 </ResponseField>
 
 <ResponseField name="detach()" type="Promise<void>">
-  Stops the player, unpublishes, and disconnects. Idempotent.
+  Stops the player, unpublishes, and disconnects. Idempotent. Ends every receive iterable with a normal return.
 </ResponseField>
+
+<ResponseField name="on('audio', listener)" type="this">
+  Room scope only. Fires once per subscribed remote audio track with a [`ParticipantAudio`](#participantaudio). A re-subscribe for the same identity is a new event with a new iterable. **Throws in participant scope**: that session holds only its own frame key and can decrypt nobody. `off()` removes a listener.
+</ResponseField>
+
+<ResponseField name="audio()" type="AsyncIterable<ParticipantFrame>">
+  Room scope only. Every live participant's frames merged into one iterable, each tagged with its identity. Later arrivals join, leavers drop out, and any number of concurrent consumers each see every frame. Ends with a normal return on `detach()`. `return()` (a `break`) releases every underlying stream this consumer held. **Throws in participant scope.**
+</ResponseField>
+
+<ResponseField name="setSubscribed(identity, on)" type="Promise<void>">
+  Room scope only. Subscribe or unsubscribe this bot from one identity's audio tracks. `false` ends that identity's live iterable immediately with a normal return; a later `true` produces a fresh `audio` event. Rejects when no participant with that identity is in the room. **Throws in participant scope.**
+</ResponseField>
+
+Security, in full: a bot without `voice_listen` holds only its own frame key and is cryptographically unable to decrypt any member; a bot granted `voice_listen` can decrypt everyone in the channel, by design. See [Receiving audio](/voice/audio#receiving-audio).
 
 ### VoiceMediaOptions
 
@@ -161,12 +180,59 @@ interface VoiceMediaOptions {
   voiceKey: VoiceKeyValue;
   keys: VoiceFrameKeySource;
   deafened?: boolean;
-  sampleRate?: number;  // default 48000
-  channels?: number;    // default 2
+  sampleRate?: number;         // publish format, default 48000
+  channels?: number;           // publish format, default 2
+  receiveSampleRate?: number;  // room scope only, default 48000
+  receiveChannels?: number;    // room scope only, default 1
   debug?: boolean;
   engine?: RtcNodeModule; // test seam
 }
 ```
+
+`receiveSampleRate` and `receiveChannels` set the format of every received `PcmFrame`. They are fixed at attach, and the engine does the resampling and channel mixing.
+
+### VoiceMediaSessionEvents
+
+```ts
+interface VoiceMediaSessionEvents {
+  audio: [stream: ParticipantAudio];
+}
+```
+
+### PcmFrame
+
+```ts
+interface PcmFrame {
+  data: Int16Array;
+  sampleRate: number;
+  channels: number;
+  samplesPerChannel: number;
+}
+```
+
+One received frame of decrypted PCM, already resampled to the session's `receiveSampleRate` and `receiveChannels`. `data` is interleaved signed 16-bit, `samplesPerChannel * channels` long, and a copy out of the engine, so it is safe to keep after the next frame arrives. Consumers sharing a session see the same `data`: read it or convert it, never write into it.
+
+### ParticipantAudio
+
+```ts
+interface ParticipantAudio {
+  identity: string;
+  frames: AsyncIterable<PcmFrame>;
+}
+```
+
+What the `audio` event carries. `identity` is the participant's normalized Cloak user id. `frames` ends with a normal return when that track is unsubscribed or the session detaches. A muted track yields nothing and stays open. More than one consumer may iterate it, and each sees every frame. A consumer slower than real time is capped at 500 queued frames before the oldest is dropped.
+
+### ParticipantFrame
+
+```ts
+interface ParticipantFrame {
+  identity: string;
+  frame: PcmFrame;
+}
+```
+
+What `session.audio()` yields.
 
 ### VoiceKeyValue
 
@@ -261,6 +327,16 @@ pcmChunks(bytes: AsyncIterable<Uint8Array>, channels?: number): AsyncIterable<In
 ```
 
 Adapts a byte stream to frame-aligned chunks. Handles chunks that end mid-sample and buffers whose offset is not two-byte aligned. A trailing partial frame is dropped.
+
+### pcmFrameBytes
+
+```ts
+pcmFrameBytes(frame: PcmFrame): Uint8Array
+```
+
+Serializes one received [`PcmFrame`](#pcmframe) as interleaved little-endian signed 16-bit bytes: the inverse of `pcmChunks`, and the layout `ffmpeg -f s16le`, a WAV data chunk, and raw-PCM speech-to-text inputs expect. Pure and endian-fixed. It copies exactly `samplesPerChannel * channels` samples and never aliases `frame.data`.
+
+This is the whole of what the SDK does with received audio. There is no recorder, no file sink, and no transcription helper, on purpose. See [Receiving audio](/voice/audio#receiving-audio).
 
 ### ffmpegResource
 
@@ -409,8 +485,8 @@ The frame-key provider options the SDK configures the engine with. Exported so t
   <Card title="Voice overview" icon="microphone" href="/voice/overview">
     What a voice bot can and cannot do.
   </Card>
-  <Card title="Publishing audio" icon="music" href="/voice/audio">
-    The media session in practice.
+  <Card title="Publishing and receiving audio" icon="music" href="/voice/audio">
+    The media session in practice, both directions.
   </Card>
   <Card title="Voice runtime" icon="wrench" href="/voice/runtime">
     Engine setup and the symptom-to-cause table.

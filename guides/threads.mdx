@@ -19,7 +19,7 @@ client.on('messageCreate', async (msg) => {
 
 `createThread` takes the parent channel and an options object: `title` (1 to 100 chars), an optional `starter` message to anchor to (one message spawns at most one thread, ever), `isPrivate`, and `autoArchiveMinutes` (0 for the channel default, or 60 / 1440 / 4320 / 10080).
 
-Sending into a thread is the ordinary `send()` with the **parent** channel id plus `{ threadId }`. Under the hood the SDK enters the thread once and caches that position until the cursor moves, so a run of sends into one thread pays the setup once.
+Sending into a thread is the ordinary `send()` with the **parent** channel id plus `{ threadId }`. Under the hood the SDK enters the thread once and caches that position until the cursor moves, so a run of sends into one thread pays the setup once. `threadId` and `postId` (the [forum post](/guides/forums) equivalent) are mutually exclusive: a message lives in one container.
 
 ## Receive thread messages
 

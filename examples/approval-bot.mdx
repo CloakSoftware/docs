@@ -1,0 +1,334 @@
+---
+title: "Approval bot"
+description: "Send an approver a DM card with Approve and Deny buttons or a /approve slash command, answer with an ephemeral reply, retire the buttons with editCard() on the bot's own echo, recover open cards after a restart with fetchDmMessages(), and tell the requester."
+---
+
+This bot listens for `!request <text>` in any server channel and sends the approver a **direct message** card with **Approve** and **Deny** buttons. Approve tells the clicker so with an ephemeral reply, strips the buttons with `editCard()`, and DMs the requester. Deny opens a modal for a reason first, then does the same with the reason attached. The approver can also answer with `/approve` from the DM's `/` picker instead of clicking.
+
+After a restart the bot reads its DM history with `fetchDmMessages()` and recovers every card whose buttons are still live, so a click on a card sent before the restart still works.
+
+It is the shortest demonstration of the full interaction lifecycle on the DM lane: `sendCardDM()`, one click or one DM slash command, exactly one answer per interaction, a card retired through the bot's own echo, and DM history as the source of truth across restarts.
+
+<Note>
+  Everything past the send needs a Cloak backend that honors wire version 3: the bot's own DM echo, DM history, and DM slash commands all ride the DM lane's message broadcast. Against an older backend the card still sends and the click still arrives, but there is no echo to `editCard()`, `fetchDmMessages()` comes back empty, and the DM's `/` picker cannot reach the bot; a typed `/approve ...` still does. See [What a wire version 3 backend adds](/guides/direct-messages#what-a-wire-version-3-backend-adds).
+</Note>
+
+## The full bot
+
+```ts approval-bot.ts
+import { Client, CloakActionError, CloakEmbedError, CloakComponentError } from '@cloak-software/bot-sdk';
+import type { Message } from '@cloak-software/bot-sdk';
+
+// The user who approves requests. They must own the bot or share a server
+// with it, or the DM is refused server-side.
+const approverId = process.env.APPROVER_USER_ID;
+if (!approverId) throw new Error('set APPROVER_USER_ID');
+
+const norm = (id: string) => id.replace(/-/g, '').toLowerCase();
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Keep this file. The bot's identity is published to the server once, so a
+  // bot with no keystore works on its first run and fails on every one after.
+  // The DM keys and the peer-to-dm map live here too.
+  keystorePath: './approval-bot.cloak-keystore.json',
+  // The DM lane needs no permission. message_send is for the "sent for
+  // approval" acknowledgement in the server channel.
+  requiredPermissions: ['view_text', 'message_send'],
+  debug: process.env.DEBUG === '1',
+});
+
+interface Pending {
+  requesterId: string;
+  text: string;
+  // The bot's own echo of the card, or the history row after a restart. Its
+  // createdAt is what editCard() needs: an Interaction carries the click
+  // time, not the message's.
+  card: Message | null;
+}
+
+// Open requests, keyed by a short id. Every button's customId is
+// `<action>:<id>:<requesterId>`, so a card alone is enough to rebuild this.
+const pending = new Map<string, Pending>();
+
+// Read one of this bot's own cards back into the map. Used for the live echo
+// on messageCreate and for history rows after a restart.
+function remember(card: Message): void {
+  if (!card.card) return;
+  const rows = card.card.components;
+  if (rows.length === 0) return; // already decided: the buttons were stripped
+  for (const row of rows) {
+    for (const c of row.components) {
+      if (c.type !== 'button' || !c.customId) continue;
+      const [, id, requesterId] = c.customId.split(':');
+      if (!id || !requesterId) continue;
+      const text = card.card.embeds[0]?.description ?? card.content;
+      pending.set(id, { requesterId, text, card });
+      return;
+    }
+  }
+}
+
+// The /approve slash command, for approvers who would rather type than click.
+// dm: true is the default; it is written out here because DMs are the point.
+client.commands.register(
+  {
+    name: 'approve',
+    description: 'approve or deny a pending request by id',
+    dm: true,
+    options: [
+      { name: 'id', type: 'string', description: 'the request id shown on the card', required: true },
+      { name: 'verdict', type: 'string', description: 'approve or deny', required: true, choices: ['approve', 'deny'] },
+      { name: 'reason', type: 'string', description: 'why, for a denial', required: false },
+    ],
+  },
+  async (ctx) => {
+    // ctx.serverId is null and ctx.dmId is set when this came from the DM.
+    if (norm(ctx.userId) !== norm(approverId)) {
+      await ctx.reply('Only the approver can do that.');
+      return;
+    }
+    const id = ctx.getString('id') ?? '';
+    const req = pending.get(id);
+    if (!req) {
+      await ctx.reply(`No open request with id ${id}.`);
+      return;
+    }
+    const verdict = ctx.getString('verdict') === 'approve' ? 'approved' : 'denied';
+    await ctx.reply(`${verdict === 'approved' ? 'Approved' : 'Denied'}. The requester has been told.`);
+    await settle(id, req, verdict, verdict === 'denied' ? (ctx.getString('reason') ?? '') : null);
+  },
+);
+
+client.on('ready', async () => {
+  console.log(`Logged in as bot ${client.user?.id}`);
+  // Recover cards sent before a restart. fetchDmMessages() resolves the DM
+  // from the peer like sendDM() does and reads it on the DM cursor; rows
+  // carry card, createdAt and isDM, and include this bot's own messages.
+  try {
+    const history = await client.fetchDmMessages(approverId, { limit: 50 });
+    for (const msg of history) {
+      if (msg.authorId === client.user?.id) remember(msg);
+    }
+    console.log(`recovered ${pending.size} open request(s) from DM history`);
+  } catch (e) {
+    console.warn(`could not read DM history: ${(e as Error).message}`);
+  }
+});
+
+client.on('messageCreate', async (msg) => {
+  // The bot's own sends come back, on the server lane and (wire v3) the DM
+  // lane. Keep the DM cards so they can be edited later.
+  if (msg.authorId === client.user?.id) {
+    if (msg.isDM) remember(msg);
+    return;
+  }
+  if (msg.command) return; // /approve is already dispatched to its handler
+  // Requests are taken in server channels only.
+  if (msg.isDM || !msg.serverId) return;
+
+  const match = /^!request\s+(.+)/s.exec(msg.content.trim());
+  if (!match) return;
+
+  const id = Math.random().toString(36).slice(2, 10);
+  const text = match[1];
+  pending.set(id, { requesterId: msg.authorId, text, card: null });
+
+  try {
+    // sendCardDM() is sendCard() on the DM lane: the same card, the same
+    // envelope, encrypted under the DM key. First contact with the approver
+    // costs a create plus a key exchange; every later send is just a send.
+    await client.sendCardDM(approverId, {
+      // Required, and genuine text: it is what notifications show, and what
+      // a client from before components shows instead of the card.
+      content: `Request ${id} from ${msg.authorName}: ${text}`,
+      embed: {
+        title: `Approval needed (${id})`,
+        description: text,
+        footer: { text: `requested by ${msg.authorName}; or type /approve ${id} approve` },
+        timestamp: new Date().toISOString(),
+      },
+      components: [
+        {
+          type: 'row',
+          components: [
+            { type: 'button', style: 'success', label: 'Approve', customId: `approve:${id}:${msg.authorId}` },
+            { type: 'button', style: 'danger', label: 'Deny', customId: `deny:${id}:${msg.authorId}` },
+          ],
+        },
+      ],
+    });
+    await msg.channel.send(`Sent for approval as request ${id}.`);
+  } catch (e) {
+    pending.delete(id);
+    if (e instanceof CloakEmbedError || e instanceof CloakComponentError) {
+      console.error(`card refused (${e.reason}) at ${e.field ?? 'the payload'}: ${e.message}`);
+      return;
+    }
+    if (e instanceof CloakActionError) {
+      // The approver is not eligible: they neither own the bot nor share a server.
+      console.error(`could not DM the approver: ${e.message}`);
+      return;
+    }
+    throw e;
+  }
+});
+
+client.on('interaction', async (i) => {
+  // A click on a DM card arrives with serverId null and channelId = the dm id.
+  const [action, id] = i.customId.split(':');
+  const req = id ? pending.get(id) : undefined;
+
+  if (!req) {
+    // Already decided, or a card this process could not recover. Answer
+    // anyway: an unanswered click leaves the clicker's button spinning until
+    // their client gives up.
+    await i.ephemeral({ content: 'That request is no longer open.' });
+    return;
+  }
+
+  if (i.kind === 'button' && action === 'approve') {
+    await i.ephemeral({ content: 'Approved. The requester has been told.' });
+    await settle(id!, req, 'approved', null);
+    return;
+  }
+
+  if (i.kind === 'button' && action === 'deny') {
+    // showModal() is this interaction's one answer. The submit arrives as a
+    // second interaction with kind 'modal'.
+    await i.showModal({
+      title: 'Reason for denying',
+      customId: `deny-form:${id}`,
+      inputs: [{ customId: 'reason', label: 'Reason', style: 'paragraph', required: true, maxLength: 500 }],
+    });
+    return;
+  }
+
+  if (i.kind === 'modal' && action === 'deny-form') {
+    await i.ack();
+    await settle(id!, req, 'denied', i.fields.reason ?? '');
+  }
+});
+
+async function settle(id: string, req: Pending, verdict: 'approved' | 'denied', reason: string | null): Promise<void> {
+  pending.delete(id);
+
+  // Retire the buttons. components: [] strips the rows; the embed says what
+  // happened. The text is re-encrypted alongside the card, so pass it too.
+  if (!req.card) {
+    console.warn(`no echo or history row held for request ${id}; is the backend on wire version 3?`);
+  } else {
+    try {
+      await req.card.editCard({
+        content: `${verdict === 'approved' ? 'Approved' : 'Denied'} (${id}): ${req.text}`,
+        embed: {
+          title: verdict === 'approved' ? 'Approved' : 'Denied',
+          description: reason ? `${req.text}\n\nReason: ${reason}` : req.text,
+          timestamp: new Date().toISOString(),
+        },
+        components: [],
+      });
+    } catch (e) {
+      if (e instanceof CloakActionError) console.error(`editCard refused: ${e.message}`);
+      else console.error(`editCard failed: ${(e as Error).message}`);
+    }
+  }
+
+  // Tell the requester. They typed !request in a server the bot is in, so
+  // they share one with it and the DM is allowed.
+  try {
+    await client.sendDM(
+      req.requesterId,
+      verdict === 'approved'
+        ? `Your request was approved: ${req.text}`
+        : `Your request was denied: ${req.text}\nReason: ${reason}`,
+    );
+  } catch (e) {
+    if (e instanceof CloakActionError) console.error(`could not DM the requester: ${e.message}`);
+    else throw e;
+  }
+}
+
+client.on('commandError', (e) => console.warn(`/${e.name} failed (${e.reason})`, e.error));
+client.on('sendRejected', (r) => console.warn(`send rejected (${r.code}): ${r.message}`));
+client.on('error', (e) => console.error('sdk error', e.source, e.context, e.message));
+client.on('disconnect', (e) => console.warn('disconnected', e));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+## Run it
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" APPROVER_USER_ID="<your user id>" npx tsx approval-bot.ts
+```
+
+Then, in any text channel the bot can see, type `!request a new keyboard`. The card lands in the approver's DM with the bot. Click **Approve** or **Deny** there, or type `/approve` in the DM (from the picker, or by hand) with the request id from the card. Restart the bot and click a card that was sent before the restart: it still retires.
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="sendCardDM() is sendCard() on the DM lane" icon="envelope">
+    The same `CardMessage`, the same v1 or v2 envelope, encrypted under the peer-keyed DM key. `threadId` and `postId` are not valid on it and `groupId` is ignored. A bot cannot DM itself, and an approver who neither owns the bot nor shares a server with it is refused server-side with a `CloakActionError` from the create step.
+  </Accordion>
+
+  <Accordion title="The card carries everything needed to rebuild the request" icon="tag">
+    The buttons' `customId`s are `approve:<id>:<requesterId>` and `deny:<id>:<requesterId>`, and the embed's `description` is the request text. That is why `remember()` can rebuild a `Pending` entry from nothing but the card, whether it arrives as the live echo or as a history row. `customId` lives inside the encrypted envelope and is opaque to the server, but the DM's other participant can read it, so it carries routing state and nothing sensitive.
+  </Accordion>
+
+  <Accordion title="fetchDmMessages() recovers open cards after a restart" icon="clock-rotate-left">
+    `fetchDmMessages(approverId, { limit: 50 })` resolves the DM from the approver's user id the way `sendDM()` does, reads it on the DM cursor with the same cursors and limits as a channel read, and decrypts every row under the DM key. Rows carry `card`, `createdAt`, `isDM: true`, and `serverId: null`, and they include the bot's own messages, which is the whole point here: a recovered row is a `Message` whose `editCard()` still works. A card whose `components` are already empty was decided before the restart and is skipped. `fetchMessages(null, dmId, opts)` is the same read by dm id, for a DM this session has already seen traffic in.
+  </Accordion>
+
+  <Accordion title="/approve is a DM slash command" icon="terminal">
+    The approver's client fetches the bot's menu when it opens the DM, so `/approve` shows in the DM's `/` picker. The invocation rides the DM lane's message broadcast and dispatches through the same registry as a channel command, with `ctx.serverId` null, `ctx.dmId` set, `ctx.channelId` equal to the dm id, and `ctx.userId` the invoker. There is no permission gate in a DM, which is why the handler checks `ctx.userId` itself. `ctx.reply()` sends into the DM. `dm: true` is the default; a command declared `dm: false` is hidden from the DM picker and dropped if invoked there anyway. Typing `/approve <id> approve` by hand works too, on any backend, since the text lane runs in DMs. See [Slash commands](/guides/slash-commands#commands-in-direct-messages).
+  </Accordion>
+
+  <Accordion title="A DM click is addressed to this bot alone" icon="lock">
+    The approver's app encrypts the click under the DM key and the server pushes it to this bot's sessions only. It arrives with `serverId: null` and `channelId` equal to the dm id, and `ephemeral()` and `showModal()` answer under the same DM key. The server mints the interaction id and keeps it for 15 minutes.
+  </Accordion>
+
+  <Accordion title="Exactly one answer per interaction" icon="check-double">
+    Approve answers with `ephemeral()`, which the clicker alone sees under the card and which is never stored. Deny answers with `showModal()`. The modal's submit is a **second** interaction, and it gets its own answer, `ack()`. A second call on the same interaction rejects locally with a `CloakClientError` whose `source` is `'interaction'`, and nothing goes on the wire.
+
+    The unknown-request branch answers too. An unanswered click leaves the clicker's control pending until their client's 3 second timeout.
+  </Accordion>
+
+  <Accordion title="editCard() needs the message's createdAt" icon="clock">
+    The edit addresses the row by its send time. An `Interaction` carries the click time, so the bot keeps the card `Message`, from its own DM echo on `messageCreate` or from the history read, and calls `card.editCard()` on it. That runs `client.editCard(null, dmId, messageId, card, { createdAt })` under the DM key. `components: []` strips the buttons; a second card with `disabled: true` on each button would leave them visible but inert.
+
+    The echo and the history rows exist only on a backend that honors wire version 3. On an older backend the DM arrives through the legacy notify signal alone, which carries no timestamp and no card, and `editCard()` on such a message rejects with a message saying so.
+  </Accordion>
+
+  <Accordion title="The verdict goes out as a DM" icon="paper-plane">
+    `sendDM()` creates the DM and exchanges its key on first contact, then sends. The requester must own the bot or share a server with it, which they do, since they typed `!request` in one.
+  </Accordion>
+
+  <Accordion title="The same flow in a server channel" icon="hashtag">
+    Nothing here is DM-specific except the sends and the history read. Swap `sendCardDM(approverId, card)` for `sendCard(serverId, approvalsChannelId, card)`, `fetchDmMessages(approverId, opts)` for `fetchMessages(serverId, approvalsChannelId, opts)`, keep the echo the same way (it has always existed on the server lane), and `card.editCard()` works unchanged. A click then arrives with `serverId` set and `channelId` equal to the channel.
+  </Accordion>
+
+  <Accordion title="What an older client sees" icon="eye-slash">
+    A card with rows rides the v2 envelope. A Cloak client from before this release drops that card entirely and shows only the message's `content`, which is why the content line names the request id, the requester, and the request in full, and why the footer spells out the `/approve` form.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
+    `sendCardDM()`, DM history, DM slash commands, and what wire version 3 adds.
+  </Card>
+  <Card title="Buttons and selects" icon="square-check" href="/guides/components">
+    Rows, the click lifecycle, and the three answers.
+  </Card>
+  <Card title="Slash commands" icon="terminal" href="/guides/slash-commands">
+    The `dm` flag and the DM `CommandContext`.
+  </Card>
+  <Card title="Modals" icon="window-maximize" href="/guides/modals">
+    The form the Deny button opens.
+  </Card>
+</CardGroup>

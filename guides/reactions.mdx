@@ -6,7 +6,7 @@ description: "Add and remove reactions on server messages, and listen for reacti
 Your bot can react to any server message it can see, remove its own reaction, and hear when reactions change anywhere it is watching. Reactions are keyed by an opaque `reactionId`: a unicode emoji for the common case, or a custom emoji id for server-specific emoji. This page covers both sides, adding reactions and listening for them.
 
 <Warning>
-  Reactions do not work on direct messages. `react()` and `unreact()` reject with a plain `Error` on any message where `msg.isDM` is true, regardless of permissions, before a frame is built. Direct messages arrive on the same `messageCreate` event as server messages, so guard every handler.
+  `react()` and `unreact()` on a direct message need a backend that honors wire version 3, which is what gives a DM message its `createdAt`. On an older backend a DM message carries no timestamp and both reject with a plain `Error` saying so, before a frame is built. Direct messages arrive on the same `messageCreate` event as server messages, so guard every handler that does server-scoped work. See [Direct messages](/guides/direct-messages#what-a-wire-version-3-backend-adds).
 </Warning>
 
 ## Add a reaction
@@ -16,14 +16,14 @@ Call `msg.react(reactionId)` on a `Message` to add the bot's reaction. It return
 ```ts
 client.on('messageCreate', (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.isDM || !msg.serverId) return; // reactions are server-only
+  if (msg.isDM || !msg.serverId) return; // can() needs a server id
   if (msg.content.trim() !== '!celebrate') return;
   if (!client.can('reaction_add', msg.serverId)) return; // advisory pre-gate
   msg.react('🎉').catch((e) => console.error('react failed', e));
 });
 ```
 
-The `if (msg.isDM || !msg.serverId) return;` guard does two jobs. It keeps `react()` away from DM messages, and it narrows `msg.serverId` from `string | null` to `string` so `can()` accepts it. Without it, TypeScript rejects the `can()` call and plain JavaScript silently returns false for a null server.
+The `if (msg.isDM || !msg.serverId) return;` guard narrows `msg.serverId` from `string | null` to `string` so `can()` accepts it, since a permission grant is a server concept. Without it, TypeScript rejects the `can()` call and plain JavaScript silently returns false for a null server. A bot that also reacts inside DMs skips `can()` on that branch and calls `msg.react()` directly.
 
 The `reactionId` is opaque. The SDK does not validate it and passes it straight through to the server. An invalid id is refused by the server, not caught locally.
 
@@ -126,7 +126,7 @@ Three different failures are worth telling apart.
 
 <AccordionGroup>
   <Accordion title="Plain Error, before the wire">
-    `react()` and `unreact()` reject with a plain `Error` in two cases. On a direct message, unconditionally. And when the message has no `createdAt`, which the server needs to locate the row. Live messages from `messageCreate` and messages loaded with `fetchMessages` both carry `createdAt`, so in practice only the DM case comes up.
+    `react()` and `unreact()` reject with a plain `Error` when the message has no `createdAt`, which the server needs to locate the row. Live server messages and messages loaded with `fetchMessages` always carry it. A DM message carries it only on a backend that honors wire version 3, so in practice the case that comes up is a DM on an older backend.
   </Accordion>
   <Accordion title="CloakActionError, from the server">
     Both methods reject with `CloakActionError` when the server refuses. Read `.code` for the reason and `.permission` for the missing permission when the code maps to one.

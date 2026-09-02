@@ -116,7 +116,7 @@ Server-scoped methods take a `serverId` as their first argument. If a handler do
 <ResponseField name="commands" type="CommandRegistry">
   The bot's slash-command registry. `register(decl, handler)` is synchronous.
 
-  Register before `login()`. Whatever is registered at that moment is published as the bot's menu. A command added afterwards still dispatches locally, but it does not appear in the published menu until the next login, and the SDK never re-publishes on its own. See [Slash commands](/api-reference/commands).
+  Register before `login()`. Whatever is registered at that moment is published as the bot's menu, which server `/` pickers and, on a wire version 3 backend, the DM picker read. A command added afterwards still dispatches locally, but it does not appear in the published menu until the next login, and the SDK never re-publishes on its own. See [Slash commands](/api-reference/commands).
 </ResponseField>
 
 <ResponseField name="webhooks" type="WebhookApi">
@@ -194,7 +194,7 @@ await client.send(serverId, channelId, `${userMention(msg.authorId)} on it`, {
 });
 ```
 
-[`SendOptions`](/api-reference/types#sendoptions) is `{ groupId?, mentions?, replyTo?, poll?, threadId? }`. Pass `threadId` to target a thread of the channel, and `poll` to attach a native poll to the message. See [Threads](/guides/threads) and [Polls](/guides/polls).
+[`SendOptions`](/api-reference/types#sendoptions) is `{ groupId?, mentions?, replyTo?, poll?, threadId?, postId? }`. Pass `threadId` to target a thread of the channel, `postId` to target a post of a forum channel, and `poll` to attach a native poll to the message. `threadId` and `postId` are mutually exclusive. See [Threads](/guides/threads), [Forums](/guides/forums), and [Polls](/guides/polls).
 
 <Warning>
   The fourth argument is an options object. It was a positional `groupId` before 0.2.0, and that form is gone. `send(s, c, text, groupId)` becomes `send(s, c, text, { groupId })`.
@@ -220,6 +220,16 @@ Eligibility is the server's decision and it is deny-by-default: a human may hold
 
 Inside a DM, `replyTo` works, and role, `@everyone`, and `@here` mention pairs are dropped server-side. See [Direct messages](/guides/direct-messages).
 
+### sendCardDM
+
+```ts
+sendCardDM(userId: string, card: CardMessage): Promise<void>
+```
+
+Posts a rich card into a direct message: [`sendCard()`](#sendcard) on the DM lane, set up exactly like [`sendDM()`](#senddm). The card takes the same v1 or v2 envelope, and `content` and the card are encrypted under the one peer-keyed DM key. `card.threadId` and `card.postId` are not valid here (a local error), `groupId` is ignored, and a bot cannot DM itself. Clicks arrive on [`interaction`](/api-reference/events#interaction) with `serverId: null` and `channelId` equal to the dm id.
+
+On a backend that honors wire version 3, the bot receives its own echo as a `messageCreate` whose `createdAt` is what `msg.editCard()` needs later. On an older backend only the legacy notify signal arrives, which has no card slot, so a DM message's `card` reads `null` there. See [Direct messages](/guides/direct-messages#cards-in-a-dm).
+
 ### sendCard
 
 ```ts
@@ -228,7 +238,21 @@ sendCard(serverId: string, channelId: string, card: CardMessage): Promise<void>
 
 Posts a rich card. This is the **encrypted** embed lane and the one to reach for by default: the card is encrypted with the same conversation key and epoch as the message body, and it renders under your bot's own identity. It requires `message_send`, and current backends also enforce `embed_link`: the server cannot read the payload, but it can see that the embed slot is present, and a denial arrives as `-12` on [`sendRejected`](/api-reference/events#sendrejected). Declare both in `requiredPermissions`.
 
-`card.content` is required and must be non-blank. Card media must be Cloak-hosted, and anything else throws a `CloakEmbedError` locally before a frame leaves your process. See [Rich cards](/guides/rich-cards) and [Embeds](/api-reference/embeds).
+`card.content` is required and must be non-blank. Card media must be Cloak-hosted, and anything else throws a `CloakEmbedError` locally before a frame leaves your process. `card.components` adds up to five rows of buttons and selects, and their clicks arrive on the [`interaction`](/api-reference/events#interaction) event. `card.threadId` and `card.postId` place the card in a thread or a forum post. See [Rich cards](/guides/rich-cards), [Buttons and selects](/guides/components), and [Embeds](/api-reference/embeds).
+
+### editCard
+
+```ts
+editCard(
+  serverId: string | null,
+  channelId: string,
+  messageId: string,
+  card: CardEdit,
+  opts: { createdAt: Date; pinned?: boolean; groupId?: string; threadId?: string; postId?: string },
+): Promise<void>
+```
+
+Replaces a message's card, embed and component rows together, and re-encrypts its text in one edit. Author-only server-side, like `edit()`. `CardEdit` is the `content`, `embed`, and `components` of a `CardMessage` without the routing keys. `opts.createdAt` is required, because the edit addresses the row by its send time; `msg.editCard(card)` on a received [`Message`](/api-reference/types#message) fills the options for you. A `null` `serverId` with the dm id as `channelId` is the DM edit, under the DM key. Pass `components: []` to retire a card's buttons once a decision is made. The replacement arrives on [`messageUpdate`](/api-reference/events#messageupdate) as `card`. See [Buttons and selects](/guides/components#retire-the-controls) and [editCard](/api-reference/embeds#editcard).
 
 ### sendEmbed
 
@@ -254,7 +278,7 @@ sendCommand(
 ): Promise<void>
 ```
 
-Invokes a slash command, your bot's own or another bot's. `opts.botId` names the target bot and has no default. Targeting a foreign bot also requires `opts.decl`, because the SDK cannot know another bot's option order. See [Slash commands](/api-reference/commands).
+Invokes a slash command, your bot's own or another bot's. `opts.botId` names the target bot and has no default. Targeting a foreign bot also requires `opts.decl`, because the SDK cannot know another bot's option order. Server channels only: there is no DM form. See [Slash commands](/api-reference/commands).
 
 ### sendTyping
 
@@ -296,7 +320,7 @@ Sets or clears the bot's avatar from an already-hosted image url. `miniIconUrl` 
 
 ```ts
 fetchMessages(
-  serverId: string,
+  serverId: string | null,
   channelId: string,
   opts?: {
     before?: Date | Message;
@@ -305,11 +329,14 @@ fetchMessages(
     limit?: number;
     groupId?: string;
     threadId?: string;
+    postId?: string;
   },
 ): Promise<Message[]>
 ```
 
-Reads message history for a channel, returned oldest to newest and auto-paginated. Requires `message_read_history`. Cursors are a `Date` or a `Message`, never a message id, because Cloak message ids are random UUIDs and not time-sortable. `around` returns a single window and is not auto-paged.
+Reads message history for a channel, returned oldest to newest and auto-paginated. Requires `message_read_history` on a server channel. Cursors are a `Date` or a `Message`, never a message id, because Cloak message ids are random UUIDs and not time-sortable. `around` returns a single window and is not auto-paged.
+
+A `null` `serverId` with the dm id as `channelId` reads a **DM's** history, on a backend that honors wire version 3. The DM's peer must be known to this session (a message seen, or a send made, in it), else the call rejects and names [`fetchDmMessages()`](#fetchdmmessages) as the alternative. `threadId` and `postId` are rejected on the DM form. No permission gate applies, and a backend that denies the DM read resolves empty.
 
 Content decrypts per row against the key for that row's own epoch, and is `''` (never raw ciphertext) when the key is missing. Returned messages are fully actionable and carry `pinned`. See [Message history](/guides/message-history).
 
@@ -317,6 +344,10 @@ Content decrypts per row against the key for that row's own epoch, and is `''` (
   Read this **thread's** history instead of the channel's. Address it exactly as [`send()`](#send) does: the thread's **parent** text channel as `channelId`, the thread id here. Every cursor above behaves identically over the thread's own messages, and the same `message_read_history` permission applies.
 
   Returned rows carry `threadId` and `threadParentId`, and their `channelId` is the thread, matching how live thread messages report themselves. So `reply()`, `react()` and `edit()` on a fetched row act inside the thread rather than the parent channel.
+</ParamField>
+
+<ParamField path="postId" type="string">
+  Read a **forum post's** history instead. `channelId` is then the parent **forum** channel. Rows come back with `postId` and `forumChannelId` set and `channelId` equal to the post. Mutually exclusive with `threadId`. See [Forums](/guides/forums).
 </ParamField>
 
 ```ts
@@ -330,6 +361,24 @@ const backlog = await client.fetchMessages(serverId, parentChannelId, {
 <Note>
   Thread history needs a Cloak server that supports it. Against an older backend the call rejects rather than quietly returning the **parent channel's** messages, because that is what the wire falls back to. See [Known limitations](/production/known-limitations).
 </Note>
+
+### fetchDmMessages
+
+```ts
+fetchDmMessages(
+  userId: string,
+  opts?: {
+    before?: Date | Message;
+    after?: Date | Message;
+    around?: Date | Message;
+    limit?: number;
+  },
+): Promise<Message[]>
+```
+
+Reads a 1:1 DM's history by the peer's user id, on a backend that honors wire version 3. Resolves the dm the way [`sendDM()`](#senddm) does (cached, created on first contact) and reads it like `fetchMessages(null, dmId, opts)`: the same cursors and limits, oldest to newest, auto-paginated.
+
+Rows decrypt under the peer-keyed DM key and carry `content`, `repliedTo`, `card`, `poll`, and `createdAt` from the row's own send time, with `isDM: true`, `serverId: null`, and `channelId` equal to the dm id. The bot's own messages are included, so a recovered row can be edited or have its card retired with `editCard()`. `command` is never set on a history row. No permission gate applies in a DM. See [Message history](/guides/message-history#read-a-dms-history).
 
 ### messageLocation
 
@@ -492,9 +541,124 @@ threadParent(threadId: string): string | undefined
 
 The parent text channel of a thread the SDK has seen, from its thread index. Synchronous and best-effort.
 
+## Forums
+
+Forum channels hold posts, and a post is a container like a thread: its replies are ordinary messages whose channel is the post. Send into one with `send(serverId, forumChannelId, text, { postId })`, and read one with `fetchMessages(serverId, forumChannelId, { postId })`. Every method below takes the parent forum channel id. See [Forums](/guides/forums) for the model.
+
+<Note>
+  Forums add no [permission names](/api-reference/permissions). Creating a post and sending inside one need `message_send`, resolved against the forum channel (which may override it per channel), so `can('message_send', serverId)` is the pre-check and `createForumPost()` denies `-2` without it. Moderating other members' posts (`editForumPost()`, `setForumPostState()`) needs `message_manage`. A refusal rejects with [`CloakActionError`](/api-reference/errors#forum-posts).
+</Note>
+
+### createForumPost
+
+```ts
+createForumPost(
+  serverId: string,
+  forumChannelId: string,
+  opts: {
+    title: string;
+    content: string;
+    tagIds?: number[];
+    embed?: BotEmbed;
+    components?: ActionRow[];
+    mentions?: MentionTarget[];
+  },
+): Promise<ForumPost>
+```
+
+Opens a post with its first message in one server-side operation. `title` is end-to-end encrypted and capped at 100 characters after trimming. `content` is the starter message and must be non-blank. `embed` and `components` make the starter a [card](/guides/rich-cards). Title, body, and card encrypt under one context so they never split across an epoch change.
+
+Resolves with the [`ForumPost`](/api-reference/types#forumpost) as the server's own create event describes it, which is where `starterMessageId` comes from. If that event does not arrive within a few seconds, the row is built from what the SDK sent and `starterMessageId` is `null`; the real row lands on `forumPostUpdate` when it arrives.
+
+### fetchForumPosts
+
+```ts
+fetchForumPosts(
+  serverId: string,
+  forumChannelId: string,
+  opts?: {
+    sort?: 'activity' | 'created';
+    tag?: number;
+    includeArchived?: boolean;
+    solved?: boolean;
+    onlyMine?: boolean;
+    onlyFollowing?: boolean;
+    before?: Date | number;
+    limit?: number;
+  },
+): Promise<{ posts: ForumPost[]; hasMore: boolean }>
+```
+
+Pages a forum's posts, active first by default, with pinned posts at the front of the first page. `solved: true` keeps answered posts only, `false` unanswered only, and omitting it returns both. `before` continues from the previous page's oldest sort key (`lastActiveAt` for the activity sort, `createdAt` for the created sort). `limit` is clamped to 50 by the server. Rows carry `starterContent` and the bot's own `following` state.
+
+### fetchForumMeta
+
+```ts
+fetchForumMeta(serverId: string, forumChannelId: string): Promise<ForumMeta>
+```
+
+A forum's settings: its tags (names end-to-end encrypted, decrypted best-effort), guidelines, sort and archive defaults, default reaction, and post count. A forum created before it had a settings row answers defaults, never an error. See [ForumMeta](/api-reference/types#forummeta).
+
+### editForumPost
+
+```ts
+editForumPost(
+  serverId: string,
+  forumChannelId: string,
+  postId: string,
+  changes: { title?: string; tagIds?: number[] },
+): Promise<void>
+```
+
+Retitles or retags a post. Omit a field to keep it; omitting both is a local error. Author, or `message_manage`.
+
+### setForumPostState
+
+```ts
+setForumPostState(
+  serverId: string,
+  forumChannelId: string,
+  postId: string,
+  field: 'archived' | 'locked' | 'pinned' | 'answered' | 'move',
+  value: boolean | string | Pick<Message, 'messageId' | 'authorId' | 'createdAt'> | null,
+): Promise<void>
+```
+
+Flips one state on a post. `'archived'`, `'locked'`, and `'pinned'` take a boolean. `'answered'` takes the accepted answer (a received `Message` fits) or `null` to clear it. `'move'` takes the target forum channel id. Locking, pinning, and moving need `message_manage`; archiving and answering also allow the post's author. The wrong value type for a field is a local error.
+
+### followForumPost
+
+```ts
+followForumPost(serverId: string, forumChannelId: string, postId: string, on: boolean): Promise<void>
+```
+
+Follows or unfollows a post: the bell. A notification preference only. A firehose bot already receives every visible post's replies either way.
+
+### reactToStarter
+
+```ts
+reactToStarter(
+  serverId: string,
+  forumChannelId: string,
+  postId: string,
+  reactionId: string,
+  add?: boolean,
+): Promise<void>
+```
+
+Reacts to a post's starter message from outside the post, like the chips on a post's list card. `add` defaults to `true`. Fire-and-forget on the wire: the result is an ordinary `reactionUpdate`, and a denial produces no frame at all. Inside a post, `msg.react()` on the starter does the same thing.
+
+### postParent
+
+```ts
+postParent(postId: string): string | undefined
+```
+
+The parent forum channel of a post the SDK has seen, or `undefined`. Fed by every post row and every in-post message the bot receives. Synchronous and best-effort.
+
 ## Polls
 
-Poll **creation** rides `send(serverId, channelId, text, { poll })`. The three methods below act on an existing poll and take the message's location, so a `Message`'s own ids are exactly what to pass. There is no vote method: the backend refuses a bot vote by design, so bots create, close, and read polls, and only humans vote. See [Polls](/guides/polls).
+Poll **creation** rides `send(serverId, channelId, text, { poll })`. The three methods below act on an existing poll and take the message's location, so a `Message`'s own ids are exactly what to pass. All three accept `threadId` or `postId` (never both) for a poll living inside a thread or a forum post. There is no vote method: the backend refuses a bot vote by design, so bots create, close, and read polls, and only humans vote. See [Polls](/guides/polls).
 
 ### closePoll
 
@@ -503,7 +667,7 @@ closePoll(
   serverId: string,
   channelId: string,
   messageId: string,
-  opts?: { groupId?: string; threadId?: string },
+  opts?: { groupId?: string; threadId?: string; postId?: string },
 ): Promise<void>
 ```
 
@@ -516,7 +680,7 @@ fetchPollState(
   serverId: string,
   channelId: string,
   messageId: string,
-  opts?: { groupId?: string; threadId?: string },
+  opts?: { groupId?: string; threadId?: string; postId?: string },
 ): Promise<PollStateSnapshot>
 ```
 
@@ -530,7 +694,7 @@ fetchPollVoters(
   channelId: string,
   messageId: string,
   optionIndex: number,
-  opts?: { groupId?: string; threadId?: string },
+  opts?: { groupId?: string; threadId?: string; postId?: string },
 ): Promise<string[]>
 ```
 
@@ -837,7 +1001,7 @@ The handle exposes `id`, plus:
 
 | Group | Bound methods |
 | --- | --- |
-| Messaging | `send(channelId, text, opts?)`, `sendCard(channelId, card)`, `sendEmbed(channelId, post)` |
+| Messaging | `send(channelId, text, opts?)`, `sendCard(channelId, card)`, `sendEmbed(channelId, post)` (`sendDM` and `sendCardDM` take no server and stay on the client) |
 | History | `fetchMessages(channelId, opts?)` |
 | Moderation | `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans` |
 | Reads | `fetchRoles()`, `fetchMembers()` |
@@ -849,6 +1013,8 @@ The handle exposes `id`, plus:
 <Warning>
   `guild().fetchMembers()` binds the same broken call as [`fetchMembers()`](#fetchmembers) and hangs the same way.
 </Warning>
+
+The handle does not bind the forum methods or `editCard()`. Call those on the client with the server id.
 
 See [The guild() handle](/guides/guild-handle).
 
@@ -874,7 +1040,7 @@ See [The guild() handle](/guides/guild-handle).
 
 <CardGroup cols={2}>
   <Card title="Events" icon="bell" href="/api-reference/events">
-    All 32 events a Client emits.
+    All 39 events a Client emits.
   </Card>
 
   <Card title="Types" icon="brackets-curly" href="/api-reference/types">

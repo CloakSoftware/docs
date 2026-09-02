@@ -1,0 +1,160 @@
+---
+title: "Forum helper bot"
+description: "Greet every new forum post with the forum's guidelines, mark answers as accepted with !solved, and list unanswered posts on demand."
+---
+
+This bot does three things in every forum channel it can see. When a post opens, it replies inside the post with the forum's guidelines and follows it. When someone inside a post replies to a message with `!solved`, it marks that message as the accepted answer. And `!unanswered` in any text channel lists the open posts that still have no accepted answer.
+
+It exercises the whole forum surface: the starter arriving on `messageCreate`, sending with `postId`, `fetchForumMeta()`, `fetchForumPosts()`, `setForumPostState()`, and `followForumPost()`.
+
+## The full bot
+
+```ts forum-helper-bot.ts
+import { Client, ChannelType, CloakActionError } from '@cloak-software/bot-sdk';
+
+const client = new Client({
+  token: process.env.CLOAK_TOKEN!,
+  // Keep this file. The bot's identity is published to the server once, so a
+  // bot with no keystore works on its first run and fails on every one after.
+  keystorePath: './forum-helper-bot.cloak-keystore.json',
+  // Forums add no permission names. Sending inside a post is message_send
+  // resolved against the forum; marking someone else's post as answered is
+  // post moderation, which is message_manage.
+  requiredPermissions: ['view_text', 'message_send', 'message_manage', 'message_read_history'],
+  debug: process.env.DEBUG === '1',
+});
+
+client.on('ready', () => console.log(`Logged in as bot ${client.user?.id}`));
+
+client.on('messageCreate', async (msg) => {
+  if (msg.authorId === client.user?.id) return; // ignore our own messages
+  if (msg.isDM || !msg.serverId) return; // forums are server-only
+  const serverId = msg.serverId;
+
+  // 1. A new post. The starter never rides the ordinary stream: the SDK emits
+  //    it from the post's create event with starter: true, and the frame
+  //    carries the parent forum, so forumChannelId is always set here.
+  if (msg.starter && msg.postId && msg.forumChannelId) {
+    const meta = await client.fetchForumMeta(serverId, msg.forumChannelId);
+    const intro = meta.guidelines
+      ? `Thanks for posting. This forum's guidelines:\n${meta.guidelines}`
+      : 'Thanks for posting. Reply to the message that solves this with !solved to mark it.';
+    // Sending into a post: the PARENT forum channel plus { postId }.
+    await client.send(serverId, msg.forumChannelId, intro, { postId: msg.postId });
+    await client.followForumPost(serverId, msg.forumChannelId, msg.postId, true);
+    return;
+  }
+
+  // 2. "!solved" as a reply inside a post marks the quoted message as the answer.
+  if (msg.postId && msg.forumChannelId && msg.content.trim() === '!solved') {
+    if (!msg.repliedTo) {
+      await msg.channel.send('Reply to the message that solved it with !solved.');
+      return;
+    }
+    try {
+      // A reply pointer carries messageId, authorId and createdAt, which is
+      // exactly what 'answered' wants.
+      await client.setForumPostState(serverId, msg.forumChannelId, msg.postId, 'answered', msg.repliedTo);
+      await msg.channel.send('Marked as the accepted answer.');
+    } catch (e) {
+      if (e instanceof CloakActionError) {
+        // -2: not the post's author, and no message_manage.
+        await msg.channel.send(`Could not mark it: ${e.message}`);
+        return;
+      }
+      throw e;
+    }
+    return;
+  }
+
+  // 3. "!unanswered" in a text channel lists open posts with no accepted answer.
+  if (!msg.postId && !msg.threadId && msg.content.trim() === '!unanswered') {
+    const channels = await client.fetchChannels(serverId);
+    const forums = channels.filter((c) => c.type === ChannelType.FORUM);
+    if (forums.length === 0) {
+      await msg.channel.send('No forum channels here that I can see.');
+      return;
+    }
+    const lines: string[] = [];
+    for (const forum of forums) {
+      const { posts, hasMore } = await client.fetchForumPosts(serverId, forum.id, {
+        solved: false,
+        includeArchived: false,
+        limit: 10,
+      });
+      for (const post of posts) {
+        lines.push(`${forum.name}: ${post.title || '(untitled)'} (${post.replyCount} replies)`);
+      }
+      if (hasMore) lines.push(`${forum.name}: and more`);
+    }
+    await msg.channel.send(lines.length ? lines.join('\n') : 'Everything is answered.');
+  }
+});
+
+client.on('forumPostUpdate', (post) => {
+  if (post.answered) console.log(`post ${post.postId} solved by ${post.answered.authorId}`);
+});
+client.on('forumPostDelete', ({ postId }) => console.log(`post ${postId} deleted`));
+
+client.on('sendRejected', (r) => console.warn(`send rejected (${r.code}): ${r.message}`));
+client.on('error', (e) => console.error('sdk error', e.source, e.context, e.message));
+client.on('disconnect', (e) => console.warn('disconnected', e));
+
+client.login().catch((e) => {
+  console.error('login failed', e);
+  process.exit(1);
+});
+```
+
+## Run it
+
+```bash
+CLOAK_TOKEN="botid.tokenid.secret" npx tsx forum-helper-bot.ts
+```
+
+Then open a post in a forum channel the bot can see. It answers inside the post. Reply to any message in the post with `!solved`, and type `!unanswered` in a text channel.
+
+## How it works, piece by piece
+
+<AccordionGroup>
+  <Accordion title="The starter arrives on messageCreate" icon="inbox">
+    A post's first message never rides the ordinary message stream. The SDK emits it from the post's create event as a `messageCreate` with `starter: true`, once, right before the matching `forumPostUpdate`. Its `messageId` is `ForumPost.starterMessageId`. Because a post frame carries its parent on the wire, `msg.forumChannelId` is always set, which is what the send back into the post needs.
+  </Accordion>
+
+  <Accordion title="Sending into a post is a cursor move" icon="arrow-right-to-bracket">
+    `send(serverId, forumChannelId, text, { postId })` names the parent forum and the post. The SDK selects the server and enters the post, which repoints the session's cursor at it, then sends the ordinary frame. A run of sends into one post enters once. Sending into the forum channel itself, with no `postId`, is refused with `-17` on `sendRejected`.
+  </Accordion>
+
+  <Accordion title="A reply pointer is an answer" icon="reply">
+    `setForumPostState(..., 'answered', value)` takes anything with `messageId`, `authorId`, and `createdAt`. `msg.repliedTo` has exactly those, so replying to the solving message with `!solved` is enough. Archiving and answering allow the post's author; on anyone else's post they need `message_manage`, like locking, pinning, and moving, which is why the deny is reported back into the post rather than swallowed.
+  </Accordion>
+
+  <Accordion title="Forum channels come from fetchChannels()" icon="list">
+    `ChannelType.FORUM` is `4`. `fetchChannels()` is filtered server-side to what the bot may view, so the loop only touches forums it can read. `fetchForumPosts()` with `solved: false` returns unanswered posts only; the server caps a page at 50 and `hasMore` says whether to page with `before`.
+  </Accordion>
+
+  <Accordion title="Following is a preference, not access" icon="bell">
+    `followForumPost()` rings the bell for this bot. It changes nothing about delivery: a firehose bot already receives every visible post's replies. There are no private posts, so nothing gates a post beyond the parent forum's visibility.
+  </Accordion>
+
+  <Accordion title="No named forum permissions" icon="key">
+    There is no `create_posts` or `manage_posts` name, and there never will be. The server's create-posts capability bottoms out at `message_send`, resolved against the forum channel (which may override it per channel), so `can('message_send', serverId)` is the pre-check for opening a post or replying inside one. Moderating other members' posts is `message_manage`. The bot declares both and still catches the `CloakActionError`, because a per-channel override can deny what the server-wide grant allows.
+  </Accordion>
+</AccordionGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Forums" icon="comments" href="/guides/forums">
+    The full forum surface and its deny codes.
+  </Card>
+  <Card title="Message history" icon="clock-rotate-left" href="/guides/message-history">
+    Read a post's backlog with `fetchMessages(..., { postId })`.
+  </Card>
+  <Card title="Threads" icon="code-branch" href="/guides/threads">
+    The other container, and how entering it differs.
+  </Card>
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    `forumPostUpdate` and `forumPostDelete`.
+  </Card>
+</CardGroup>

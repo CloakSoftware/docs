@@ -1,6 +1,6 @@
 ---
 title: "Direct messages"
-description: "Hold a 1:1 encrypted DM with a human: sendDM, inbound isDM messages, and what does not work in a DM."
+description: "Hold a 1:1 encrypted DM with a human: sendDM and sendCardDM, inbound isDM messages, DM history, DM slash commands, what a wire version 3 backend adds, and what still does not work in a DM."
 ---
 
 A bot can hold a 1:1 direct message with a human, end to end encrypted exactly like a channel. Group DMs are not supported.
@@ -45,6 +45,23 @@ There is no separate "open a DM" step. First contact with a peer costs a create 
   `sendDM()` is fire-and-forget on the send itself, like `send()`. The create and key-exchange steps are awaited and can reject, but a server-side **denial of the message** does not reject the promise. It arrives on the `sendRejected` event, where `serverId` is `null` and `channelId` is the dm id. Bot sends are rate limited server-side, which surfaces there as code `-9`.
 </Warning>
 
+## Cards in a DM
+
+`client.sendCardDM(userId, card)` is [`sendCard()`](/guides/rich-cards) on the DM lane: the same `CardMessage`, the same v1 or v2 envelope, encrypted under the peer-keyed DM key. It is set up exactly like `sendDM()`, so first contact costs the same create and key exchange.
+
+```ts
+await client.sendCardDM(userId, {
+  content: 'Approve the deploy of build 4821?',
+  embed: { title: 'Build 4821', description: '42 tests, 0 failures' },
+  components: [{ type: 'row', components: [
+    { type: 'button', style: 'success', label: 'Approve', customId: 'approve:4821' },
+    { type: 'button', style: 'danger', label: 'Reject', customId: 'reject:4821' },
+  ] }],
+});
+```
+
+A click comes back on the [`interaction`](/api-reference/events#interaction) event with `serverId: null` and `channelId` equal to the dm id, and `ephemeral()` and `showModal()` answer under the same DM key. `threadId` and `postId` are not valid on a DM card, `groupId` is ignored, and a bot cannot DM itself. See [Buttons and selects](/guides/components) and the [Approval bot](/examples/approval-bot) for the full flow, including how the card is retired once the click arrives.
+
 ## Receiving a DM
 
 DMs come in on `messageCreate`, with `isDM` set.
@@ -78,11 +95,45 @@ client.on('messageCreate', async (msg) => {
   For a DM this holds the dm id. One convention throughout the SDK: `channelId` is always "the thing this message lives in", so `msg.reply()` and `msg.channel.send()` work without branching.
 </ResponseField>
 
-<ResponseField name="repliedTo" type="null">
-  Always `null` on a DM. The notify frame a bot receives carries no reply array, so there is nothing to decode. This is a wire fact, not a gap.
+<ResponseField name="createdAt" type="Date | null">
+  The row's send time on a backend that honors wire version 3. `null` when the message came through the legacy notify signal alone, which carries no timestamp. See [below](#what-a-wire-version-3-backend-adds).
 </ResponseField>
 
-The bot never receives its own DM, on either lane.
+<ResponseField name="repliedTo" type="object | null">
+  The quoted message, on a wire version 3 backend. `null` on an older backend, whose notify frame carries no reply array.
+</ResponseField>
+
+<ResponseField name="card" type="MessageCard | null">
+  A card someone sent you, or the echo of your own `sendCardDM()`, on a wire version 3 backend. `null` on an older backend, whose notify frame has no card slot.
+</ResponseField>
+
+### What a wire version 3 backend adds
+
+The SDK declares wire version 3 at login. A backend that honors it puts the bot on the DM lane's own message broadcast, the same frame humans get, while the legacy notify signal keeps arriving. What that buys:
+
+- **A DM message arrives with everything the notify signal lacks**: `createdAt` from the row's own send time, `repliedTo`, a poll, and `card`. The two frames are deduped by message id. Whichever lands first fires `messageCreate`; if the broadcast lands second and carries a card, a `messageUpdate` with `card` follows so it is not lost.
+- **Your own DM sends echo back** as `messageCreate` with `authorId === client.user.id`, exactly like the server lane. Keep that echo: its `createdAt` is what `msg.editCard()` and `msg.edit()` need later, because rows are addressed by send time. Filter echoes by `authorId` in your handler as you do for channels. An echo that arrives before anything has named the DM's peer to this session (a fresh session that has neither sent nor received in that DM) cannot select a key and is dropped with an `error`.
+- **`react()`, `unreact()`, `edit()`, `editCard()`, and `delete()` work** on a DM message that carries `createdAt`. The DM-lane hooks then arrive on `messageUpdate`, `messageDelete`, and `reactionUpdate` with `serverId: null` and `channelId` equal to the dm id.
+- **DM history and the DM `/` picker.** `fetchDmMessages()` and `fetchMessages(null, dmId)` page the DM, and a `/command` picked from the DM's `/` picker dispatches through your registry. A typed `/command` in a DM works on any backend. Both are covered below.
+
+On an older backend nothing changes: the notify signal alone, `card` null, `createdAt` null, and the actions above reject with a message saying the frame carried no timestamp. `reply()` and `channel.send()` work everywhere.
+
+```ts
+// Retire a DM card once a click arrives, using the bot's own echo.
+const ownDmCards = new Map<string, Message>();
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id && msg.isDM && msg.card) ownDmCards.set(msg.messageId, msg);
+});
+
+client.on('interaction', async (i) => {
+  await i.ack();
+  const echo = ownDmCards.get(i.messageId);
+  if (echo) await echo.editCard({ content: 'Decided.', embed: { title: 'Decided' }, components: [] });
+});
+```
+
+`client.editCard(null, dmId, messageId, card, { createdAt })` is the explicit form: a `null` server id plus the dm id is the DM edit.
 
 ### Guard before anything server-scoped
 
@@ -98,15 +149,54 @@ The bot never receives its own DM, on either lane.
 
 ## What does not work on a DM message
 
-`react()`, `unreact()`, `edit()`, `delete()`, `pin()`, and `unpin()` all **reject** on a DM message. The rejection is a plain `Error` naming the method, not a `CloakActionError`.
+`pin()` and `unpin()` **reject** on a DM message, with a plain `Error` naming the method. The pin operation has no DM lane a bot can observe, so the SDK refuses rather than writing blind.
 
-The backend does implement those operations for DMs, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. It refuses rather than writing blind.
+`react()`, `unreact()`, `edit()`, `editCard()`, and `delete()` reject with a plain `Error` only when the message carries no `createdAt`, which is the case for a DM that came through the legacy notify signal alone on a backend below wire version 3. The message says so: wait for the DM-lane echo, or fetch the message again.
 
-`reply()` and `channel.send()` work normally.
+`reply()` and `channel.send()` work everywhere.
 
-Slash commands are **not dispatched from DMs**. The structured command lane does not exist on the DM notify frame, and the menu a client's `/` picker renders is published per server. `messageCreate` still fires, so parse `msg.content` yourself if you want DM commands.
+Slash commands work in a DM on both lanes: a typed `/play ...` on any backend, and the DM's `/` picker on a wire version 3 backend. See [Slash commands in a DM](#slash-commands-in-a-dm).
 
-There is also no DM history read. `fetchMessages` is server-channel only, so a bot cannot page backward through a DM. It sees what arrives while it is connected.
+Group DMs are not supported. A bot holds 1:1 conversations only.
+
+## DM history
+
+Two reads page a DM's history, on a backend that honors wire version 3. Both use the same cursors and limits as a channel read, and neither needs `message_read_history`: no permission gate applies in a DM.
+
+```ts
+// By peer: resolves the dm the way sendDM() does, creating it on first contact.
+const recent = await client.fetchDmMessages(userId, { limit: 20 });
+
+// By dm id: for a DM this session has already sent or received in.
+const older = await client.fetchMessages(null, msg.dmId!, { before: recent[0], limit: 50 });
+```
+
+`fetchDmMessages(userId, { before?, after?, around?, limit? })` takes the peer's user id. `fetchMessages(null, dmId, opts)` is the same read by dm id, and it rejects, naming `fetchDmMessages()` as the alternative, when the DM's peer is not yet known to this session. `threadId` and `postId` are rejected on the DM form, because a DM has no containers.
+
+Rows decrypt under the DM key and come back as ordinary `Message`s: `content`, `repliedTo`, `card`, `poll`, `createdAt` from the row's own send time, `isDM: true`, `serverId: null`, and `channelId` equal to the dm id. The bot's own messages are included, and because each row carries `createdAt`, a recovered row can be edited or have its card retired with `editCard()`. That is how a bot finds a card it sent before a restart; see the [Approval bot](/examples/approval-bot). `command` is never set on a history row, so a past invocation is never replayed.
+
+On a backend that denies the DM history read, the call resolves empty, exactly like an empty channel.
+
+## Slash commands in a DM
+
+A `/command` in a DM dispatches through the same registry as a channel command, on either lane. Typed by hand (`/status`, using your `commandPrefix`), it rides the message text and works on any backend. Picked from the DM's `/` picker, it rides the DM lane's message broadcast as a structured invocation, which needs a backend that honors wire version 3; the client fetches your bot's menu when it opens the DM, so anything registered before `login()` is offered there.
+
+```ts
+client.commands.register(
+  { name: 'status', description: 'how the bot is doing', dm: true },
+  async (ctx) => {
+    // ctx.serverId is null, ctx.dmId is set, ctx.channelId is the dm id,
+    // and ctx.userId is the invoker.
+    await ctx.reply(`all good, ${ctx.userId}`); // a reply into the DM
+  },
+);
+```
+
+There is no permission gate in a DM: a grant is a server concept. Check `ctx.userId` yourself when a command should be limited to certain people.
+
+Declare `dm: false` on a command that must not run in a DM. The DM picker hides it, and an invocation that arrives anyway is dropped with a `debug` warning and never answered. `dm` defaults to `true`. See [Commands in direct messages](/guides/slash-commands#commands-in-direct-messages).
+
+A message dispatches at most once: on a wire version 3 backend the DM arrives on two frames, and whichever lands first carries the invocation. On an older backend only the typed form reaches the bot, because the notify frame carries the text and no command sidecar.
 
 ## The keystore is not optional here
 
@@ -180,7 +270,7 @@ await client.login();
   <Card title="Mentions and replies" icon="at" href="/guides/mentions-and-replies">
     The pill, the ping, and what rides in plaintext.
   </Card>
-  <Card title="DM echo bot" icon="envelope" href="/examples/dm-bot">
-    The full runnable example.
+  <Card title="Approval bot" icon="square-check" href="/examples/approval-bot">
+    A DM card with buttons, retired through the bot's own echo.
   </Card>
 </CardGroup>

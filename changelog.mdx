@@ -1,9 +1,32 @@
 ---
 title: "Changelog and migration"
-description: "What changed in 0.2.0, what it breaks in a 0.1.x bot, and the checklist for moving across."
+description: "What changed in each release, what 0.2.0 breaks in a 0.1.x bot, and the checklist for moving across."
 ---
 
-The current version is `0.3.0`. Check what you have with `npm ls @cloak-software/bot-sdk`.
+The current version is `0.4.0`. Check what you have with `npm ls @cloak-software/bot-sdk`.
+
+## 0.4.0
+
+No breaking changes. Everything in this release is additive, and a 0.3.0 bot runs unmodified.
+
+### Added
+
+- **Forums.** `createForumPost()`, sending with `{ postId }`, `fetchMessages()` with `{ postId }`, `fetchForumPosts()`, `fetchForumMeta()`, `editForumPost()`, `setForumPostState()`, `followForumPost()`, `reactToStarter()`, and `postParent()`. `Message.postId`, `Message.forumChannelId`, and `Message.starter`, plus the `forumPostUpdate` and `forumPostDelete` events and the `ForumPost`, `ForumTag`, and `ForumMeta` types. A post's starter message arrives as a `messageCreate` with `starter: true` from the post's own create event. Every location-taking call accepts `postId` next to `threadId`, and the two are mutually exclusive. The firehose now includes every post in every forum the bot can view. See [Forums](/guides/forums).
+- **Buttons and selects.** `CardMessage.components`: up to five rows of buttons and string selects under a card, with `embed` optional when rows are present. Clicks arrive on the new `interaction` event as an `Interaction`, answered with exactly one of `ack()`, `showModal()`, or `ephemeral()`. A card with rows rides a v2 envelope that clients from before this release drop entirely, showing only the message text; a card without rows keeps the v1 shape and renders everywhere. See [Buttons and selects](/guides/components).
+- **Modals.** `Interaction.showModal()` with a `ModalDefinition` of up to five text inputs; the submit arrives as a second `interaction` with `kind: 'modal'`, `fields`, and `parentId`. See [Modals](/guides/modals).
+- **Card edits and reads.** `client.editCard()` and `Message.editCard()` replace a message's embed and rows in one edit. `Message.card` exposes an inbound card as a `MessageCard`, validated on read with the same caps and media rule as on write, and `messageUpdate` carries `card` when an edit replaced one. See [editCard](/api-reference/embeds#editcard).
+- **DM cards.** `client.sendCardDM(userId, card)` sends the same card, v1 or v2 envelope, into a 1:1 DM under the DM key. Clicks arrive on `interaction` with `serverId: null` and `channelId` equal to the dm id. See [Cards in a DM](/guides/direct-messages#cards-in-a-dm).
+- **DM history.** `fetchDmMessages(userId, { before?, after?, around?, limit? })` reads a 1:1 DM by the peer's user id, resolving the dm like `sendDM()`. `fetchMessages(serverId: string | null, ...)` accepts `null` plus the dm id for the same read on a DM this session already knows. Rows decrypt under the DM key, carry `content`, `repliedTo`, `card`, `poll`, `createdAt`, `isDM: true`, and `serverId: null`, include the bot's own messages, and never replay `command`. No permission gate in a DM. Needs a wire version 3 backend. See [Read a DM's history](/guides/message-history#read-a-dms-history).
+- **DM slash commands.** `CommandDeclaration.dm?: boolean` (default `true`) marks a command as available in DMs; `false` publishes a fourth `flags` element (bit 0, `COMMAND_FLAG_NO_DM`) that the DM picker filters on, and a DM invocation of it is dropped with a `debug` warning. New exports `COMMAND_FLAG_NO_DM`, `MAX_COMMAND_FLAGS`, `declarationFlags()`, and `CommandRegistry.allowsDm(name)`. A structured invocation from the DM's `/` picker dispatches through the same registry with `CommandContext.serverId: null`, `dmId`, `channelId` equal to the dm id, and `userId`, with no permission gate; `ctx.reply()` sends into the DM. `CommandContext` gains `serverId`, `dmId`, `channelId`, and `userId` on every invocation. The text lane (`/play ...` typed by hand) runs in DMs too, under the same rules, and works on any backend; a message dispatches at most once across the two DM frames. Only the `/` picker's structured lane needs a wire version 3 backend. See [Commands in direct messages](/guides/slash-commands#commands-in-direct-messages).
+- **Wire version 3.** The SDK declares `CLIENT_WIRE_VERSION` 3 at login. A backend that honors it delivers the DM lane's message broadcast to the bot, its own DM sends echoed back included, so a DM message carries `createdAt`, `repliedTo`, a poll, and `card`. `react()`, `unreact()`, `edit()`, `editCard()`, and `delete()` work on such a DM message; `pin()` and `unpin()` still do not. `editCard()` takes `serverId: string | null`, where `null` plus the dm id is the DM edit. The `messageUpdate`, `messageDelete`, and `reactionUpdate` payloads carry `serverId: string | null`. On an older backend nothing changes, and a DM action rejects with a message saying the frame carried no timestamp. See [What a wire version 3 backend adds](/guides/direct-messages#what-a-wire-version-3-backend-adds).
+- **Voice receive.** In room scope, `VoiceMediaSession` gains the `audio` event (one per subscribed remote audio track, with a pull-driven `frames` iterable), the merged `audio()` iterable, `setSubscribed()`, and the `receiveSampleRate` and `receiveChannels` attach options, plus the `pcmFrameBytes()` helper and the `PcmFrame`, `ParticipantAudio`, and `ParticipantFrame` types. Every receive entry point throws in participant scope. There is no recorder, no file sink, and no transcription helper. See [Receiving audio](/voice/audio#receiving-audio).
+- **Errors.** `CloakComponentError` is new, `CloakErrorSource` gains `'interaction'`, and the errors reference carries the deny tables for the forum and interaction opcodes. The op-1 `-17` deny now reads "cannot send into a forum channel directly (send into a post with the postId option)".
+- **Events.** `draining` is documented: the lane a connection is on is being drained for a deploy, and the client reconnects on its own.
+
+### Changed
+
+- The `threadDelete` payload is documented as `{ serverId, parentChannelId, threadId }`, which is what the SDK has always emitted.
+- Forums add no permission names. There is no `create_posts` or `manage_posts`, and there never will be: creating a post and sending inside one need `message_send` (resolved against the forum channel), and moderating other members' posts needs `message_manage`.
 
 ## 0.3.0
 
@@ -97,7 +120,7 @@ Guard before you pass `msg.serverId` to anything server-scoped:
   });
 ```
 
-Under `strictNullChecks`, TypeScript flags these too. `msg.reply()` and `msg.channel.send()` need no guard: they route themselves at the DM when the message is one. Six actions do reject on a DM message: `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin`. See [Direct messages](/guides/direct-messages).
+Under `strictNullChecks`, TypeScript flags these too. `msg.reply()` and `msg.channel.send()` need no guard: they route themselves at the DM when the message is one. In 0.2.0 six actions rejected on a DM message: `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin`. Since 0.4.0 only `pin` and `unpin` do, on a backend that honors wire version 3. See [Direct messages](/guides/direct-messages).
 
 ### Migration checklist
 

@@ -120,7 +120,7 @@ The bot is sealed the room key and derives every participant's frame key, exactl
   **A listening bot must join non-deafened.** The subscribe grant is baked into the voice credential when the bot joins, so a deafened `voice_listen` bot hears silence no matter how many keys it holds. `attach()` warns loudly about exactly that combination, and it is the diagnosis operators need most often.
 </Warning>
 
-The SDK ships no recorder, no file sink, and no transcription helper. Subscribing is in scope. What your bot does with decrypted member audio is your responsibility and your users' consent problem.
+The SDK ships no recorder, no file sink, and no transcription helper. Subscribing is in scope: the session hands decrypted member audio out as PCM frames through the `audio` event and `audio()`. See [Receiving audio](/voice/audio#receiving-audio). What your bot does with decrypted member audio is your responsibility and your users' consent problem.
 
 ## deriveParticipantVoiceKey
 

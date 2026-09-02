@@ -3,7 +3,7 @@ title: "Message delivery"
 description: "Your bot hears from every channel it can view, plus its direct messages, with no per-channel subscription. This is the firehose."
 ---
 
-Most chat SDKs make you subscribe to channels one at a time. Cloak does not. When your bot logs in, it starts receiving the live messages of every channel it is permitted to view, across every server it belongs to. It also receives its own 1:1 direct messages. This is called the **firehose**.
+Most chat SDKs make you subscribe to channels one at a time. Cloak does not. When your bot logs in, it starts receiving the live messages of every channel it is permitted to view, across every server it belongs to. That includes the threads under those channels and the posts inside every forum channel it can view. It also receives its own 1:1 direct messages. This is called the **firehose**.
 
 ## You do not subscribe to channels
 
@@ -54,7 +54,7 @@ client.on('messageCreate', async (msg) => {
 });
 ```
 
-Outbound DMs are `client.sendDM(userId, text, opts?)`, which opens the DM and exchanges its key on first contact. Eligibility is the server's decision and is deny-by-default. See [Direct messages](/guides/direct-messages).
+Outbound DMs are `client.sendDM(userId, text, opts?)` and `client.sendCardDM(userId, card)`, which open the DM and exchange its key on first contact. Eligibility is the server's decision and is deny-by-default. On a backend that honors wire version 3, the bot's own DM sends echo back on `messageCreate` like its server sends do. See [Direct messages](/guides/direct-messages).
 
 ## Every message knows where it belongs
 
@@ -66,6 +66,13 @@ A `messageCreate` `Message` carries its source location on the payload:
 | `channelId` | `string` | The channel. For a DM this is the dm id. |
 | `isDM` | `boolean` | True when this arrived as a direct message. |
 | `dmId` | `string \| null` | The dm id for a DM, `null` otherwise. Always equal to `channelId` when set. |
+| `threadId` | `string \| null` | The thread the message lives in, or `null`. When set, `channelId` equals it. |
+| `threadParentId` | `string \| null` | The thread's parent text channel, when the SDK knows it. |
+| `postId` | `string \| null` | The forum post the message lives in, or `null`. When set, `channelId` equals it. |
+| `forumChannelId` | `string \| null` | The parent forum channel of `postId`. Always set when `postId` is. |
+| `starter` | `boolean` | True for a forum post's first message, which arrives from the post's create event rather than the ordinary message stream. |
+
+A container message uses the same convention a DM does: `channelId` is always "the thing this message lives in". So a thread reply has `channelId === threadId`, and a forum post reply has `channelId === postId`. The difference between the two is that a post frame carries its parent on the wire, so `forumChannelId` is always known, while `threadParentId` is resolved from the SDK's thread index. See [Threads](/guides/threads) and [Forums](/guides/forums).
 
 The SDK tracks the channel's group internally, so `msg.reply()` and `msg.channel.send()` already know where to go. You only reach for [`client.send()`](/api-reference/client#send) when you want to send somewhere other than where a message arrived.
 
@@ -89,6 +96,8 @@ client.on('systemMessage', (evt) => {
 ## Delivery is view-gated
 
 The server decides which channels your bot may view, based on the permissions it was granted. `messageCreate` fires only for channels the bot is allowed to see. The SDK does not filter the firehose on your side. The server gates it before it reaches you.
+
+Threads and forum posts are gated on their parent. A thread reply reaches your bot when it can view the thread's parent text channel, and a post reply reaches it when it can view the parent forum channel. There are no private forum posts: following a post is a notification preference, not an access list, so a firehose bot hears every post in every forum it can view whether it follows the post or not. Private threads are the one exception, and those are gated on membership. See [Threads](/guides/threads).
 
 This has one practical consequence worth remembering:
 
@@ -141,7 +150,9 @@ The full signature is `watch(serverId, channelId, groupId?)`. The group is auto-
 
 ## More than messages
 
-The firehose delivers more than new messages. Message edits and deletions, reactions, pins, and channel, group, or server lifecycle changes all arrive as [events](/api-reference/events). Those carry `serverId` and `channelId` the same way a message does.
+The firehose delivers more than new messages. Message edits and deletions, reactions, pins, thread and forum post lifecycle (`threadUpdate`, `forumPostUpdate`, and their delete twins), and channel, group, or server lifecycle changes all arrive as [events](/api-reference/events). Those carry `serverId` and `channelId` the same way a message does.
+
+One event is deliberately not a firehose. A click on a card your bot posted arrives as an [`interaction`](/api-reference/events#interaction), and it is addressed to your bot alone: the clicker encrypts it for the conversation, the server pushes it to the addressed bot's sessions only, and a click on another bot's card in the same channel never reaches you. See [Components](/guides/components).
 
 Three exceptions are worth knowing before you build on them.
 
@@ -192,7 +203,7 @@ See [Slash commands](/guides/slash-commands).
   <Card title="Direct messages" icon="envelope" href="/guides/direct-messages">
     The DM lane, and what behaves differently there.
   </Card>
-  <Card title="Connection lifecycle" icon="arrows-rotate" href="/concepts/connection-lifecycle">
-    Reconnects, and what carries across them.
+  <Card title="Forums" icon="comments" href="/guides/forums">
+    How post messages look, and how the starter arrives.
   </Card>
 </CardGroup>

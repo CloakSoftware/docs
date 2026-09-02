@@ -1,12 +1,12 @@
 ---
 title: "Message history"
-description: "Read past messages in a server channel with fetchMessages, using date or message cursors."
+description: "Read past messages in a server channel, a thread, a forum post, or a DM with fetchMessages and fetchDmMessages, using date or message cursors."
 ---
 
 Sometimes your bot needs messages it did not see live: the last few in a channel, everything before a date, or the context around a single message. `client.fetchMessages()` reads them back from the server, always ordered oldest to newest. This guide covers the cursors, the paging behavior, and what you get back.
 
 <Note>
-  `fetchMessages` reads **server-channel history only**. There is no DM history read in this SDK. A bot sees direct messages as they arrive on `messageCreate` and cannot page back through them. See [Direct messages](/guides/direct-messages).
+  A direct message's history is read with `fetchDmMessages(userId, opts)`, or with `fetchMessages(null, dmId, opts)` for a DM this session has already seen traffic in. Both need a backend that honors wire version 3. See [Read a DM's history](#read-a-dms-history).
 </Note>
 
 ## Read the newest messages
@@ -118,6 +118,10 @@ const context = await client.fetchMessages(serverId, channelId, {
   Read a thread's history rather than the channel's. `channelId` is then the thread's **parent** text channel. See [Read a thread's history](#read-a-threads-history).
 </ParamField>
 
+<ParamField path="postId" type="string">
+  Read a forum post's history rather than the channel's. `channelId` is then the **parent forum** channel. Rows come back with `postId` and `forumChannelId` set and `channelId` equal to the post, so acting on one stays inside the post. Mutually exclusive with `threadId`. See [Forums](/guides/forums).
+</ParamField>
+
 <Info>
   The whole paged read runs as one serialized action, so the channel selection cannot move mid-read. You get a consistent slice even when several pages are fetched under the hood.
 </Info>
@@ -149,6 +153,24 @@ for (const msg of backlog) {
 
 See [Threads](/guides/threads) for the rest of the thread surface.
 
+## Read a DM's history
+
+A 1:1 DM is paged the same way, on a backend that honors wire version 3. There are two forms.
+
+```ts
+// By peer. Resolves the dm the way sendDM() does, creating it on first contact.
+const recent = await client.fetchDmMessages(userId, { limit: 20 });
+
+// By dm id. Only for a DM this session has already sent or received in.
+const older = await client.fetchMessages(null, dmId, { before: recent[0], limit: 50 });
+```
+
+`fetchDmMessages(userId, opts)` takes the peer's user id and the same `before`, `after`, `around`, and `limit` options as a channel read. `fetchMessages(null, dmId, opts)` is the same read addressed by dm id; a `null` server id is what selects the DM form. It rejects, naming `fetchDmMessages()` as the alternative, when the DM's peer is not yet known to this session, and it rejects `threadId` and `postId`, because a DM has no containers.
+
+Rows decrypt under the DM key and come back with `content`, `repliedTo`, `card`, `poll`, and `createdAt` from the row's own send time, plus `isDM: true`, `serverId: null`, and `channelId` equal to the dm id. Your bot's own messages are included, and because each row carries `createdAt`, `edit()` and `editCard()` work on them. That is how a bot recovers a card it sent before a restart; see the [Approval bot](/examples/approval-bot).
+
+No `message_read_history` gate applies in a DM. On a backend that denies the DM read, the call resolves empty, exactly like an empty channel. `Message.command` is never set on a DM history row either.
+
 ## Returned messages are live
 
 Every message from `fetchMessages` is fully actionable, exactly like one you received on the firehose. Each carries `reply`, `channel.send`, `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin`, plus a `pinned` boolean.
@@ -166,7 +188,7 @@ for (const msg of recent) {
 }
 ```
 
-History rows always carry a **non-null `serverId`**, because this read is server-channel only. That is why the loop above can call `msg.pin()` without a guard. A live `messageCreate` message is different: `serverId` is `null` for a DM, and the mutation methods reject there. Guard with `if (msg.isDM || !msg.serverId) return;` before you carry this pattern into a `messageCreate` handler.
+Rows from a server-channel read carry a **non-null `serverId`**, which is why the loop above can call `msg.pin()` without a guard. Rows from a DM read, and live DM messages, have `serverId: null`, and `pin()` rejects there. Guard with `if (msg.isDM || !msg.serverId) return;` before you carry this pattern into a `messageCreate` handler.
 
 <Warning>
   `Message.command` is **never set on fetched history**. Replaying history must not re-execute old slash commands, so the SDK deliberately leaves the field undefined on this path. If you want to audit past invocations, parse the text yourself.
@@ -187,7 +209,7 @@ A bot only holds keys from the epochs it was present for, so history from before
 
 ## Requires the message\_read\_history permission
 
-`fetchMessages` requires the `message_read_history` permission. If the server has not granted it, the promise rejects with a `CloakActionError` whose `.permission` is `'message_read_history'`.
+A server-channel `fetchMessages` requires the `message_read_history` permission. If the server has not granted it, the promise rejects with a `CloakActionError` whose `.permission` is `'message_read_history'`. A DM read has no permission gate.
 
 ```ts
 import { CloakActionError } from '@cloak-software/bot-sdk';

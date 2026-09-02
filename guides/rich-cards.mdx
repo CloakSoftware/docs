@@ -74,9 +74,9 @@ It needs `message_send` plus, on current backends, `embed_link`. No webhook, no 
   Make the card a true reply. It renders the quote header and fires a "replied to you" notification that pierces mutes. Leave it off when the card is just an answer.
 </ParamField>
 
-### Cards are server-only in v1
+### Cards in a DM
 
-A direct message has no server, so `msg.serverId` is `null` on every DM. Guard before you use it:
+A direct message has no server, so `msg.serverId` is `null` on every DM and `sendCard()` cannot address one. Guard before you use it:
 
 ```ts
 client.on('messageCreate', async (msg) => {
@@ -85,7 +85,13 @@ client.on('messageCreate', async (msg) => {
 });
 ```
 
-DM cards are not in v1: a DM key is unepoched by wire contract, so it would need a second encryption site. Reading cards back is not in v1 either. An inbound card arrives as an ordinary `messageCreate` carrying its `content`, and the SDK does not decode the embed for you.
+`client.sendCardDM(userId, card)` is the DM form: the same card and the same envelope, encrypted under the peer-keyed DM key. `threadId` and `postId` are not valid on it and `groupId` is ignored. See [Direct messages](/guides/direct-messages#cards-in-a-dm).
+
+An inbound card arrives as an ordinary `messageCreate` carrying its `content`, with the decoded card on `msg.card` since 0.4.0: the embed and any component rows, validated on read with the same caps and media rule as on write. See [MessageCard](/api-reference/embeds#messagecard).
+
+### Buttons and selects
+
+A card can also carry up to five rows of buttons and string selects in `components`, and `embed` becomes optional when it does. Clicks arrive on the `interaction` event. See [Buttons and selects](/guides/components).
 
 ## Content is required, and it is not a shim
 
@@ -237,7 +243,7 @@ const client = new Client({
 
 client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.isDM || !msg.serverId) return; // cards are server-only in v1
+  if (msg.isDM || !msg.serverId) return; // sendCard() is server-scoped; sendCardDM() is the DM form
   if (msg.content.trim() !== '!build') return;
 
   const embed = {

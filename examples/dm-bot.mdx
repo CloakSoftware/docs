@@ -139,11 +139,11 @@ CLOAK_TOKEN="botid.tokenid.secret" DM_TARGET_USER_ID="<your user id>" npx tsx dm
   </Accordion>
 
   <Accordion title="What does not work inside a DM" icon="ban">
-    `react()`, `unreact()`, `edit()`, `delete()`, `pin()`, and `unpin()` all reject on a DM message. The backend implements those operations, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. `reply()` and `channel.send()` work normally.
+    `pin()` and `unpin()` reject on a DM message: the pin operation has no DM lane a bot can observe. `react()`, `unreact()`, `edit()`, `editCard()`, and `delete()` work on a DM message that carries `createdAt`, which needs a backend that honors wire version 3; on an older backend they reject with a message saying the frame carried no timestamp. `reply()` and `channel.send()` work everywhere.
 
-    `msg.repliedTo` is always `null` on a DM. The frame a bot receives carries no reply array, so there is nothing to decode.
+    `msg.repliedTo`, `msg.card`, and `msg.createdAt` are populated on a wire version 3 backend and `null` on an older one, whose notify frame carries none of them. See [What a wire version 3 backend adds](/guides/direct-messages#what-a-wire-version-3-backend-adds).
 
-    Slash commands are not dispatched from DMs. The structured command lane does not exist on the DM frame, and the menu a client's `/` picker renders is published per server. `messageCreate` still fires, so parse `msg.content` yourself if you want DM commands.
+    Slash commands dispatch from a DM through the same registry as in a channel, with `ctx.serverId` null and `ctx.dmId` set. A typed `/command` works on any backend; the DM's `/` picker needs a wire version 3 backend. DM history is `fetchDmMessages(userId)`, also wire version 3. See [Direct messages](/guides/direct-messages#slash-commands-in-a-dm).
   </Accordion>
 
   <Accordion title="Sends are fire-and-forget" icon="paper-plane">

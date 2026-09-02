@@ -28,21 +28,20 @@ The rebuild is planned and the signature will survive it, so code written agains
 
 ## Not exposed to bots
 
-### Direct message reads, edits, reactions and pins
+### Direct message pins, and what needs wire version 3
 
-A bot can hold a 1:1 end-to-end encrypted DM with a human, and both directions work. What does not work inside a DM:
+A bot can hold a 1:1 end-to-end encrypted DM with a human, and both directions work. What does not work inside a DM, and what needs a backend that honors wire version 3:
 
 | Call | Behavior in a DM |
 | --- | --- |
-| `msg.react()` / `unreact()` | Rejects |
-| `msg.edit()` | Rejects |
-| `msg.delete()` | Rejects |
-| `msg.pin()` / `unpin()` | Rejects |
-| `fetchMessages()` | Server-scoped only, so there is no DM history read |
-| `msg.repliedTo` | Always `null` |
-| Slash commands | Never dispatched from a DM |
+| `msg.pin()` / `unpin()` | Rejects. The pin operation has no DM lane a bot can observe. |
+| `sendCommand()` | Server channels only. |
+| `msg.react()` / `unreact()`, `edit()`, `editCard()`, `delete()` | Work on a backend that honors wire version 3. On an older backend a DM message carries no `createdAt` and they reject with a message saying so. |
+| `fetchDmMessages()`, `fetchMessages(null, dmId)` | Work on a backend that honors wire version 3. Resolve empty on an older one. |
+| Slash commands from the DM `/` picker | Dispatch on a backend that honors wire version 3. A typed `/command` dispatches on any backend. |
+| `msg.repliedTo`, `msg.card`, `msg.createdAt` | Populated on a backend that honors wire version 3. `null` on an older backend. |
 
-The backend implements most of these operations for DMs, but their result hooks never reach a bot, so the SDK would be issuing writes it can never observe. `reply()` and `channel.send()` work normally, and `messageCreate` still fires, so you can parse `msg.content` yourself if you want DM commands.
+`reply()` and `channel.send()` work everywhere, and `messageCreate` still fires. See [What a wire version 3 backend adds](/guides/direct-messages#what-a-wire-version-3-backend-adds).
 
 ### Group DMs
 

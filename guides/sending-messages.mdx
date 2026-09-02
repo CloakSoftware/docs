@@ -33,6 +33,14 @@ The same `SendOptions` object is accepted by `msg.reply()`, `msg.channel.send()`
   Make this a true reply to another message: it renders the quote header and fires the mute-piercing "replied to you" notification. A received `Message` satisfies the type, so `{ replyTo: msg }` works. The target must live in the channel you are sending to and must carry a `createdAt`.
 </ParamField>
 
+<ParamField path="opts.threadId" type="string">
+  Send into a thread of the channel. `channelId` is the thread's parent text channel. See [Threads](/guides/threads).
+</ParamField>
+
+<ParamField path="opts.postId" type="string">
+  Send into a post of a forum channel. `channelId` is the parent forum channel. Mutually exclusive with `threadId`. See [Forums](/guides/forums).
+</ParamField>
+
 ## Answer a message you are handling
 
 A received `Message` carries its own location, so you pass only the text. You have two choices, and they are not interchangeable.
@@ -88,7 +96,7 @@ client.on('messageCreate', (msg) => {
 });
 ```
 
-Both methods work on a direct message. There they route into the DM lane instead of `client.send()`, which is why you do not have to branch. They are also the only two message actions that work in a DM: `react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` all reject on a DM message.
+Both methods work on a direct message. There they route into the DM lane instead of `client.send()`, which is why you do not have to branch. `react`, `unreact`, `edit`, `editCard`, and `delete` work there too on a backend that honors wire version 3; `pin` and `unpin` reject on a DM message. See [Direct messages](/guides/direct-messages).
 
 ## Send to a channel you name
 

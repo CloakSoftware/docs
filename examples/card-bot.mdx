@@ -163,8 +163,8 @@ Then, in any text channel the bot can see: `!build` posts the card, `!logo` post
     `client.guild(serverId).sendCard(channelId, card)` is the pre-bound form if you already hold a server handle.
   </Accordion>
 
-  <Accordion title="Cards are server-only in v1" icon="envelope">
-    `messageCreate` is unified, so direct messages arrive on the same handler with `isDM: true` and a null `serverId`. Cards have no DM path in v1: a DM key is unepoched by wire contract, so it would need a second encryption site. The guard at the top of the handler is what keeps `!build` from misfiring in a DM. Reading inbound cards back is also not in v1.
+  <Accordion title="sendCard() is server-scoped; sendCardDM() is the DM form" icon="envelope">
+    `messageCreate` is unified, so direct messages arrive on the same handler with `isDM: true` and a null `serverId`. `sendCard()` takes a server id, so the guard at the top of the handler is what keeps `!build` from misfiring in a DM. `sendCardDM(userId, card)` is the DM form of the same call. An inbound card, including this bot's own echo, is decoded onto `msg.card` since 0.4.0.
   </Accordion>
 
   <Accordion title="Put the substance in description" icon="align-left">

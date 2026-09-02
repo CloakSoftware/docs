@@ -1,0 +1,227 @@
+---
+title: "Buttons and selects"
+description: "Put buttons and string selects under a card, receive clicks as interactions, answer each one exactly once, and retire the controls when the decision is made."
+---
+
+A card can carry up to five rows of **buttons** and **string selects**. The rows render under the embed, or under the message text alone when the card has no embed. A click is encrypted by the clicker with the conversation key and delivered to your bot alone as an `interaction` event. It never rides the firehose, and it never reaches another bot in the channel.
+
+New in 0.4.0. Components need no new permission: a card with rows is an ordinary `sendCard()`, and a click needs nothing from the bot beyond being in the server.
+
+## Post a card with rows
+
+```ts
+await client.sendCard(serverId, channelId, {
+  content: 'Deploy build 4821?',
+  embed: { title: 'Build 4821', description: '42 tests, 0 failures' },
+  components: [
+    { type: 'row', components: [
+      { type: 'button', style: 'success', label: 'Deploy', customId: 'deploy:4821' },
+      { type: 'button', style: 'danger', label: 'Hold', customId: 'hold:4821' },
+      { type: 'button', style: 'link', label: 'Logs', url: 'https://ci.example.com/4821' },
+    ] },
+    { type: 'row', components: [
+      { type: 'select', customId: 'env:4821', placeholder: 'target', options: [
+        { label: 'staging', value: 'staging' },
+        { label: 'production', value: 'prod', emoji: '🚀' },
+      ] },
+    ] },
+  ],
+});
+```
+
+`components` is an `ActionRow[]`. `embed` becomes optional when rows are present: a components-only card is a message with rows under its text and no embed at all. `content` stays required, for the same reasons it is required on every card. See [Content is required](/guides/rich-cards#content-is-required-and-it-is-not-a-shim).
+
+`createForumPost()` accepts the same `embed` and `components`, so a forum post can open with a card that has controls.
+
+### Rows
+
+| Rule | Value |
+| --- | --- |
+| Rows per card | Up to 5 |
+| Buttons per row | Up to 5 |
+| Selects per row | Exactly 1, and the row holds nothing else |
+| Whole card | 8 KiB of JSON, embed and rows together |
+
+### Buttons
+
+```ts
+interface Button {
+  type: 'button';
+  style: 'primary' | 'secondary' | 'success' | 'danger' | 'link';
+  label: string;       // 1 to 80 characters
+  customId?: string;   // 1 to 100 characters; required unless style is 'link'
+  url?: string;        // 'link' style only: an absolute https URL
+  emoji?: string;      // exactly one unicode emoji, rendered ahead of the label
+  disabled?: boolean;
+}
+```
+
+A `link` button carries an `https` `url` instead of a `customId` and never produces an interaction. The client opens it through its trusted-link path, exactly like an embed's link slots. Nothing is fetched for it at render. A `link` button with a `customId`, or any other style with a `url`, is refused.
+
+`customId` is what your `interaction` handler switches on. It is opaque to everyone but your bot and it lives inside the encrypted envelope, so the server never sees it. Treat it as routing state, not as a secret: every member who holds the conversation key can read it. Encode what you need to act (`deploy:4821`), never something you would not show the channel.
+
+### Selects
+
+```ts
+interface StringSelect {
+  type: 'select';
+  customId: string;          // 1 to 100 characters
+  placeholder?: string;      // up to 150 characters
+  minValues?: number;        // 1 to 25, default 1
+  maxValues?: number;        // 1 to 25, default 1
+  disabled?: boolean;
+  options: SelectOption[];   // 1 to 25, unique values
+}
+
+interface SelectOption {
+  label: string;             // 1 to 100 characters
+  value: string;             // 1 to 100 characters; what arrives in Interaction.values
+  description?: string;      // up to 100 characters
+  emoji?: string;            // exactly one unicode emoji
+  default?: boolean;
+}
+```
+
+`minValues` may not exceed `maxValues`, and `maxValues` may not exceed the option count. A multi-select confirms when the picker closes, so one interaction arrives per choice, not one per option.
+
+### Every cap is enforced twice
+
+Every cap above is enforced locally by `assertComponents()`, which `sendCard()` calls for you, and again by the client parser, which drops the whole card on a violation. The two agree by construction, so anything the SDK accepts renders. A bad row throws a [`CloakComponentError`](/api-reference/embeds#cloakcomponenterror) with `reason` (`'shape'` or `'cap'`) and the offending `field` path, before anything is encrypted.
+
+```ts
+import { CloakComponentError } from '@cloak-software/bot-sdk';
+
+try {
+  await client.sendCard(serverId, channelId, card);
+} catch (e) {
+  if (e instanceof CloakComponentError) {
+    console.error(`rows refused (${e.reason}) at ${e.field}: ${e.message}`);
+    return;
+  }
+  throw e;
+}
+```
+
+## Receive a click
+
+```ts
+client.on('interaction', async (i) => {
+  if (i.kind === 'button' && i.customId.startsWith('deploy:')) {
+    await i.ack();
+  } else if (i.kind === 'select' && i.customId.startsWith('env:')) {
+    await i.ephemeral({ content: `Target set to ${i.values[0]}` });
+  }
+});
+```
+
+The payload is an [`Interaction`](/api-reference/types#interaction). The fields you switch on are `kind` (`'button'`, `'select'`, or `'modal'`), `customId`, and for a select `values`, the chosen option values. `userId` is who clicked. `messageId` is the message the control lives on, `serverId` the server (or `null` in a DM), and `channelId` the id the message lives in: a thread or post id when inside one, with `threadId` or `postId` set when the SDK knows the container.
+
+### What happens on a click
+
+<Steps>
+  <Step title="The clicker's app encrypts the click">
+    The click payload (`kind`, `customId`, and the chosen values) is encrypted with the conversation's current key and sent to the server. The server never reads it.
+  </Step>
+  <Step title="The server mints an interaction id and pushes it to your bot">
+    The id is server-minted and valid for 15 minutes. The push goes to your bot's sessions and nobody else's. Meanwhile the clicker's control shows a pending state for up to 3 seconds.
+  </Step>
+  <Step title="The SDK decrypts it and filters by bot">
+    The payload names the bot it addresses. A click addressed to another bot in the channel is dropped silently, because two bots in one channel is the ordinary case. A payload the SDK cannot decrypt (no key for that server and epoch, or for that DM peer) emits [`error`](/api-reference/events#error) and is dropped.
+  </Step>
+  <Step title="Your handler answers exactly once">
+    `ack()`, `showModal()`, or `ephemeral()`. The server pushes the answer to the clicker, and their control clears.
+  </Step>
+</Steps>
+
+The server rate-limits clicks at 5 per user per message per 10 seconds. A throttled click is refused before it reaches you, and the clicker sees a short toast. Your bot is never told.
+
+<Note>
+  Bots never click. The server refuses a click from a bot session before reading it, so `interaction` never fires for your bot's own actions and there is no method to send one.
+</Note>
+
+## Answer exactly once
+
+Every interaction takes exactly one terminal response. The three are:
+
+<ResponseField name="ack()" type="Promise<void>">
+  Clear the clicker's pending state and show nothing. Use it when the visible result is something else your bot does, such as an [`editCard()`](#retire-the-controls) that follows.
+</ResponseField>
+
+<ResponseField name="ephemeral({ content, embed?, components? })" type="Promise<void>">
+  Show the clicker, and nobody else, a reply rendered directly under the message with an "Only you can see this" label. It is never stored: it is gone on reload, and no other member ever receives it. `content` is up to 2000 characters and may be empty when an embed or rows carry the point. Rows inside it are clickable; their clicks carry the **original** `messageId` and a `parentId` equal to this interaction's id.
+</ResponseField>
+
+<ResponseField name="showModal(def)" type="Promise<void>">
+  Open a form on the clicker's screen. The submit arrives as a fresh `interaction` with `kind: 'modal'`. See [Modals](/guides/modals).
+</ResponseField>
+
+A second call on the same interaction rejects locally with a [`CloakClientError`](/api-reference/errors#cloakclienterror) whose `source` is `'interaction'`, before any frame goes out. The server refuses it too. An interaction you never answer leaves the clicker's control pending until the client's 3 second timeout clears it, so always answer, even if only with `ack()`.
+
+`ephemeral()` validates its payload the way `sendCard()` does: the same embed caps and media rule, the same component caps, and it rejects with `CloakEmbedError` or `CloakComponentError` locally on a bad one. A server-side refusal of the response rejects with a [`CloakActionError`](/api-reference/errors#interaction-responses); the code you are most likely to see is `-3`, the interaction expired.
+
+## Retire the controls
+
+Once a decision is made, the buttons should stop inviting clicks. [`editCard()`](/api-reference/client#editcard) replaces a message's card, embed and rows together, in one edit. Pass `components: []` to strip the rows, or resend them with `disabled: true` to leave them visible but inert.
+
+The edit addresses the message by its send time, so it needs the message's `createdAt`. An `Interaction` carries the click time, not the message's, so hold on to the card message when your bot receives its own echo on `messageCreate`, and edit from that.
+
+```ts
+import type { Message } from '@cloak-software/bot-sdk';
+
+// Cards this bot posted, keyed by message id, captured from the firehose echo.
+const ownCards = new Map<string, Message>();
+
+client.on('messageCreate', (msg) => {
+  if (msg.authorId === client.user?.id && msg.card) ownCards.set(msg.messageId, msg);
+});
+
+client.on('interaction', async (i) => {
+  const card = ownCards.get(i.messageId);
+  if (!card || i.kind !== 'button') return;
+
+  await i.ack();
+  await card.editCard({
+    content: `Build 4821: ${i.customId.startsWith('deploy:') ? 'deploying' : 'held'}`,
+    embed: { title: 'Build 4821', description: `Decided by <@${i.userId}>` },
+    components: [], // no more clicks
+  });
+});
+```
+
+`msg.editCard(card)` fills the whole option bag from the message. The flat form is `client.editCard(serverId, channelId, messageId, card, { createdAt, pinned?, groupId?, threadId?, postId? })`, where `serverId` is `null` and `channelId` the dm id for a DM card. Both re-encrypt the text alongside the card, so pass the current `content` to leave the text as it was. The edit is author-only server-side, like `edit()`.
+
+Every member's client swaps the card in place, and your bot's own `messageUpdate` fires with the replacement in its `card` field. See [messageUpdate](/api-reference/events#messageupdate).
+
+## Read a card back
+
+An inbound message that carries a card exposes it on `msg.card` as a [`MessageCard`](/api-reference/embeds#messagecard): the embeds that survived the read-side validator and the component rows. The same caps and the same media rule are enforced on read as on write, and a card that fails them is `null`, never a partial one. That is how the `ownCards` map above knows which of the bot's own messages are cards.
+
+## Older clients
+
+A card without rows keeps the same wire shape it has always had, so a client from before this release renders it unchanged. A card with rows rides a newer envelope. A client from before this release does not understand that envelope and drops the card **entirely**: it shows only the message's text `content`, with no embed and no buttons. That is one more reason `content` must be genuine text that stands on its own. See [The two envelopes](/api-reference/embeds#the-two-envelopes).
+
+## Where the card lives
+
+Rows work anywhere a card does: a text channel, a thread (`threadId`), a forum post (`postId`), or a direct message. The click's `channelId` is the container id in those cases, and `threadId` or `postId` is set when the SDK knows the container.
+
+In a DM, [`sendCardDM(userId, card)`](/api-reference/client#sendcarddm) sends the same card under the DM key. The click arrives with `serverId: null` and `channelId` equal to the dm id, and `ephemeral()` and `showModal()` answer under the same key. Retiring the card works the same way as on the server lane, through the bot's own echo, but that echo only exists on a backend that honors wire version 3. See [Cards in a DM](/guides/direct-messages#cards-in-a-dm) and the [Approval bot](/examples/approval-bot).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Modals" icon="window-maximize" href="/guides/modals">
+    Open a form in reply to a click and read its fields.
+  </Card>
+
+  <Card title="Approval bot" icon="code" href="/examples/approval-bot">
+    A complete approve-or-deny flow over DM: `sendCardDM()`, ephemeral replies, and `editCard()` on the echo.
+  </Card>
+
+  <Card title="Cards and embeds reference" icon="book" href="/api-reference/embeds">
+    Every component type, cap, and the envelope rule.
+  </Card>
+
+  <Card title="Rich cards" icon="id-card" href="/guides/rich-cards">
+    The card the rows sit under.
+  </Card>
+</CardGroup>

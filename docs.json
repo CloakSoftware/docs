@@ -53,6 +53,7 @@
           "guides/typing-presence-and-profile",
           "guides/file-attachments",
           "guides/threads",
+          "guides/forums",
           "guides/polls"
         ]
       },
@@ -67,6 +68,13 @@
         "pages": [
           "guides/rich-cards",
           "guides/webhook-embeds"
+        ]
+      },
+      {
+        "group": "Interactions",
+        "pages": [
+          "guides/components",
+          "guides/modals"
         ]
       },
       {
@@ -116,7 +124,9 @@
           "examples/embed-bot",
           "examples/dm-bot",
           "examples/voice-bot",
-          "examples/dj-bot"
+          "examples/dj-bot",
+          "examples/approval-bot",
+          "examples/forum-helper-bot"
         ]
       },
       {

@@ -39,6 +39,14 @@ get(name: string): { decl: CommandDeclaration; handler: CommandHandler } | undef
 
 Looks a command up, case-insensitively. Returns `undefined` when it is not registered.
 
+### allowsDm
+
+```ts
+allowsDm(name: string): boolean
+```
+
+Whether `name` may be invoked from a DM: `true` unless the declaration says `dm: false`. Also `true` for an unregistered name, so the caller's own "unregistered" rule applies first. The client consults it on every DM invocation.
+
 ### list
 
 ```ts
@@ -107,6 +115,10 @@ hash(): string
 
 <ResponseField name="options" type="CommandOption[]">
   The command's arguments. **Declared order is load-bearing**: it is the positional text grammar, and every required option must precede every optional one.
+</ResponseField>
+
+<ResponseField name="dm" type="boolean" default="true">
+  Whether the command may be invoked from a 1:1 DM with the bot. `false` sets bit 0 (`COMMAND_FLAG_NO_DM`) of the canonical declaration's `flags` element, which the clients' DM picker filters on, and a DM invocation of it is dropped locally with a `debug` warning, never answered. Server-channel behavior is unaffected. Must be a boolean when set. See [Commands in direct messages](/guides/slash-commands#commands-in-direct-messages).
 </ResponseField>
 
 ### CommandOption
@@ -208,9 +220,15 @@ interface CommandContext {
   getNumber(n: string): number | null;
   getBoolean(n: string): boolean | null;
   message: Message;
+  serverId: string | null;
+  dmId: string | null;
+  channelId: string;
+  userId: string;
   reply(text: string, opts?: SendOptions): Promise<void>;
 }
 ```
+
+`serverId`, `dmId`, `channelId`, and `userId` say where the invocation came from and who sent it. In a server channel, `serverId` is set, `dmId` is `null`, and `channelId` is the channel, thread, or post id. In a DM, `serverId` is `null`, `dmId` is set, and `channelId` is the same dm id. `userId` is the invoker, normalized.
 
 Values are already coerced to their declared type by both lanes. The getters add null safety:
 
@@ -219,7 +237,7 @@ Values are already coerced to their declared type by both lanes. The getters add
 - `getNumber` returns `null` for an unfilled option, for a boolean, and for anything non-finite.
 - `getBoolean` passes a real boolean through, and otherwise accepts `true`/`yes`/`1` and `false`/`no`/`0` case-insensitively. Anything else is `null`.
 
-`reply` is identical to `message.reply`: a **true reply** into the invoking channel, which fires a "replied to you" notification that pierces mutes. Use `ctx.message.channel.send(text, opts)` for a plain response. Both are fire-and-forget, and a server-side denial arrives on `sendRejected` rather than rejecting the promise.
+`reply` is identical to `message.reply`: a **true reply** into the invoking channel, or into the DM, which fires a "replied to you" notification that pierces mutes. Use `ctx.message.channel.send(text, opts)` for a plain response. Both are fire-and-forget, and a server-side denial arrives on `sendRejected` rather than rejecting the promise.
 
 ### CommandHandler
 
@@ -263,6 +281,9 @@ Every cap is checked locally, so a violation surfaces at your call site instead 
 | `MAX_COMMAND_DESC` | `100` | Characters in a command or option description |
 | `MAX_COMMANDS_PAYLOAD` | `16384` | Bytes of the serialized canonical menu |
 | `MAX_COMMAND_WIRE` | `2048` | Characters of the encrypted sidecar on one invocation |
+| `MAX_COMMAND_FLAGS` | `0xff` | The ceiling on a declaration's canonical `flags` element |
+
+`COMMAND_FLAG_NO_DM` (`1`) is the one defined flag: bit 0, set by `dm: false`. `declarationFlags(decl)` returns the flags integer a declaration canonicalizes to, `0` for the default.
 
 <Note>
   Command and option names are capped at 32 characters by `^[a-z0-9_-]{1,32}$`, enforced by `validateDeclaration()`. The constant and the regex behind that rule are internal and are not exported, so do not write an import for them.
@@ -314,13 +335,13 @@ Throws on anything the server would reject, with a message naming the rule. `reg
 
 ```ts
 type CanonicalOption = [string, number, string, boolean, string[]];
-type CanonicalCommand = [string, string, CanonicalOption[]];
+type CanonicalCommand = [string, string, CanonicalOption[]] | [string, string, CanonicalOption[], number];
 type CanonicalMenu = CanonicalCommand[];
 ```
 
 A `CanonicalOption` is `[name, typeCode, description, required, choices]`. Note the element order: the integer type code is at index 1 and the description at index 2. `required` must be a real boolean, since the server coerces it strictly and a `1` would read as false, quietly making every required option optional.
 
-A `CanonicalCommand` is `[name, description, options]`.
+A `CanonicalCommand` is `[name, description, options]`, or `[name, description, options, flags]` when the declaration's flags are non-zero. Today the only flag is `COMMAND_FLAG_NO_DM` (bit 0), set by `dm: false`. The fourth element rides only when non-zero, so a menu whose commands all allow DMs publishes the exact three-element payload it always did and its server-side hash never moves. The server accepts either length and stores the flags verbatim, up to `MAX_COMMAND_FLAGS`.
 
 These are arrays rather than objects so the hash cannot shift with key order. If you build one by hand, use `COMMAND_OPTION_TYPE_CODES` for the type slot.
 

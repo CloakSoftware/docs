@@ -61,7 +61,7 @@ One constraint follows from the encryption: the four slots a card fetches on its
 
 ### Direct messages
 
-A 1:1 DM between your bot and a human is encrypted the same way, under a key exchanged once per peer. Inbound DMs arrive on the ordinary `messageCreate` event. See [Direct messages](/guides/direct-messages).
+A 1:1 DM between your bot and a human is encrypted the same way, under a key exchanged once per peer. That key is unepoched, so it never cycles the way a server key does. Text, cards (`sendCardDM()`), edits, and interaction payloads in a DM are all encrypted under it. Inbound DMs arrive on the ordinary `messageCreate` event. See [Direct messages](/guides/direct-messages).
 
 ### Voice media frames
 

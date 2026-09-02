@@ -69,7 +69,7 @@ Three separate grants, and they do three different things.
 
 ## What the SDK deliberately does not ship
 
-- **No recorder, no file sink, no transcription helper.** Subscribing is in scope. What a bot does with decrypted member audio is your business and your users' consent problem.
+- **No recorder, no file sink, no transcription helper.** Subscribing is in scope, and a room-scope session hands decrypted member audio out as PCM frames (see [Receiving audio](/voice/audio#receiving-audio)). What a bot does with decrypted member audio is your business and your users' consent problem.
 - **No voice health check and no retry-on-decrypt-failure path.** Both would be theatre, because the engine reports nothing to build them on. The defence is to be correct by construction, which is what `VoiceMediaSession.attach()` enforces.
 
 ## Next

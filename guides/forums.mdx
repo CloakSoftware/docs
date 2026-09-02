@@ -1,0 +1,186 @@
+---
+title: "Forums"
+description: "Open forum posts, send into them, browse and manage a forum, and hear every post's traffic on the firehose."
+---
+
+Forum channels hold posts. A post is a container like a thread: its replies are ordinary messages whose channel **is** the post, so encryption, reactions, edits, cards, polls, and attachments all work inside one unchanged. What differs from a thread is how the post is entered, how its first message arrives, and the management surface around it.
+
+Forums add no permission names. Creating a post and sending inside one need `message_send`, resolved against the forum channel, and moderating other members' posts needs `message_manage`. See [Manage a post](#manage-a-post).
+
+<Note>
+  Forum posts have no private variant. Following a post is a notification preference, the bell in the app, not an access list. Your bot hears every post in every forum it can view whether it follows the post or not.
+</Note>
+
+## Open a post and talk in it
+
+```ts
+const post = await client.createForumPost(serverId, forumChannelId, {
+  title: 'Build 4821 failed on main',
+  content: 'Three tests red after the cache change.',
+  tagIds: [2],
+});
+
+await client.send(serverId, forumChannelId, 'first repro attached', { postId: post.postId });
+```
+
+`createForumPost(serverId, forumChannelId, opts)` takes the parent forum channel and an options object: `title` (1 to 100 characters after trimming), `content` (the post's first message, non-blank), optional `tagIds`, optional `mentions`, and optionally an `embed` and `components` so the first message is a [card](/guides/rich-cards). Title, body, and card are all encrypted under the server key together, so they never split across an epoch change.
+
+It resolves with a [`ForumPost`](/api-reference/types#forumpost). The SDK waits a few seconds for the server's own create event, which is where `starterMessageId` comes from. If that event does not arrive in time, the returned row is built from what the SDK sent and `starterMessageId` is `null`. The real row lands on `forumPostUpdate` whenever it arrives.
+
+Sending into a post is the ordinary `send()` with the **parent forum channel** id plus `{ postId }`. Every call that takes a location accepts `postId` in its options next to `threadId`: `send()`, `sendCard()`, `editCard()`, `fetchMessages()`, `closePoll()`, `fetchPollState()`, and `fetchPollVoters()`. A `Message` received inside a post already knows its container, so `reply()`, `react()`, `edit()`, `delete()`, `pin()`, and `editCard()` on it route into the post with no option at all. Passing both `threadId` and `postId` is a local error, because a message lives in one container.
+
+<Warning>
+  You cannot send into a forum channel itself. A `send()` addressed at the forum with no `postId` is refused by the server with code `-17` on [`sendRejected`](/api-reference/events#sendrejected): "cannot send into a forum channel directly". Open a post, or send into an existing one with `postId`.
+</Warning>
+
+### Entering a post moves the cursor
+
+Under the hood the SDK selects the server and enters the post. Unlike entering a thread, this is a **cursor move**: the server repoints the session's text cursor at the post, so the ordinary message frame follows with no extra slot. A run of sends into one post enters once. The next action on a plain channel re-selects that channel. None of this needs your attention, but it is why a post action never takes a `groupId`.
+
+## Receive post messages
+
+Post traffic arrives on the same `messageCreate` firehose, gated on the parent forum's visibility. A message inside a post has:
+
+| Field | Value |
+| --- | --- |
+| `msg.postId` | The post id. |
+| `msg.channelId` | The same post id. The post is where the message lives. |
+| `msg.forumChannelId` | The parent forum channel. Always set, because a post frame carries its parent on the wire. |
+| `msg.threadId` | `null`. |
+| `msg.starter` | `true` for the post's first message, `false` otherwise. |
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (msg.postId && msg.content === '!status') void msg.reply('still red');
+});
+```
+
+`msg.reply()` and `msg.channel.send()` inside a post route back into that post. Unlike a thread message, a post message never needs the SDK's index to find its parent, so `reply()` never rejects for a missing parent here.
+
+### The starter arrives from the create event
+
+A post's first message never rides the ordinary message stream. It arrives with the post's own create event, which the SDK turns into a `messageCreate` with `starter: true`, whose `messageId` equals `ForumPost.starterMessageId`. It is emitted once, right before the matching `forumPostUpdate`, and a redelivered create event never emits it twice.
+
+```ts
+client.on('messageCreate', (msg) => {
+  if (!msg.starter) return;
+  console.log(`new post in ${msg.forumChannelId}: ${msg.content}`);
+});
+```
+
+A starter that carries a card exposes it on [`msg.card`](/api-reference/types#message) like any other message.
+
+## Read a post's history
+
+`fetchMessages()` takes a `postId` and pages the post's own messages, addressed the same way a send is: the **parent forum channel** id plus the post.
+
+```ts
+const backlog = await client.fetchMessages(serverId, forumChannelId, {
+  postId,
+  limit: 200,
+});
+```
+
+Every cursor works as it does on a channel (`before`, `after`, `around`, `limit`), and the same `message_read_history` permission applies. Rows come back with `postId` and `forumChannelId` set and `channelId` equal to the post, so `reply()`, `react()`, `edit()`, and `editCard()` on a fetched row act inside the post. See [Message history](/guides/message-history).
+
+## Browse a forum
+
+`fetchForumPosts(serverId, forumChannelId, opts?)` pages a forum's posts, active first by default, with pinned posts at the front of the first page.
+
+```ts
+const { posts, hasMore } = await client.fetchForumPosts(serverId, forumChannelId, {
+  sort: 'activity',      // or 'created'
+  includeArchived: false,
+  solved: false,         // true: answered only; false: unanswered only; omit: both
+  limit: 50,             // the server caps a page at 50
+});
+
+for (const post of posts) {
+  console.log(`${post.title} (${post.replyCount} replies${post.answered ? ', solved' : ''})`);
+}
+```
+
+The other filters are `tag` (one tag id), `onlyMine`, and `onlyFollowing`. `before` continues a page from the previous page's oldest sort key: `lastActiveAt` for the activity sort, `createdAt` for the created sort. Rows carry `starterContent` (the decrypted first message) and `following` (the bot's own follow state).
+
+`fetchForumMeta(serverId, forumChannelId)` reads the forum's settings: its tags (names are end-to-end encrypted, decrypted best-effort), `guidelines`, `requireTag`, `defaultSort`, `autoArchiveDays`, `defaultReaction`, and `totalPosts`. A forum created before it had a settings row answers defaults rather than an error.
+
+```ts
+const meta = await client.fetchForumMeta(serverId, forumChannelId);
+const bugTag = meta.tags.find((t) => t.name === 'bug');
+if (meta.requireTag && !bugTag) throw new Error('this forum requires a tag and has no "bug" tag');
+```
+
+A tag with `moderated: true` can only be applied by a member holding `message_manage`.
+
+## Manage a post
+
+```ts
+// Retitle, retag, or both. Omit a field to keep it.
+await client.editForumPost(serverId, forumChannelId, postId, { title: 'Fixed in 4822', tagIds: [2, 5] });
+
+// Flip a state flag.
+await client.setForumPostState(serverId, forumChannelId, postId, 'locked', true);
+await client.setForumPostState(serverId, forumChannelId, postId, 'pinned', true);
+await client.setForumPostState(serverId, forumChannelId, postId, 'archived', false);
+
+// Mark the accepted answer. A received Message fits; null clears it.
+await client.setForumPostState(serverId, forumChannelId, postId, 'answered', answerMsg);
+
+// Move the post to another forum channel.
+await client.setForumPostState(serverId, forumChannelId, postId, 'move', otherForumChannelId);
+
+// Follow or unfollow: the bell.
+await client.followForumPost(serverId, forumChannelId, postId, true);
+
+// React to the starter from outside the post, like the chips on a post's list card.
+await client.reactToStarter(serverId, forumChannelId, postId, '👍');
+```
+
+`setForumPostState(serverId, forumChannelId, postId, field, value)` takes one of five fields. `'archived'`, `'locked'`, and `'pinned'` take a boolean. `'answered'` takes the answer message (a `Message` with a `createdAt`) or `null`. `'move'` takes the target forum channel id. Locking, pinning, and moving need `message_manage`. Archiving and answering also allow the post's author, which your bot is for posts it created.
+
+`reactToStarter()` is fire-and-forget on the wire. The result is an ordinary `reactionUpdate`, and a denial produces no frame at all. Inside a post, `msg.react()` on the starter message does the same thing.
+
+`followForumPost()` is purely a notification preference. A firehose bot already receives every visible post's replies either way.
+
+<Note>
+  There is no `create_posts` or `manage_posts` permission name, and there never will be. The server's create-posts capability bottoms out at `message_send`, resolved against the forum channel (which may override it per channel), so creating a post and sending inside one need `message_send`, and `can('message_send', serverId)` is the pre-check. Post moderation on other members' posts (`editForumPost()`, `setForumPostState()`) needs `message_manage`. A refusal arrives as a `CloakActionError` from the call, `-2` on `createForumPost()`.
+</Note>
+
+## Lifecycle events
+
+`forumPostUpdate` fires with a decoded [`ForumPost`](/api-reference/types#forumpost) on creation, on a reply bumping activity, on archived, locked, pinned, or answered flips, and on tag edits. It reaches every member who can view the parent forum, and it fires for your bot's own posts too. `forumPostDelete` fires with `{ serverId, forumChannelId, postId }` on deletion.
+
+```ts
+client.on('forumPostUpdate', (post) => {
+  if (post.answered) console.log(`post ${post.postId} is solved`);
+});
+client.on('forumPostDelete', ({ postId }) => console.log(`post ${postId} gone`));
+```
+
+Archiving is computed lazily server-side from the forum's `autoArchiveDays`. A locked post rejects replies.
+
+`client.postParent(postId)` returns the parent forum channel of a post the SDK has seen, or `undefined`. It is fed by every post row and every in-post message the bot receives, so it is a synchronous, best-effort lookup.
+
+## Deny codes
+
+A `send()` into a post that is locked answers `-18` on `sendRejected`. A send into the forum channel itself answers `-17`. The post methods reject with a [`CloakActionError`](/api-reference/errors#cloakactionerror). The codes are listed under [Forum posts](/api-reference/errors#forum-posts) on the errors page; the ones you are most likely to hit are `-2` (creation denied for want of `message_send` on the forum, or a state change denied for want of `message_manage`), `-4` (a tag violation: unknown tag, a moderated tag without `message_manage`, or a required tag missing), and `-5` (the forum is at its post cap).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Threads" icon="comments" href="/guides/threads">
+    The other container, and how it differs.
+  </Card>
+
+  <Card title="Sending messages" icon="paper-plane" href="/guides/sending-messages">
+    The send path posts ride, including `SendOptions`.
+  </Card>
+
+  <Card title="Forum helper bot" icon="code" href="/examples/forum-helper-bot">
+    A complete bot that tags, answers, and locks posts.
+  </Card>
+
+  <Card title="Events" icon="bolt" href="/api-reference/events">
+    `forumPostUpdate` and `forumPostDelete` payloads.
+  </Card>
+</CardGroup>

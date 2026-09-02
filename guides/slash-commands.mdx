@@ -50,6 +50,10 @@ Message bodies stay end-to-end encrypted, including the body of an invocation. T
   The command's arguments, in an order that is load-bearing. See below.
 </ParamField>
 
+<ParamField path="dm" type="boolean" default="true">
+  Whether the command may be invoked from a 1:1 DM with the bot. `false` hides it from the DM `/` picker and drops a DM invocation that arrives anyway. Server-channel behavior is unaffected. See [Commands in direct messages](#commands-in-direct-messages).
+</ParamField>
+
 Everything `register()` rejects, it rejects synchronously, in your own stack trace: a bad name, a missing description, a duplicate command, more than 25 options, a bad choice list, or a declaration set whose serialized menu would exceed 16 KiB. A bot author bug never becomes a faraway server ack code.
 
 ### Option types
@@ -125,6 +129,10 @@ interface CommandContext {
   getNumber(n: string): number | null;
   getBoolean(n: string): boolean | null;
   message: Message;
+  serverId: string | null;   // null in a DM
+  dmId: string | null;       // the dm id in a DM
+  channelId: string;         // the channel, thread, post, or dm id
+  userId: string;            // the invoker
   reply(text: string, opts?: SendOptions): Promise<void>;
 }
 ```
@@ -139,7 +147,18 @@ await ctx.message.channel.send('done');   // plain message, no reply notificatio
 
 Both take the same `SendOptions` object (`{ groupId?, mentions?, replyTo? }`) as every other send. Both are fire-and-forget: the promise resolves when the frame goes out, and a server-side denial arrives later on the [`sendRejected`](/api-reference/events#sendrejected) event rather than rejecting the promise.
 
-`ctx.message` is the full `Message`, so `ctx.message.authorId` is the invoker and `ctx.message.serverId` is the server the invocation came from. Commands never dispatch from direct messages, so `serverId` is populated in a handler, but it is typed `string | null` like everywhere else. Narrow it before passing it into a server-scoped call.
+`ctx.message` is the full `Message`. The four location fields say where the invocation came from: `serverId` and `channelId` for a server channel (with `channelId` the thread or post id when inside one), or `serverId: null` with `dmId` set and `channelId` equal to the dm id for a [DM invocation](#commands-in-direct-messages). `userId` is the invoker, the same as `ctx.message.authorId`. Narrow `serverId` before passing it into a server-scoped call.
+
+```ts
+async (ctx) => {
+  if (!ctx.serverId) {
+    await ctx.reply('run this in a server, not a DM');
+    return;
+  }
+  if (!client.can('message_manage', ctx.serverId)) return;
+  // ...
+}
+```
 
 ## When a command fails
 
@@ -165,7 +184,7 @@ If your bot also does its own text handling in `messageCreate`, filter out messa
 client.on('messageCreate', (msg) => {
   if (msg.authorId === client.user?.id) return;   // never answer yourself
   if (msg.command) return;                        // already handled as a command
-  if (msg.isDM || !msg.serverId) return;          // this handler is server-scoped
+  if (msg.isDM || !msg.serverId) return;          // this text handler is server-scoped
 
   if (msg.content.trim() === 'help') {
     const list = client.commands.list().map((d) => `/${d.name}: ${d.description}`).join('\n');
@@ -275,8 +294,49 @@ Publication is best-effort and never blocks login. A rejection or a transport fa
 
 - A command **never dispatches from `fetchMessages`**. Replaying history would re-execute old commands, so `command` is never set on a fetched message.
 - A command never dispatches from the bot's own messages.
-- **Commands are never dispatched from direct messages.** The structured lane does not exist on the DM frame, and the menu is published per server. `messageCreate` still fires for DMs, so a bot that wants DM commands can parse `msg.content` itself.
+- **Both lanes run in direct messages.** A structured invocation from the DM `/` picker needs a wire version 3 backend; a typed `/play ...` dispatches on any backend. Same registry, same handler, no permission gate, and `dm: false` drops it. See [Commands in direct messages](#commands-in-direct-messages).
 - An unregistered command name is a cheap no-op on every inbound message.
+
+## Commands in direct messages
+
+A human can run your commands from their 1:1 DM with the bot, on either lane. When they open the DM, their client fetches your bot's published menu, so the `/` picker there lists every command you registered before `login()` whose `dm` flag is not `false`; picking one sends a structured invocation over the DM lane's message broadcast, which needs a backend that honors wire version 3. Typing `/play ...` by hand (your `commandPrefix`) rides the message text, which every backend delivers, so the text lane works in a DM on an older backend too. Both dispatch through the same registry and the same handler as a channel invocation, under the same rules.
+
+What differs inside the handler:
+
+| Field | In a DM |
+| --- | --- |
+| `ctx.serverId` | `null` |
+| `ctx.dmId` | The dm id |
+| `ctx.channelId` | The dm id, the same value |
+| `ctx.userId` | The invoker |
+| `ctx.reply()` | A reply into the DM |
+| `ctx.source` | `'structured'` from the picker, `'text'` when typed |
+
+There is no permission gate in a DM. A grant is a server concept, so `can()` has nothing to answer. Check `ctx.userId` yourself when a command should be limited to certain people.
+
+```ts
+client.commands.register(
+  { name: 'play', description: 'play a song', dm: false, options: [/* ... */] },
+  async (ctx) => { /* never runs from a DM */ },
+);
+
+client.commands.register(
+  { name: 'status', description: 'how the bot is doing' }, // dm defaults to true
+  async (ctx) => {
+    await ctx.reply(ctx.dmId ? 'all good, and this is our DM' : 'all good');
+  },
+);
+```
+
+`dm: false` marks a command as server-only. On the wire it adds a fourth `flags` element to that command's canonical declaration, bit 0 set (`COMMAND_FLAG_NO_DM`), which the DM picker filters on. A DM invocation of such a command that arrives anyway is dropped with a `debug` warning and never answered. A menu whose commands all allow DMs publishes the exact three-element payload it always did, so its server-side hash never moves.
+
+Three things to know about a DM:
+
+- **The text lane works everywhere.** Someone typing `/status` in a DM dispatches on any backend, because the legacy notify frame carries the message text. Only the structured lane, the `/` picker, needs wire version 3, because only the DM lane's message broadcast carries the command sidecar.
+- **A DM invocation dispatches once.** On a wire version 3 backend the DM arrives twice, through the legacy notify signal and the message broadcast; the command dispatches at most once per message id whichever frame lands first, and `messageCreate` fires once.
+- **The text lane still cannot address a bot.** In a DM there is only one bot, so the ambiguity a channel has does not arise, but `ctx.source` still says `'text'` and a value containing `"` still does not round-trip.
+
+`ctx.message.command` is set on the DM message, so the `if (msg.command) return;` filter above works there too. See [Direct messages](/guides/direct-messages#slash-commands-in-a-dm).
 
 ## Registry caps
 

@@ -16,7 +16,7 @@ Failures reach your bot through three different doors: a rejected promise, an ev
 | A REST request failed over HTTP | `CloakRestError` | the rejected promise |
 | A card was invalid | `CloakEmbedError` | a rejected `sendCard()`, raised locally |
 | A webhook POST failed | `CloakWebhookError` | a rejected `sendEmbed()` or `webhooks.post()` |
-| A message action was called on a DM, or without a `createdAt` | plain `Error` | the rejected promise |
+| A message action was called without a `createdAt`, or `pin()` on a DM | plain `Error` | the rejected promise |
 
 All six classes are exported from the package root:
 
@@ -80,7 +80,7 @@ try {
 The `missing` suffix is appended only when `.permission` is set, which keeps the line readable for denials that have no named permission.
 
 <Warning>
-  That `else { throw e; }` branch is real. `react`, `unreact`, `edit`, `delete`, `pin` and `unpin` also reject with a **plain `Error`**, not a `CloakActionError`, in two cases: the message is a direct message (none of those six have a working DM path), and the message has no `createdAt`. Re-throwing from a hot `messageCreate` handler crashes the handler unless you have an `error` listener. Guard DMs first: `if (msg.isDM || !msg.serverId) return;`
+  That `else { throw e; }` branch is real. `react`, `unreact`, `edit`, `editCard`, `delete`, `pin` and `unpin` also reject with a **plain `Error`**, not a `CloakActionError`, in two cases: the message has no `createdAt` (a DM on a backend below wire version 3), and `pin` or `unpin` on any direct message. Re-throwing from a hot `messageCreate` handler crashes the handler unless you have an `error` listener. Guard before anything server-scoped: `if (msg.isDM || !msg.serverId) return;`
 </Warning>
 
 ### Why .permission can be undefined
@@ -97,11 +97,13 @@ Some denials are permission-style but have no name. A pin denial is gated on a c
 
 Any action the server can deny rejects with `CloakActionError` when it does:
 
-- **Message actions**: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
+- **Message actions**: `react`, `unreact`, `edit`, `editCard`, `delete`, `pin`, `unpin`, in a server channel or (from wire version 3) a DM.
+- **Forums**: `createForumPost`, `fetchForumPosts`, `fetchForumMeta`, `editForumPost`, `setForumPostState`, `followForumPost`.
+- **Interactions**: `ack`, `showModal`, `ephemeral`, when the server refuses the response.
 - **Moderation**: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
 - **Channels and groups**: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
 - **Reads**: `fetchMessages` when read history is denied, `fetchRoles`, `fetchEmojis`.
-- **Direct messages**: `sendDM`, from the create step when the server refuses the DM.
+- **Direct messages**: `sendDM` and `sendCardDM`, from the create step when the server refuses the DM.
 - **Presence and voice**: `setStatus`, `joinVoice`, `leaveVoice`.
 - **Webhook management**: `webhooks.list`, `webhooks.create`, `webhooks.edit`, `webhooks.regenerate`, `webhooks.delete`.
 - **The REST lane**: `client.rest.*`, when the credential mint itself is refused (opcode 638). The HTTP legs raise `CloakRestError` instead.

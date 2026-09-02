@@ -56,7 +56,7 @@ This applies to the **webhook** embed lane only. The encrypted card lane cannot 
 The SDK sends a wire/crypto capability version as the trailing slot of its login frame. The backend's force-update gate, `CLOAK_MIN_CLIENT_VERSION`, refuses anything below its floor with the shared `-12` "update required" code.
 
 <Warning>
-  `CLIENT_WIRE_VERSION` is an **SDK constant**, not a backend environment variable, and it is not exported from the package. Do not write an import for it. The value today is `2`, meaning the HPKE-capable SDK (0.2.0 and later). Older SDKs sent no version at all and read as `1` server-side.
+  `CLIENT_WIRE_VERSION` is an **SDK constant**, not a backend environment variable, and it is not exported from the package. Do not write an import for it. The value today is `3` (0.4.0 and later), the SDK that consumes the DM lane's message broadcast. `2` was the HPKE-capable SDK (0.2.0 and later), and older SDKs sent no version at all and read as `1` server-side. The gate compares bot sessions only, so a human client on a lower version is unaffected.
 </Warning>
 
 A `-12` is terminal. The SDK emits `disconnect` and stops the reconnect loop, because no amount of retrying makes an old build newer. The fix is to update `@cloak-software/bot-sdk` and redeploy. See [Login rejections](/production/troubleshooting#login-rejections).
@@ -96,8 +96,18 @@ These are not settings. They are whether the server you are talking to is recent
     Reading a thread's history, [`fetchMessages()`](/api-reference/client#fetchmessages) with `opts.threadId`, requires a backend that honors the thread target on the two history opcodes. This is the rare case that fails **loudly**: on an older server the read falls back to the parent channel's messages, and rather than hand those back as the thread's, the SDK rejects with an error naming the cause. Everything else about threads (creating, sending, receiving, enumerating) is unaffected.
   </Accordion>
 
+  <Accordion title="DM reads, edits, reactions and cards: need a backend that honors wire version 3">
+    A backend that honors the SDK's wire version 3 puts the bot on the DM lane's ordinary message broadcast, its own DM sends echoed back included, and on the DM-lane edit, delete and reaction hooks. That is what gives a DM message its `createdAt`, `repliedTo`, and `card`, and what lets `react()`, `edit()`, `editCard()`, and `delete()` work on one. On an older server only the legacy notify signal arrives: those fields are `null`, the bot never sees its own DM sends, and those actions reject with a message saying the frame carried no timestamp. Sending, including `sendCardDM()`, works either way. See [Direct messages](/guides/direct-messages#what-a-wire-version-3-backend-adds).
+  </Accordion>
+
   <Accordion title="The slash-command menu: needs the bot command registry">
     `login()` publishes your registered command menu so a human's `/` picker can list it. This needs a backend running the bot-command-registry work. Against an older backend the frame goes nowhere and the SDK carries on: publication is best-effort and never blocks login, and every command still dispatches over the text lane. See [Slash commands](/guides/slash-commands).
+
+    Two 0.4.0 additions ride the same registry. A command declared `dm: false` publishes a fourth `flags` element on its canonical declaration; a current backend accepts a three- or four-element declaration and stores the flags verbatim. A menu whose commands all allow DMs keeps the three-element shape, so it is unaffected. A backend from before this release may treat the fourth element as malformed, which refuses the whole menu (best-effort, logged behind `debug`), so declare `dm: false` only against a backend that accepts it. And the DM `/` picker reads one bot's menu with the bot-id form of opcode 626 (`[626, botId]`), which a backend needs to serve before DM invocations can be offered at all.
+  </Accordion>
+
+  <Accordion title="DM history and DM slash commands: need a backend that honors wire version 3">
+    `fetchDmMessages()` and `fetchMessages(null, dmId)` read history on the DM cursor, and a `/command` picked from a DM dispatches only because the DM lane's message broadcast carries the command sidecar. Both come with wire version 3. On an older backend the DM read resolves empty and nothing dispatches from a DM. See [Direct messages](/guides/direct-messages#dm-history).
   </Accordion>
 </AccordionGroup>
 

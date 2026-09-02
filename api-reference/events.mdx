@@ -1,6 +1,6 @@
 ---
 title: "Events"
-description: "All 32 events a Client emits, when they fire, and what they carry."
+description: "All 39 events a Client emits, when they fire, and what they carry."
 ---
 
 The `Client` is an event emitter. You subscribe with `client.on(event, listener)`. The event map is fully typed, so your listener's arguments are inferred.
@@ -31,13 +31,16 @@ client.on('messageCreate', (msg) => {
 | `error` | [`CloakClientError`](/api-reference/errors#cloakclienterror) | The SDK caught a failure that would otherwise be silent. |
 | `messageCreate` | [`Message`](/api-reference/types#message) | A message arrives, from a channel **or a DM**. |
 | `systemMessage` | [`SystemMessageEvent`](/api-reference/types#systemmessageevent) | A system event happens, such as a member joining. |
-| `messageUpdate` | `{ messageId, content, serverId, channelId }` | A message was edited. |
-| `messageDelete` | `{ messageId, serverId, channelId }` | A message was deleted. |
-| `reactionUpdate` | `{ messageId, reactionId, count, userId, serverId, channelId }` | A reaction was added or removed. |
+| `messageUpdate` | `{ messageId, content, serverId, channelId, card? }` | A message was edited. `card` is present only when the edit replaced the card. `serverId` is `null` for a DM. |
+| `messageDelete` | `{ messageId, serverId, channelId }` | A message was deleted. `serverId` is `null` for a DM. |
+| `reactionUpdate` | `{ messageId, reactionId, count, userId, serverId, channelId }` | A reaction was added or removed. `serverId` is `null` for a DM. |
 | `pinUpdate` | `{ messageId, pinned, serverId, channelId }` | A message was pinned or unpinned. |
-| `pollUpdate` | `{ messageId, counts, totalVoters, serverId, channelId }` | A visible poll's tally changed or was revealed. |
+| `pollUpdate` | `{ messageId, counts, totalVoters, endsAt, serverId, channelId }` | A visible poll's tally changed or was revealed. |
 | `threadUpdate` | `ThreadInfo` | A thread was created or changed, or its membership moved. |
-| `threadDelete` | `{ threadId, serverId }` | A thread was deleted, or the bot lost access to a private one. |
+| `threadDelete` | `{ threadId, parentChannelId, serverId }` | A thread was deleted, or the bot lost access to a private one. |
+| `forumPostUpdate` | [`ForumPost`](/api-reference/types#forumpost) | A forum post was created or changed. |
+| `forumPostDelete` | `{ serverId, forumChannelId, postId }` | A forum post was deleted. |
+| `interaction` | [`Interaction`](/api-reference/types#interaction) | Someone clicked a button, picked from a select, or submitted a modal on a card your bot posted. |
 | `typing` | `{ userId, isTyping, serverId, channelId }` | Someone started or stopped typing. |
 | `sendRejected` | `{ code, message, permission?, serverId, channelId, frame }` | The server denied a `send()`. |
 | `channelCreate` | `{ channelId, name, groupId, type, serverId }` | A channel was created. |
@@ -61,6 +64,7 @@ client.on('messageCreate', (msg) => {
 | `disconnect` | `unknown` | The connection drops. |
 | `reconnecting` | `{ attempt, delayMs }` | A reconnect attempt is scheduled. |
 | `reconnected` | none | A reconnect succeeds. |
+| `draining` | `{ delayMs }` | The lane this connection is on is draining for a deploy. The client reconnects on its own after `delayMs`. |
 | `raw` | `unknown[]` | Any frame arrives, verbatim. |
 
 <Note>
@@ -71,9 +75,11 @@ client.on('messageCreate', (msg) => {
 
 ### messageCreate
 
-Fires for every message your bot can see. Because delivery is a [firehose](/concepts/message-delivery), that covers all visible channels across all servers.
+Fires for every message your bot can see. Because delivery is a [firehose](/concepts/message-delivery), that covers every visible text channel across every server, the threads under those channels, and the posts inside every visible forum channel.
 
-**It also fires for direct messages.** A DM arrives on this same event with `isDM: true` and a **null** `serverId`, and its `channelId` holds the dm id.
+**It also fires for direct messages.** A DM arrives on this same event with `isDM: true` and a **null** `serverId`, and its `channelId` holds the dm id. On a backend that honors wire version 3, your bot's own DM sends echo back here too, with `authorId === client.user.id`, and a DM message carries `createdAt`, `repliedTo`, and `card`. See [Direct messages](/guides/direct-messages#what-a-wire-version-3-backend-adds).
+
+**Forum posts arrive here too.** A message inside a forum post has `msg.postId` set, `msg.channelId` equal to that post id, and `msg.forumChannelId` carrying the parent forum. The post's first message never rides the firehose on its own: the SDK emits it from the post's create event as a `messageCreate` with `starter: true`, once, right before the matching `forumPostUpdate`. See [Forums](/guides/forums).
 
 ```ts
 client.on('messageCreate', async (msg) => {
@@ -109,6 +115,23 @@ Fires when a message is edited. `content` is the decrypted new text, best-effort
 ```ts
 client.on('messageUpdate', ({ messageId, content }) => {
   console.log(`message ${messageId} is now: ${content}`);
+});
+```
+
+The payload also carries `card` when the edit came through [`editCard()`](/api-reference/client#editcard). The three states mean different things:
+
+| `card` | Meaning |
+| --- | --- |
+| absent | The edit touched the text only. The message's existing card is unchanged. |
+| a [`MessageCard`](/api-reference/embeds#messagecard) | The edit replaced the card. This is the new embed and component rows. |
+| `null` | The edit carried a card the SDK could not decode. |
+
+`serverId` is `null` for a DM-lane edit, with `channelId` the dm id. The same is true of `messageDelete` and `reactionUpdate`. On a backend that honors wire version 3, a DM card that arrives after the message itself was already emitted also surfaces here, as a `messageUpdate` carrying `card`, so it is not lost.
+
+```ts
+client.on('messageUpdate', (e) => {
+  if (e.card === undefined) return; // a plain text edit
+  console.log(`card on ${e.messageId} now has ${e.card?.components.length ?? 0} rows`);
 });
 ```
 
@@ -183,7 +206,51 @@ Fires with a decoded thread row (title decrypted best-effort) on thread creation
 
 ### threadDelete
 
-Fires when a thread is deleted. For a private thread, being removed from its member list also arrives as a `threadDelete`, because the thread stops existing from the bot's point of view.
+Fires when a thread is deleted. For a private thread, being removed from its member list also arrives as a `threadDelete`, because the thread stops existing from the bot's point of view. The payload is `{ serverId, parentChannelId, threadId }`.
+
+## Forums
+
+New in 0.4.0. See [Forums](/guides/forums).
+
+### forumPostUpdate
+
+Fires with a decoded [`ForumPost`](/api-reference/types#forumpost) when a post is created, when a reply bumps its activity, when its archived, locked, pinned, or answered state flips, or when its tags are edited. It reaches every member who can view the parent forum, your bot included, and it fires for your bot's own posts too.
+
+The `title` is decrypted best-effort and is `''` when the key is missing. `starterContent` is the decrypted first message when the row carried it (the create event and `fetchForumPosts()` pages do; a later activity bump does not). `following` is the bot's own follow state where the row said, and `false` otherwise.
+
+```ts
+client.on('forumPostUpdate', (post) => {
+  console.log(`post ${post.postId} in ${post.forumChannelId}: "${post.title}" (${post.replyCount} replies)`);
+});
+```
+
+On the create path, the starter message arrives first as a `messageCreate` with `starter: true`, then this event fires. A redelivered create event never emits the starter twice.
+
+### forumPostDelete
+
+Payload `{ serverId, forumChannelId, postId }`. Fires when a post is deleted.
+
+## Interactions
+
+New in 0.4.0. See [Components](/guides/components) and [Modals](/guides/modals).
+
+### interaction
+
+Fires when someone clicks a button, picks from a select, or submits a modal on a card your bot posted. The payload is an [`Interaction`](/api-reference/types#interaction). It is addressed to your bot alone: it never rides the firehose, and a click on another bot's card in the same channel never reaches your handler.
+
+```ts
+client.on('interaction', async (i) => {
+  if (i.kind === 'button' && i.customId === 'approve') {
+    await i.ephemeral({ content: 'Approved.' });
+  }
+});
+```
+
+Answer every interaction with exactly one of `ack()`, `showModal()`, or `ephemeral()`. The clicker's control shows a pending state for up to 3 seconds while it waits. A second call rejects locally with a `CloakClientError` whose `source` is `'interaction'`, and nothing goes on the wire. An interaction the SDK cannot decrypt (no key for that server and epoch, or for that DM peer) emits [`error`](#error) and is dropped.
+
+<Note>
+  This event never fires for your bot's own actions. Bots do not click, and the server refuses a click from a bot session before reading it.
+</Note>
 
 ## Typing
 
@@ -357,6 +424,10 @@ client.on('reconnecting', ({ attempt, delayMs }) =>
 ```ts
 client.on('reconnected', () => console.log('back online'));
 ```
+
+### draining
+
+Payload `{ delayMs }`. Fires when the server lane your connection is on is being drained for a deploy. The client reconnects on its own after `delayMs`, so you do not need to act on it.
 
 ## Diagnostics
 

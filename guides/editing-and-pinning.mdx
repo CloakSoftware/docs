@@ -6,7 +6,7 @@ description: "Edit, delete, pin, and unpin server messages, and react to those c
 Your bot can change a message after it sends it, remove one, and pin or unpin it. It can also hear when any of that happens, including its own changes. This page covers `msg.edit()`, `msg.delete()`, `msg.pin()`, and `msg.unpin()`, plus the events that report each change.
 
 <Warning>
-  All four methods reject with a plain `Error` on a direct message, unconditionally and regardless of permissions. Direct messages arrive on the same `messageCreate` event as server messages, so guard with `if (msg.isDM || !msg.serverId) return;` before you capture or act on a message. Only `msg.reply()` and `msg.channel.send()` work in a DM.
+  `pin()` and `unpin()` reject with a plain `Error` on a direct message, unconditionally and regardless of permissions. `edit()`, `editCard()`, and `delete()` work on a DM message that carries `createdAt`, which needs a backend that honors wire version 3; on an older backend a DM message has no timestamp and those reject too, with a message saying why. Direct messages arrive on the same `messageCreate` event as server messages, so guard with `if (msg.isDM || !msg.serverId) return;` before anything server-scoped. See [Direct messages](/guides/direct-messages#what-a-wire-version-3-backend-adds).
 </Warning>
 
 ## Edit a message the bot sent
@@ -29,7 +29,7 @@ const client = new Client({
 let lastPost: Message | undefined;
 
 client.on('messageCreate', async (msg) => {
-  if (msg.isDM || !msg.serverId) return; // edit() rejects on a DM message
+  if (msg.isDM || !msg.serverId) return; // this bot edits in server channels only
   if (msg.authorId === client.user?.id) {
     lastPost = msg; // our own message, so remember it
     return;
@@ -44,6 +44,8 @@ client.on('messageCreate', async (msg) => {
   An edit is re-encrypted through the same lane as a fresh send, under the channel's **current** key. If the channel's key cycled between the original send and the edit, the edited text is stored under the newer key. Members who hold that key read it normally.
 </Note>
 
+`edit()` touches the text only. To replace a card's embed or its buttons, use `msg.editCard(card)`, which re-encrypts the text and the card together. See [Buttons and selects](/guides/components#retire-the-controls).
+
 ## Delete a message
 
 `msg.delete()` removes a message and returns `Promise<void>`. The server allows the author to delete their own message, or a member holding `message_manage` to delete another member's.
@@ -53,7 +55,7 @@ This is the method a moderation bot reaches for. Pre-gate with an advisory `can(
 ```ts
 client.on('messageCreate', async (msg) => {
   if (msg.authorId === client.user?.id) return; // ignore our own messages
-  if (msg.isDM || !msg.serverId) return; // delete() rejects on a DM message
+  if (msg.isDM || !msg.serverId) return; // can() needs a server id
   if (!msg.content.toLowerCase().includes('bannedword')) return;
   if (!client.can('message_manage', msg.serverId)) return;
   await msg.delete().catch((e) => console.error('delete failed', e));
@@ -85,7 +87,7 @@ await message.unpin();
 `edit()`, `delete()`, `pin()`, and `unpin()` all need the message's `createdAt`, because the server locates the row by its own send time. Live messages from the firehose and messages loaded with `fetchMessages` both carry it, so you rarely have to think about this.
 
 <Note>
-  If `createdAt` is missing, the call rejects with a plain `Error` before it ever reaches the server. That is a separate check from the DM rule above: a DM message rejects even when `createdAt` is present.
+  If `createdAt` is missing, the call rejects with a plain `Error` before it ever reaches the server. On a DM message that is the only gate for `edit()`, `editCard()`, and `delete()`: a DM that arrived through the legacy notify signal alone (a backend below wire version 3) carries no timestamp and rejects with a message saying so. `pin()` and `unpin()` reject on a DM even when `createdAt` is present.
 </Note>
 
 ## Handle a denied action
@@ -102,7 +104,7 @@ try {
     console.error(`the server refused the delete (${err.code}): ${err.message}`);
     if (err.permission) console.error(`missing ${err.permission}`);
   } else {
-    throw err; // a plain Error: a DM message, or no createdAt
+    throw err; // a plain Error: no createdAt, or pin() on a DM
   }
 }
 ```
@@ -157,12 +159,12 @@ client.on('pinUpdate', ({ messageId, pinned }) => {
 });
 ```
 
-<ResponseField name="messageUpdate" type="{ messageId, content, serverId, channelId }">
-  `content` is the decrypted new text, best-effort. When the key is missing it is an empty string, never raw ciphertext.
+<ResponseField name="messageUpdate" type="{ messageId, content, serverId, channelId, card? }">
+  `content` is the decrypted new text, best-effort. When the key is missing it is an empty string, never raw ciphertext. `card` is present only when the edit came through `editCard()` and replaced the card. `serverId` is `null` for a DM edit, with `channelId` the dm id. See [messageUpdate](/api-reference/events#messageupdate).
 </ResponseField>
 
 <ResponseField name="messageDelete" type="{ messageId, serverId, channelId }">
-  Fires when a message is removed.
+  Fires when a message is removed. `serverId` is `null` for a DM.
 </ResponseField>
 
 <ResponseField name="pinUpdate" type="{ messageId, pinned, serverId, channelId }">

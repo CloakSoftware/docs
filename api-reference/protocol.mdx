@@ -148,7 +148,7 @@ Success is `0` on all five, and each requires `manage_server` on the currently s
 | Name | Code | Notes |
 | --- | --- | --- |
 | `SET_BOT_COMMANDS` | 625 | The declaration payload is plaintext server-side. |
-| `GET_SERVER_COMMANDS` | 626 | Named but unused: a bot declares its own menu and reads nobody's. |
+| `GET_SERVER_COMMANDS` | 626 | Named but never sent by the SDK: a bot declares its own menu and reads nobody's. A human client sends `[626]` for a server's menus, and `[626, botId]` for one bot's menu when it opens a DM with that bot. |
 | `SERVER_COMMANDS_UPDATED` | 627 | Server push. A cache hint the SDK ignores. |
 | `RETRIEVE_EMOJI_LIST` | 240 | The static unicode catalog. |
 
@@ -270,7 +270,7 @@ Frame indices of opcode 636. One map covers both flavors, because the server bui
 | `TIME_MS` | 8 |
 | `CIPHERTEXT` | 9 |
 
-On the DM flavor, `SERVER_ID` is the literal `0` and `CHANNEL_ID` carries the dm id. There is no mention array, no reply array and no command data on this frame, which is why a DM message has no `repliedTo`.
+On the DM flavor, `SERVER_ID` is the literal `0` and `CHANNEL_ID` carries the dm id. There is no mention array, no reply array, no timestamp and no command data on this frame. From wire version 3 (`CLIENT_WIRE_VERSION`), a backend that honors it also puts the bot on the DM lane's ordinary message broadcast, which carries all of those plus the card slot; the SDK dedupes the two by message id. On an older backend this notify frame is the whole DM signal, which is why a DM message has no `repliedTo` or `createdAt` there.
 
 ### DM_NOTIFY_KIND
 

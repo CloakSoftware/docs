@@ -99,14 +99,17 @@ client.commands.register(
     await leave();
 
     // 3. Control plane. Deafened: the SFU then forwards this bot nothing.
-    //    Slash commands are never dispatched from a DM, so serverId is
-    //    non-null here.
-    conn = await client.joinVoice(ctx.message.serverId!, channelId, { deafened: true });
+    //    Voice is server-scoped, and since 0.4.0 a slash command can arrive
+    //    from a DM (ctx.serverId null), so narrow before joining.
+    if (!ctx.serverId) {
+      return void (await ctx.reply('run this in a server, not a DM'));
+    }
+    conn = await client.joinVoice(ctx.serverId, channelId, { deafened: true });
 
     // 4. Key lane. A bot never derives a voice key, a human member seals one
     //    to it. This waits for that, and it is the step that hangs if nobody
     //    holding the server key is online.
-    const voiceKey = await client.voiceKeys.acquireVoiceKey(ctx.message.serverId!);
+    const voiceKey = await client.voiceKeys.acquireVoiceKey(ctx.serverId);
 
     // 5. The scope is not this bot's choice: it is an authenticated tag
     //    inside the sealed blob. Publish-only means participant scope. Room
@@ -128,7 +131,7 @@ client.commands.register(
       url: conn.url,
       token: conn.token, // a live credential, never log it
       botId: client.user!.id,
-      serverId: ctx.message.serverId!,
+      serverId: ctx.serverId,
       voiceKey,
       keys: client.voiceKeys,
       deafened: conn.selfDeafened,

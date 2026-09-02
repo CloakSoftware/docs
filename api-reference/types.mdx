@@ -1,6 +1,6 @@
 ---
 title: "Types"
-description: "The objects the SDK hands you: Message, SendOptions, Member, Role, and the rest."
+description: "The objects the SDK hands you: Message, SendOptions, ForumPost, Interaction, Member, Role, and the rest."
 ---
 
 These are the data types you receive in event payloads and pass to `Client` methods. The SDK ships full TypeScript declarations, so your editor knows all of this already.
@@ -32,6 +32,10 @@ interface Message {
   poll: MessagePoll | null;
   threadId: string | null;
   threadParentId: string | null;
+  postId: string | null;
+  forumChannelId: string | null;
+  starter: boolean;
+  card: MessageCard | null;
   reply(text: string, opts?: SendOptions): Promise<void>;
   channel: { send(text: string, opts?: SendOptions): Promise<void> };
   react(reactionId: string): Promise<void>;
@@ -40,6 +44,7 @@ interface Message {
   delete(): Promise<void>;
   pin(): Promise<void>;
   unpin(): Promise<void>;
+  editCard(card: CardEdit): Promise<void>;
   pinned?: boolean;
   command?: CommandInvocation;
 }
@@ -84,13 +89,13 @@ interface Message {
 </ResponseField>
 
 <ResponseField name="createdAt" type="Date | null">
-  The server-generated send time, or `null` when the payload omitted it. `edit`, `delete`, `pin`, `unpin`, `react`, and `unreact` all need this value, so they reject when it is `null`. Live and fetched messages carry it.
+  The server-generated send time, or `null` when the payload omitted it. `edit`, `editCard`, `delete`, `pin`, `unpin`, `react`, and `unreact` all need this value, so they reject when it is `null`. Live server messages and fetched messages carry it. A DM message carries it on a backend that honors wire version 3, and not on an older one, where the legacy notify signal has no timestamp.
 </ResponseField>
 
 <ResponseField name="repliedTo" type="object | null">
   The context of the message this one replies to, or `null` for a normal message. Its `content` is the decrypted quote, decrypted against the key for the quote's own epoch, and is `''` when it cannot be decrypted. Compare `repliedTo.authorId` with `client.user?.id` to detect a reply to your bot.
 
-  Always `null` on a DM message.
+  On a DM message, set only on a backend that honors wire version 3. `null` on an older backend, whose notify frame carries no reply array.
 </ResponseField>
 
 <ResponseField name="mentions" type="MessageMentions">
@@ -121,6 +126,22 @@ interface Message {
   The thread's parent text channel, when the SDK knows it, resolved from its thread index. In practice `null` only when event ordering breaks; `reply()` on a thread message needs it and rejects without it.
 </ResponseField>
 
+<ResponseField name="postId" type="string | null">
+  The forum post this message was sent into, or `null`. When set, `channelId` is the same id and `threadId` is `null`. `reply()` and `channel.send()` route back into the post. See [Forums](/guides/forums).
+</ResponseField>
+
+<ResponseField name="forumChannelId" type="string | null">
+  The parent forum channel of `postId`, or `null`. Unlike a thread's parent, this is always known when `postId` is set, because a post frame carries it on the wire.
+</ResponseField>
+
+<ResponseField name="starter" type="boolean">
+  True for a forum post's first message. The starter never rides the ordinary message stream: the SDK emits it from the post's create event, once, with `messageId` equal to `ForumPost.starterMessageId`, right before the matching `forumPostUpdate`.
+</ResponseField>
+
+<ResponseField name="card" type="MessageCard | null">
+  The encrypted card this message carries, decrypted with the key for its own epoch: every embed that survived the read-side validator, plus the component rows. `null` for a plain message, and `null` (never a partial card) when the payload fails a cap or the media rule. Present on live messages and on `fetchMessages()` rows. On a DM message it is populated only on a backend that honors wire version 3, including the echo of your own `sendCardDM()`. See [MessageCard](/api-reference/embeds#messagecard).
+</ResponseField>
+
 <ResponseField name="pinned" type="boolean">
   Whether the message is pinned, when known. Present on messages from [`fetchMessages()`](/api-reference/client#fetchmessages) and after a [`pinUpdate`](/api-reference/events#pinupdate).
 </ResponseField>
@@ -128,7 +149,7 @@ interface Message {
 <ResponseField name="command" type="CommandInvocation | undefined">
   The slash-command invocation this message carries, when it is one your registry recognizes. Plain data with no back-reference to the message.
 
-  Filter with `if (msg.command) return;` in a `messageCreate` handler that also does its own text handling, so you do not process an invocation twice. Never set on fetched history or on your bot's own messages. See [CommandInvocation](/api-reference/commands#commandinvocation).
+  Filter with `if (msg.command) return;` in a `messageCreate` handler that also does its own text handling, so you do not process an invocation twice. Never set on fetched history (server or DM) or on your bot's own messages. Set on a DM message when the invocation came from the DM's `/` picker on a wire version 3 backend. See [CommandInvocation](/api-reference/commands#commandinvocation) and [CommandContext](/api-reference/commands#commandcontext) for the `serverId`, `dmId`, `channelId`, and `userId` a handler receives.
 </ResponseField>
 
 ### Methods
@@ -169,10 +190,14 @@ interface Message {
   Unpins the message.
 </ResponseField>
 
-`react`, `unreact`, `edit`, `delete`, `pin`, and `unpin` reject with [`CloakActionError`](/api-reference/errors) on a server deny.
+<ResponseField name="editCard" type="(card: CardEdit) => Promise<void>">
+  Replaces this message's card (embed and component rows) and re-encrypts its text in one edit. Author only, server-side. Fills in the location and `createdAt` that [`client.editCard()`](/api-reference/client#editcard) needs, including the `null` server id of a DM. Pass `components: []` to retire a card's buttons. See [Buttons and selects](/guides/components#retire-the-controls).
+</ResponseField>
+
+`react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, and `editCard` reject with [`CloakActionError`](/api-reference/errors) on a server deny.
 
 <Warning>
-  Those same six reject **unconditionally on a DM message**, with a plain `Error`, before anything reaches the wire. Permissions have nothing to do with it. Only `reply()` and `channel.send()` work on a DM.
+  `pin()` and `unpin()` reject **unconditionally on a DM message**, with a plain `Error`, before anything reaches the wire. The other five work on a DM message that carries `createdAt`, which needs a backend that honors wire version 3; without a timestamp they reject with a plain `Error` saying so. `reply()` and `channel.send()` work everywhere. See [Direct messages](/guides/direct-messages#what-a-wire-version-3-backend-adds).
 </Warning>
 
 `reply()` and `channel.send()` are fire-and-forget for delivery and do not reject on a deny. A denial arrives on [`sendRejected`](/api-reference/events#sendrejected). See [Handling errors](/guides/handling-errors).
@@ -188,6 +213,7 @@ interface SendOptions {
   replyTo?: ReplyTarget;
   poll?: PollCreate;
   threadId?: string;
+  postId?: string;
 }
 ```
 
@@ -214,7 +240,11 @@ interface SendOptions {
 </ResponseField>
 
 <ResponseField name="threadId" type="string">
-  Target this send at a thread of the channel. Pass the parent text channel as `channelId` and the thread's id here. Requires `send_in_thread`; a locked, deleted, or inaccessible private thread denies on [`sendRejected`](/api-reference/events#sendrejected). Not valid on DM sends. See [Threads](/guides/threads).
+  Target this send at a thread of the channel. Pass the parent text channel as `channelId` and the thread's id here. Requires `send_in_thread`; a locked, deleted, or inaccessible private thread denies on [`sendRejected`](/api-reference/events#sendrejected). Not valid on DM sends. Mutually exclusive with `postId`. See [Threads](/guides/threads).
+</ResponseField>
+
+<ResponseField name="postId" type="string">
+  Target this send at a forum post. Pass the parent **forum** channel as `channelId` and the post's id here. The SDK enters the post, which moves the session cursor, and sends the ordinary frame. A locked post denies `-18` on `sendRejected`; a send into the forum channel with no `postId` denies `-17`. Not valid on DM sends. Mutually exclusive with `threadId`. See [Forums](/guides/forums).
 </ResponseField>
 
 <Warning>
@@ -318,6 +348,211 @@ interface SystemMessageEvent {
 
 <ResponseField name="threadId" type="string">
   For `type: 'thread_created'`: the new thread's id. `channelId` is the parent text channel the system row lives in; the thread's title arrives on its own [`threadUpdate`](/api-reference/events#threadupdate). See [Threads](/guides/threads).
+</ResponseField>
+
+## ForumPost
+
+One post of a forum channel. The payload of [`forumPostUpdate`](/api-reference/events#forumpostupdate), the result of [`createForumPost()`](/api-reference/client#createforumpost), and each element of a [`fetchForumPosts()`](/api-reference/client#fetchforumposts) page.
+
+```ts
+interface ForumPost {
+  postId: string;
+  serverId: string;
+  forumChannelId: string;
+  title: string;
+  authorId: string;
+  authorName: string;
+  createdAt: Date | null;
+  lastActiveAt: Date | null;
+  replyCount: number;
+  tagIds: number[];
+  archived: boolean;
+  locked: boolean;
+  pinned: boolean;
+  answered: { messageId: string; at: Date | null; authorId: string } | null;
+  starterMessageId: string | null;
+  starterContent: string | null;
+  following: boolean;
+}
+```
+
+<ResponseField name="forumChannelId" type="string">
+  The parent forum channel the post lives in.
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Decrypted best-effort with the server key for the ciphertext's own epoch. `''` (never ciphertext) when the key is missing.
+</ResponseField>
+
+<ResponseField name="tagIds" type="number[]">
+  The applied tag ids. Resolve names through [`fetchForumMeta()`](/api-reference/client#fetchforummeta).
+</ResponseField>
+
+<ResponseField name="archived" type="boolean">
+  The computed archive verdict: the manual flag folded with the forum's lazy auto-archive.
+</ResponseField>
+
+<ResponseField name="locked" type="boolean">
+  A locked post rejects replies with `-18` on `sendRejected`.
+</ResponseField>
+
+<ResponseField name="answered" type="object | null">
+  The accepted answer, when the post is marked solved. Set with `setForumPostState(..., 'answered', msg)`.
+</ResponseField>
+
+<ResponseField name="starterMessageId" type="string | null">
+  The post's first message. `null` only on the row `createForumPost()` synthesizes when the server's own create event has not arrived in time.
+</ResponseField>
+
+<ResponseField name="starterContent" type="string | null">
+  The starter's decrypted body when the row carried it (a `fetchForumPosts()` page, or the create event). `null` otherwise, including on activity bumps.
+</ResponseField>
+
+<ResponseField name="following" type="boolean">
+  Whether this bot follows the post. Known from the rows that carry it; `false` when the row did not say.
+</ResponseField>
+
+## ForumTag
+
+One tag of a forum channel, carried on [`ForumMeta`](#forummeta). The name is end-to-end encrypted like a post title and decrypted best-effort.
+
+```ts
+interface ForumTag {
+  id: number;
+  name: string;
+  emoji: string;
+  moderated: boolean;
+}
+```
+
+`moderated: true` means only a member who may manage posts can apply it.
+
+## ForumMeta
+
+A forum channel's settings, returned by [`fetchForumMeta()`](/api-reference/client#fetchforummeta).
+
+```ts
+interface ForumMeta {
+  serverId: string;
+  forumChannelId: string;
+  tags: ForumTag[];
+  guidelines: string;
+  requireTag: boolean;
+  defaultSort: 'activity' | 'created';
+  autoArchiveDays: number;
+  defaultReaction: string;
+  totalPosts: number;
+}
+```
+
+`guidelines` is decrypted best-effort and `''` when absent or the key is missing. `requireTag: true` means `createForumPost()` without a tag denies `-4`.
+
+## ForumPostStateFieldName
+
+The `field` argument of [`setForumPostState()`](/api-reference/client#setforumpoststate).
+
+```ts
+type ForumPostStateFieldName = 'archived' | 'locked' | 'pinned' | 'answered' | 'move';
+```
+
+## Interaction
+
+The payload of the [`interaction`](/api-reference/events#interaction) event: one click, select, or modal submit on a card your bot posted. It was encrypted by the clicker with the conversation key and pushed to your bot alone.
+
+```ts
+interface Interaction {
+  id: string;
+  kind: 'button' | 'select' | 'modal';
+  customId: string;
+  values: string[];
+  fields: Record<string, string>;
+  parentId: string | null;
+  userId: string;
+  botId: string;
+  messageId: string;
+  serverId: string | null;
+  channelId: string;
+  threadId: string | null;
+  postId: string | null;
+  createdAt: Date | null;
+  ack(): Promise<void>;
+  showModal(def: ModalDefinition): Promise<void>;
+  ephemeral(reply: EphemeralMessage): Promise<void>;
+}
+```
+
+### Fields
+
+<ResponseField name="id" type="string">
+  The server-minted interaction id. Valid for 15 minutes after the click.
+</ResponseField>
+
+<ResponseField name="kind" type="'button' | 'select' | 'modal'">
+  What produced it.
+</ResponseField>
+
+<ResponseField name="customId" type="string">
+  The button's, select's, or modal's `customId`, verbatim.
+</ResponseField>
+
+<ResponseField name="values" type="string[]">
+  A select's chosen option values. Empty for a button or a modal.
+</ResponseField>
+
+<ResponseField name="fields" type="Record<string, string>">
+  A modal's input values keyed by input `customId`. Empty otherwise.
+</ResponseField>
+
+<ResponseField name="parentId" type="string | null">
+  For a modal submit, the id of the click that opened it. For a click on a row inside an ephemeral reply, the interaction that produced that reply. `null` otherwise.
+</ResponseField>
+
+<ResponseField name="userId" type="string">
+  Who clicked, normalized.
+</ResponseField>
+
+<ResponseField name="botId" type="string">
+  The addressed bot. Always this one: the SDK drops clicks addressed to another bot.
+</ResponseField>
+
+<ResponseField name="messageId" type="string">
+  The message the control lives on. A click inside an ephemeral reply carries the **original** message id.
+</ResponseField>
+
+<ResponseField name="serverId" type="string | null">
+  The server, or `null` for a click inside a DM.
+</ResponseField>
+
+<ResponseField name="channelId" type="string">
+  The id the message lives in: a thread or post id when inside one, the dm id in a DM.
+</ResponseField>
+
+<ResponseField name="threadId" type="string | null">
+  Set when `channelId` is a thread the SDK's thread index knows.
+</ResponseField>
+
+<ResponseField name="postId" type="string | null">
+  Set when `channelId` is a forum post the SDK's post index knows.
+</ResponseField>
+
+<ResponseField name="createdAt" type="Date | null">
+  When the click happened. This is not the message's send time, so it cannot be passed to `editCard()`.
+</ResponseField>
+
+### Methods
+
+Answer with **exactly one** of these. A second call rejects locally with a [`CloakClientError`](/api-reference/errors#cloakclienterror) whose `source` is `'interaction'`, before any frame goes out, and the server refuses it too. A server-side refusal rejects with [`CloakActionError`](/api-reference/errors#interaction-responses).
+
+<ResponseField name="ack" type="() => Promise<void>">
+  Clear the clicker's pending state and show nothing.
+</ResponseField>
+
+<ResponseField name="showModal" type="(def: ModalDefinition) => Promise<void>">
+  Open a modal on the clicker's screen. Its submit arrives as a fresh `interaction` with `kind: 'modal'` and `parentId` equal to this id. Validated locally before anything is encrypted. See [Modals](/guides/modals).
+</ResponseField>
+
+<ResponseField name="ephemeral" type="(reply: EphemeralMessage) => Promise<void>">
+  Show the clicker, and nobody else, a reply under the message. Never stored. Rows inside it are clickable. See [EphemeralMessage](/api-reference/embeds#ephemeralmessage).
 </ResponseField>
 
 ## Member

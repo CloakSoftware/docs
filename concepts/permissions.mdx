@@ -135,6 +135,10 @@ Without `voice_listen`:
 
 Grant `voice_listen` deliberately in the other direction too: a bot that holds it is given the room key and can decrypt everyone in the channel. That is what the permission means. See [Voice keys and scopes](/voice/keys).
 
+## Forums add no names
+
+There is no `create_posts` or `manage_posts` permission, and there never will be. The server's create-posts capability bottoms out at `message_send`, resolved against the forum channel (which may override it per channel), so creating a post and sending inside one need `message_send`, and `can('message_send', serverId)` is the pre-check. Moderating other members' posts (`editForumPost()`, `setForumPostState()`) needs `message_manage`. Because a per-channel override can deny what the server-wide grant allows, still catch the `CloakActionError`. See [Forums](/guides/forums).
+
 ## Permission names
 
 You declare and query permissions by name: `message_send`, `member_ban`, `manage_channels`, `administrator`, and 27 more. The names are stable, and the integer codes they map to are the wire contract.

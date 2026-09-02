@@ -65,8 +65,8 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 
 | Name | Code | Controls |
 | --- | --- | --- |
-| `message_send` | 14 | Send messages. |
-| `message_manage` | 15 | Manage other members' messages, such as deleting them. |
+| `message_send` | 14 | Send messages. Also gates creating a forum post and sending inside one, resolved against the forum channel. |
+| `message_manage` | 15 | Manage other members' messages, such as deleting them. Also gates moderating other members' forum posts. |
 | `embed_link` | 16 | Post links that render as unfurled previews. Current backends also enforce it for [`sendCard()`](/api-reference/client#sendcard). |
 | `upload_file` | 17 | Attach files. |
 | `reaction_add` | 18 | Add reactions to messages. |
@@ -85,6 +85,8 @@ If your bot holds `administrator` in a server, [`can()`](/api-reference/client#c
 | `manage_threads` | 42 | Archive, lock, rename, and delete any thread, and see private threads uninvited. |
 
 New in SDK 0.3.0, and what [`createThread()`](/api-reference/client#createthread) and thread sends gate on. See [Threads](/guides/threads).
+
+Forums have no equivalent names. Creating a post and sending inside one is `message_send` on the forum channel, and moderating other members' posts is `message_manage`. See [Forums](/guides/forums).
 
 ## Operations
 

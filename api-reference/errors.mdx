@@ -1,6 +1,6 @@
 ---
 title: "Errors"
-description: "The six error classes the SDK throws, and which one reaches you from where."
+description: "The error classes the SDK throws, and which one reaches you from where."
 ---
 
 The SDK has one error class per failure domain, so `instanceof` tells you what went wrong without parsing a message. For the practical pattern, see [Handling errors](/guides/handling-errors).
@@ -12,6 +12,7 @@ import {
   CloakEnvironmentError,
   CloakRestError,
   CloakEmbedError,
+  CloakComponentError,
   CloakWebhookError,
 } from '@cloak-software/bot-sdk';
 ```
@@ -19,10 +20,11 @@ import {
 | Class | Means | Reaches you as |
 | --- | --- | --- |
 | `CloakActionError` | The server denied an action. | A rejected promise from the call. |
-| `CloakClientError` | The SDK's own plumbing failed. | The [`error`](/api-reference/events#error) event. |
+| `CloakClientError` | The SDK's own plumbing failed, or an interaction was answered twice. | The [`error`](/api-reference/events#error) event, or a rejected second response. |
 | `CloakEnvironmentError` | The host is wrong, not your bot. | A rejected promise, usually from `login()` or the audio path. |
 | `CloakRestError` | An HTTP leg of the REST lane failed. | A rejected promise from `client.rest.*`. |
-| `CloakEmbedError` | A card was refused locally, before the wire. | A rejected promise from `sendCard()`. |
+| `CloakEmbedError` | A card was refused locally, before the wire. | A rejected promise from `sendCard()`, `editCard()`, `createForumPost()`, or `Interaction.ephemeral()`. |
+| `CloakComponentError` | A component row or modal was refused locally, before the wire. | A rejected promise from the same calls, plus `Interaction.showModal()`. |
 | `CloakWebhookError` | A webhook POST failed. | A rejected promise from `webhooks.post()` or `sendEmbed()`. |
 
 <Note>
@@ -67,11 +69,13 @@ class CloakActionError extends Error {
 
 Every awaited action the server can refuse:
 
-- **Message actions**: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`.
+- **Message actions**: `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, `editCard`, in a server channel or (from wire version 3) a DM.
+- **Forums**: `createForumPost`, `fetchForumPosts`, `fetchForumMeta`, `editForumPost`, `setForumPostState`, `followForumPost`. See [Forum posts](#forum-posts).
+- **Interactions**: `Interaction.ack`, `showModal`, and `ephemeral`, when the server refuses the response. See [Interaction responses](#interaction-responses).
 - **Moderation**: `kick`, `ban`, `unban`, `timeout`, `removeTimeout`, `fetchBans`.
 - **Channels and groups**: `createChannel`, `editChannel`, `deleteChannel`, `moveChannel`, `createGroup`, `editGroup`, `deleteGroup`.
 - **Reads**: `fetchRoles`, `fetchEmojis`, and `fetchMessages` when read history is denied.
-- **Direct messages**: `sendDM`, on the create and key-exchange legs. An ineligible target is refused here.
+- **Direct messages**: `sendDM` and `sendCardDM`, on the create and key-exchange legs. An ineligible target is refused here.
 - **Presence**: `setStatus`.
 - **Voice**: `joinVoice` and `leaveVoice`.
 - **Commands**: `sendCommand`.
@@ -101,6 +105,120 @@ try {
 }
 ```
 
+### Forum posts
+
+The forum methods reject with negative codes. None of them maps to a named permission, because each verdict folds more than one server-side check, so `permission` is always `undefined` here and `message` is what to show. The capabilities the messages name resolve to ordinary permissions: creating a post is `message_send` on the forum, and managing posts is `message_manage`. See [Forums](/guides/forums).
+
+<AccordionGroup>
+  <Accordion title="createForumPost (opcode 750)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Post creation denied (not a member, or missing the create-posts capability, which resolves to `message_send` on the forum) |
+    | `-3` | Bad post title (empty or over the ciphertext cap), or an empty body |
+    | `-4` | Tag violation (unknown tag, a moderated tag without the manage-posts capability (`message_manage`), or a required tag missing) |
+    | `-5` | This forum is at its post cap |
+    | `-6` | Not a forum channel |
+    | `-7` | The starter message was denied (send, embed, or poll permission on the forum) |
+    | `-8` | Server error while creating the post |
+  </Accordion>
+  <Accordion title="Entering a post (opcode 751)">
+    Issued by the SDK before any action that takes `postId`.
+
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Wrong server selected, or no view permission on the forum |
+    | `-3` | No such post under that forum |
+  </Accordion>
+  <Accordion title="fetchForumPosts (opcode 752)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Not a member of that server, or no view permission on the forum |
+    | `-3` | Not a forum channel, or a server error while reading the posts |
+  </Accordion>
+  <Accordion title="editForumPost (opcode 754)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Edit denied (not the author, and no manage-posts capability, which resolves to `message_manage`) |
+    | `-3` | No such post under that forum |
+    | `-4` | Tag violation (unknown tag, a moderated tag without the manage-posts capability (`message_manage`), or a required tag missing) |
+    | `-5` | Bad post title (empty or over the ciphertext cap) |
+  </Accordion>
+  <Accordion title="setForumPostState (opcode 755)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | State change denied (not the author for this field, and no manage-posts capability, which resolves to `message_manage`) |
+    | `-3` | No such post under that forum |
+    | `-4` | Bad field or value |
+    | `-5` | The target forum is at its post cap |
+    | `-6` | The move target is not a forum channel |
+  </Accordion>
+  <Accordion title="followForumPost (opcode 756)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Follow denied (not a member, or no view permission on the forum) |
+    | `-3` | No such post under that forum |
+  </Accordion>
+  <Accordion title="fetchForumMeta (opcode 757)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Not a member of that server, or no view permission on the forum |
+    | `-3` | Not a forum channel, or a server error while reading its settings |
+  </Accordion>
+  <Accordion title="Updating forum settings (opcode 758, raw lane only)">
+    The SDK has no method for this. The table exists so a raw-frame deny still reads as itself.
+
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Settings change denied (missing `message_manage`) |
+    | `-3` | Not a forum channel |
+    | `-4` | Bad field or value |
+    | `-5` | This forum is at its tag cap |
+  </Accordion>
+</AccordionGroup>
+
+`reactToStarter()` is fire-and-forget on the wire and a denial produces no frame, so it never rejects with one of these.
+
+### Interaction responses
+
+`Interaction.ack()`, `showModal()`, and `ephemeral()` reject with these when the server refuses the response. The one you are most likely to see is `-3`: the click was more than 15 minutes ago. See [Buttons and selects](/guides/components).
+
+<AccordionGroup>
+  <Accordion title="Responding to an interaction (opcode 796)">
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Not a bot session, or the kind and ciphertext disagree (an ack carries no payload; a modal and an ephemeral carry one) |
+    | `-3` | No such interaction (it expired, 15 minutes after the click) |
+    | `-4` | This interaction was already answered |
+    | `-5` | This interaction addresses another bot |
+    | `-6` | The response payload is over the 16 KiB wire cap |
+    | `-8` | Server error while recording the response |
+  </Accordion>
+  <Accordion title="Sending a click (opcode 794, never sent by the SDK)">
+    This is the clicker's opcode. A bot session is refused with `-2` before the frame is read, so the SDK never sends it. The table exists so a raw-frame author reading `[794, -2]` learns why.
+
+    | Code | Meaning |
+    |---|---|
+    | `-1` | Not authenticated |
+    | `-2` | Bad frame, or sent from a bot session (bots never click) |
+    | `-3` | No view permission on that channel (or not a participant of that DM) |
+    | `-4` | The addressed bot is not a member of that server (or DM) |
+    | `-5` | Rate limited (5 clicks per user per message per 10 seconds) |
+    | `-6` | The interaction payload is over the 16 KiB wire cap |
+    | `-8` | Server error while recording the interaction |
+  </Accordion>
+</AccordionGroup>
+
+A second response to the same interaction never reaches the server. It is refused locally with a [`CloakClientError`](#cloakclienterror) whose `source` is `'interaction'`.
+
 ## Denied sends
 
 `send()` has no success acknowledgement on the wire, so its promise resolves once the frame is out. A server-side denial arrives afterwards, on the [`sendRejected`](/api-reference/events#sendrejected) event.
@@ -124,7 +242,7 @@ The payload is `{ code, message, permission?, serverId, channelId, frame }`, wit
 
 ## CloakClientError
 
-Something failed inside the SDK's own plumbing: one of your handlers threw, a key pull died, or an inbound frame could not be dispatched. It surfaces on the [`error`](/api-reference/events#error) event rather than as a rejection, because there is no call for it to reject.
+Something failed inside the SDK's own plumbing: one of your handlers threw, a key pull died, or an inbound frame could not be dispatched. It surfaces on the [`error`](/api-reference/events#error) event rather than as a rejection, because there is no call for it to reject. The one exception is `source: 'interaction'`, which is a rejected promise: the second of two responses to the same interaction.
 
 ```ts
 class CloakClientError extends Error {
@@ -135,7 +253,7 @@ class CloakClientError extends Error {
 ```
 
 <ResponseField name="source" type="CloakErrorSource">
-  Where it came from: `'listener'`, `'frame'`, `'keys'`, `'transport'`, or `'reconnect'`.
+  Where it came from: `'listener'`, `'frame'`, `'keys'`, `'transport'`, `'reconnect'`, or `'interaction'`.
 </ResponseField>
 
 <ResponseField name="context" type="string | undefined">
@@ -153,6 +271,7 @@ class CloakClientError extends Error {
 | `keys` | A key pull, a key fetch, or an unwrap failed. |
 | `transport` | The wire itself. |
 | `reconnect` | The reconnect path. |
+| `interaction` | An inbound click could not be decrypted or parsed (on the `error` event), or a second `ack()`, `showModal()`, or `ephemeral()` was called on one interaction (a rejected promise, with nothing sent). |
 
 ```ts
 client.on('error', (e) => {
@@ -245,6 +364,27 @@ class CloakEmbedError extends Error {
 </ResponseField>
 
 `'media-host'` is the one you are most likely to hit: card media must be Cloak-hosted, and there is deliberately no flag that widens it. See [Rich cards](/guides/rich-cards).
+
+## CloakComponentError
+
+A component row, a modal definition, or an ephemeral reply's rows were refused, thrown locally before anything reaches the wire. Raised by `sendCard()`, `editCard()`, `createForumPost()`, `Interaction.ephemeral()`, and `Interaction.showModal()`, and by `assertComponents()` and `assertModal()` when you call them yourself.
+
+```ts
+class CloakComponentError extends Error {
+  readonly reason: CloakComponentErrorReason;
+  readonly field?: string;
+}
+```
+
+<ResponseField name="reason" type="CloakComponentErrorReason">
+  `'shape'` for a wrong type, an unknown key, a missing required key, or a duplicate id. `'cap'` for a value over one of the pinned caps.
+</ResponseField>
+
+<ResponseField name="field" type="string | undefined">
+  The offending path, for example `'components[1].components[0].label'`.
+</ResponseField>
+
+Every cap is listed under [Component constants](/api-reference/embeds#component-constants). The client parser enforces the same caps and drops a card whole on a violation, which is why the SDK refuses it first. See [Buttons and selects](/guides/components).
 
 ## CloakWebhookError
 
