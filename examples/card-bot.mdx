@@ -37,8 +37,8 @@ const client = new Client({
 function buildStatusCard(run: number, withLogo: boolean) {
   return {
     title: `Build #${run} passed`,
-    // Put everything a reader must actually SEE in `description`. `fields`
-    // render on desktop only today, and mobile drops the rows silently.
+    // Put everything a reader must actually SEE in `description`. A mobile
+    // build older than the 0.4.0 client release drops `fields` silently.
     description: ['42 tests, 0 failures', 'main @ 9f2a1c, 1m 12s', 'deployed to staging'].join('\n'),
     // Either a "#rrggbb" string or a decimal int (0x22c55e). Both render.
     color: '#22c55e',
@@ -169,10 +169,10 @@ Then, in any text channel the bot can see: `!build` posts the card, `!logo` post
 
   <Accordion title="Put the substance in description" icon="align-left">
     <Warning>
-      `embed.fields` render on **desktop only** today. Mobile drops the rows silently, with no error anywhere. A card whose data lives in a fields grid is invisible to every mobile user, and nothing tells the author.
+      `embed.fields` render on desktop and mobile from the client release that ships with SDK 0.4.0. A mobile build **older than that** drops the rows silently, with no error anywhere, and nothing tells the author.
     </Warning>
 
-    Until the mobile port lands, put anything a reader must see in `description` and treat `fields` as decoration. `description` is plain text, not markdown: v1 renders it literally, which is why the example joins its lines with `\n`.
+    Until your server's members have updated, put anything a reader must see in `description` and treat `fields` as decoration. `description` is plain text, not markdown: v1 renders it literally, which is why the example joins its lines with `\n`.
   </Accordion>
 
   <Accordion title="Refusals are local, loud, and typed" icon="triangle-exclamation">

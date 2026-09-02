@@ -160,18 +160,18 @@ Every value is also exported as a constant. See the [embeds reference](/api-refe
 
 An embed must have something renderable, or `sendCard()` throws with `reason: 'empty'`. At least one of `title`, `description`, `thumbnail`, `image`, `author.name`, `provider.name`, `footer.text` or `fields` is required. A card carrying only `url`, `color` and `timestamp` draws nothing at all.
 
-### Fields are desktop-only today
+### Fields and older mobile builds
+
+`embed.fields` render on desktop and mobile from the client release that ships with SDK 0.4.0, in the same three-column grid on both, with an `inline: false` row taking the full width.
 
 <Warning>
-  `embed.fields` render on desktop only. Mobile drops the rows silently, with no error anywhere and nothing for you to notice. The fields grid is not ported yet.
-
-  Put anything a reader must actually see in `description`, and treat `fields` as decoration until the port lands.
+  A mobile build older than that release drops the rows silently, with no error anywhere and nothing for you to notice. Until your server's members have updated, keep anything a reader must actually see in `description` and treat `fields` as decoration.
 </Warning>
 
 ```ts
 const embed = {
   title: 'Build #4821 passed',
-  // Every mobile user sees this line. Keep the substance here.
+  // Every reader sees this line, on any client build. Keep the substance here.
   description: '42 tests, 0 failures\nmain @ 9f2a1c, 1m 12s',
   fields: [
     { name: 'Duration', value: '1m 12s', inline: true },

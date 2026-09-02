@@ -119,10 +119,10 @@ There is deliberately **no option, environment variable or flag** that widens th
 
 Where a Cloak-hosted URL comes from today: an asset a human uploaded through the Cloak app, your bot's own avatar, or a room icon. [File attachments](/guides/file-attachments) do not produce card media: `sendFile()` uploads end-to-end encrypted blobs, not publicly fetchable media on that origin.
 
-### `fields` render on desktop only
+### `fields` and older mobile builds
 
 <Warning>
-  Card `fields` render on **desktop only** today. Mobile drops the rows silently, with no error anywhere. Put anything a reader must actually see in `description`, and treat `fields` as decoration until the mobile port lands.
+  Card `fields` render on desktop and mobile from the client release that ships with SDK 0.4.0. A mobile build **older than that** drops the rows silently, with no error anywhere. Until your server's members have updated, keep anything a reader must actually see in `description` and treat `fields` as decoration. The same release is the one that renders component rows, so a member who sees your buttons also sees your fields.
 </Warning>
 
 Three keys that exist on the webhook lane and do not exist on the card lane: `video` (removed entirely, passing it throws), `provider.icon`, and unknown keys (rejected rather than silently dropped, because the renderer would drop them while they still counted against the payload budget).

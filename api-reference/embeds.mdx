@@ -168,11 +168,11 @@ Field names are wire names, in `snake_case`. Do not camelCase them.
 </ResponseField>
 
 <ResponseField name="fields" type="BotEmbedField[]">
-  Up to 8 rows. Desktop only today, see the warning below.
+  Up to 8 rows, in a three-column grid. `inline: false` takes a full row. See the warning below about older mobile builds.
 </ResponseField>
 
 <Warning>
-  `fields` render on desktop only. Mobile drops the rows silently, with no error anywhere. Put anything a reader must see in `description` and treat `fields` as decoration.
+  `fields` render on desktop and mobile from the client release that ships with SDK 0.4.0. A mobile build older than that drops the rows silently, with no error anywhere, so until your server's members have updated, keep anything a reader must see in `description`.
 </Warning>
 
 There is no index signature. Unknown keys are rejected, because the renderer drops them while they still count against the payload budget. `video` is rejected by name.
