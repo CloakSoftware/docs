@@ -888,6 +888,14 @@ voiceConnection(): VoiceConnection | null
 
 The bot's own voice membership, or `null`. A synchronous cache read.
 
+### voiceConnectionReporter
+
+```ts
+voiceConnectionReporter(): (state: 0 | 1) => void
+```
+
+The connection-state sender a `VoiceMediaSession` needs. Pass the result as `VoiceMediaOptions.connectionReporter` on every `attach()`. On a current backend the report a server-voice session sends before it publishes is what admits the microphone, and `attach()` waits for that admission (bounded by `admissionTimeoutMs`) before publishing. A session without the reporter skips the wait and is silent with no error. No-op when the bot is not in voice or is in a DM call, and it never throws. See [Microphone admission](/voice/audio#microphone-admission).
+
 ### setVoiceSelfState
 
 ```ts

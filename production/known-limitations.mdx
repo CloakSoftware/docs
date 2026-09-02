@@ -75,6 +75,10 @@ A bot never gets a subscription tier, and the backend restricts a bot's publish 
 
 They remain on the type for compatibility with code written before the removal.
 
+### Server voice is microphone-clamped until the bot reports its connection
+
+A current Cloak backend mints a server-voice credential with the microphone withheld and admits it only after the bot reports its media connection up. `VoiceMediaSession.attach()` sends that report through `VoiceMediaOptions.connectionReporter` before it publishes and waits for the admission, up to `admissionTimeoutMs` (default 5 s). A session attached **without** `connectionReporter: client.voiceConnectionReporter()` skips the wait and publishes into a void: the publish succeeds locally, the SFU forwards nothing, and nothing reports it beyond a warning under `debug`. An older single-phase backend is unaffected, which is why a bot that worked there goes silent after a backend upgrade. Pass the reporter on every attach. See [Microphone admission](/voice/audio#microphone-admission).
+
 ### A bot cannot detect a voice encryption failure
 
 The voice media engine surfaces **no per-participant end-to-end encryption failure state**. The generic encryption-error event carries no identity, missing-key and decryption-failed conditions are dropped, and a keyless frame decryptor retries quietly forever. The one per-participant event that exists reports that frames are _marked_ encrypted and stays true through the exact key and identity mismatch cases you would want it to catch.

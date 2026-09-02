@@ -33,7 +33,8 @@ if (voiceKey.scope !== 'participant') {
   throw new Error('this server granted voice_listen; this bot is publish-only');
 }
 
-// 4. Media. attach() installs the key BEFORE publishing, and that order is
+// 4. Media. attach() installs the key, reports the connection up and waits
+//    for the microphone admission, and only then publishes. That order is
 //    load-bearing.
 const session = await VoiceMediaSession.attach({
   url: conn.url,
@@ -43,6 +44,8 @@ const session = await VoiceMediaSession.attach({
   voiceKey,               // for the scope and the length check
   keys,                   // where frame keys actually come from
   deafened: conn.selfDeafened,
+  connectionReporter: client.voiceConnectionReporter(), // admits the microphone; see below
+  // admissionTimeoutMs: 5000,                          // how long to wait for it
 });
 
 // 5. Resolves at the end of the track, and REJECTS if the decoder exits non-zero.
@@ -51,6 +54,10 @@ await session.player.play(ffmpegResource('./track.mp3'));
 await session.detach();
 await client.leaveVoice();
 ```
+
+<Warning>
+  **Microphone admission.** A current Cloak backend mints a server-voice credential with the microphone withheld. The SFU grants it only after the bot reports its connection up, which `attach()` does through `connectionReporter` before it publishes, then waits for the grant to land. Leave the reporter out and there is no wait: the publish goes straight out, succeeds locally, and the SFU forwards nothing. Silence, no error, and only a warning under `debug`. Pass `connectionReporter: client.voiceConnectionReporter()` on every attach. It is a no-op when the bot is not in voice, so it is always safe. See [Microphone admission](#microphone-admission).
+</Warning>
 
 ## VoiceMediaSession.attach
 
@@ -102,6 +109,14 @@ VoiceMediaSession.attach(options: VoiceMediaOptions): Promise<VoiceMediaSession>
   Room scope only. The channel count of every received `PcmFrame`. The engine downmixes or upmixes. Fixed at attach. Mono is the default because a voice channel is mono at the source and speech-to-text input wants mono.
 </ParamField>
 
+<ParamField path="connectionReporter" type="(state: 0 | 1) => void">
+  The connection-state sender. Pass `client.voiceConnectionReporter()`. Not optional in practice: without it a server-voice credential stays microphone-clamped on a current backend. `attach()` calls it with `0` before the publish, once the identity and key checks have passed, re-sends it every second until the admission lands or `admissionTimeoutMs` runs out, and calls it with `1` then `0` around an engine reconnect. Never from `detach()`. A plain function, so the media module never imports `Client`.
+</ParamField>
+
+<ParamField path="admissionTimeoutMs" type="number" default="5000">
+  How long `attach()` waits for the microphone admission after reporting the connection up. It polls the local participant's `canPublish` permission every 100 ms, the only signal the engine exposes. On timeout it still publishes once, because an older single-phase backend never flips the flag but its credential already allows publishing; if that publish rejects, `attach()` fails closed with an error naming the two-phase admission, `connectionReporter`, and this option. Ignored without a `connectionReporter`.
+</ParamField>
+
 <ParamField path="debug" type="boolean" default="false">
   Logs which key fingerprint was installed under which identity. Never logs key material.
 </ParamField>
@@ -129,10 +144,33 @@ Every step fails closed, because every failure mode in this path is otherwise si
   <Step title="Room scope only: install every other identity">
     Everyone already in the channel, plus a hook so late joiners get one too.
   </Step>
+  <Step title="Report the connection up and wait for admission">
+    With a `connectionReporter`. The report goes out through it, the reconnect bracket is wired, and `attach()` polls the local participant's `canPublish` permission every 100 ms, re-sending the report every second, until it flips or `admissionTimeoutMs` (default 5 s) runs out. On a current backend this is what admits the microphone: the credential was minted without it, and the backend re-applies the bot's durable grant when it sees the report. Without a reporter there is no wait, and `attach()` warns under `debug`.
+  </Step>
   <Step title="Publish, only now">
-    The local frame encryptor is created at publish time. With no key filed for the bot's identity, frames are dropped rather than sent in the clear.
+    The local frame encryptor is created at publish time. With no key filed for the bot's identity, frames are dropped rather than sent in the clear. After a timed-out wait the publish is still attempted once, because an older single-phase backend never flips the flag but its credential already allows it. If that publish rejects, `attach()` fails closed with an error naming the two-phase admission, `connectionReporter`, and `admissionTimeoutMs`. A publish that rejects after a successful admission is rethrown as is.
   </Step>
 </Steps>
+
+### Microphone admission
+
+A current Cloak backend admits a server-voice microphone in two phases. The join credential from `joinVoice()` carries no publish grant. After the media connection is up, the bot reports it (`[621, 0]` on the wire), and the backend re-resolves the bot's durable grant and applies it through the media control plane. Only then does the SFU forward the bot's audio.
+
+`attach()` does the reporting for you when you pass `connectionReporter: client.voiceConnectionReporter()`. The order is fixed, and it is the desktop client's order: connect, install keys, report `0`, wait for the admission, then publish. The wait polls the local participant's `canPublish` permission every 100 ms (the engine exposes no permissions event, so polling is the honest option), re-sends the report every second while the flag stays false, and gives up after `admissionTimeoutMs` (default 5 s). Around an engine reconnect the session reports `1` (reconnecting) then `0` (recovered), which re-arms the backend's reconnect grace and re-admits the microphone. `detach()` reports nothing; `leaveVoice()` is what tells the backend the session is gone.
+
+What happens at the end of the wait:
+
+| Outcome | What `attach()` does |
+| --- | --- |
+| `canPublish` flipped | Publishes. A publish that rejects here is rethrown as is: it is a media problem, not the clamp. |
+| Timed out | Publishes once anyway, because an older single-phase backend never flips the flag but its credential already allows it. If that publish rejects, `attach()` fails closed with an error naming the two-phase admission, `connectionReporter`, and `admissionTimeoutMs`, and detaches. |
+| No reporter | No wait at all. The publish goes straight out, which is the old behavior: it succeeds locally on a two-phase backend and the SFU forwards nothing. A warning under `debug`. |
+
+<Warning>
+  The wait is a bounded best effort, not a health check. Nothing confirms the admission reached the SFU beyond the `canPublish` flag, and a missing reporter produces the same silence as every other failure on this path. A bot that passes the reporter works on both a current two-phase backend and an older single-phase one.
+</Warning>
+
+The reporter is a no-op when the bot is not in voice, and in a DM call, which the backend does not clamp. Sending the report twice is harmless: the backend re-applies the same grant.
 
 ### Session surface
 
@@ -143,7 +181,7 @@ Every step fails closed, because every failure mode in this path is otherwise si
 | `scope` | `'participant' \| 'room'` | Read-only. Not something a bot picks. |
 | `installedIdentities` | `readonly string[]` | Every identity this session filed a key for. In participant scope this is exactly one. |
 | `setVoiceKey(next)` | `Promise<void>` | Re-pin. See [Voice keys and scopes](/voice/keys). |
-| `detach()` | `Promise<void>` | Stop the pump, unpublish, disconnect. Ends every receive iterable with a normal return. |
+| `detach()` | `Promise<void>` | Stop the pump, unpublish, disconnect. Ends every receive iterable with a normal return. Reports nothing. |
 | `on('audio', fn)` / `off('audio', fn)` | `this` | Room scope only. One event per subscribed remote audio track. See [Receiving audio](#receiving-audio). |
 | `audio()` | `AsyncIterable<ParticipantFrame>` | Room scope only. Every live participant's frames, merged. |
 | `setSubscribed(identity, on)` | `Promise<void>` | Room scope only. Opt out of one participant's audio, and back in. |
@@ -263,6 +301,8 @@ await client.leaveVoice();
   **Order matters.** Detach the media before dropping the control-plane membership, or the SFU keeps a publisher for a member who has left.
 </Warning>
 
+`detach()` reports nothing to the backend about the connection; `leaveVoice()` is what ends the session server-side.
+
 `detach()` does not clear keys as a security measure. The process already held them, and forgetting a key it has already used proves nothing. Tearing the room down is, however, the only honest response to a `voice_listen` revoke, because the engine has no key-removal call.
 
 ## Listening to members
@@ -299,6 +339,7 @@ const session = await VoiceMediaSession.attach({
   voiceKey,
   keys: client.voiceKeys,
   deafened: conn.selfDeafened,
+  connectionReporter: client.voiceConnectionReporter(),
   receiveSampleRate: 16000, // the engine resamples; default 48000
   receiveChannels: 1,       // default 1
 });
@@ -483,6 +524,8 @@ client.commands.register(
       voiceKey,
       keys: client.voiceKeys,
       deafened: conn.selfDeafened,
+      // Not optional in practice: this is what admits the microphone.
+      connectionReporter: client.voiceConnectionReporter(),
     });
 
     await say('playing, and I cannot hear any of you');

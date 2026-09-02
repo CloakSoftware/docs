@@ -128,6 +128,7 @@ The only defence is to be correct by construction, which is what `VoiceMediaSess
 | Bot joins and publishes, members hear nothing, no errors anywhere | The engine is unpatched | Copy and apply the patch, and check `--ignore-scripts` is not in your install step |
 | Same, and the patch is applied | Installed `getVoiceKey().key` instead of `voiceFrameKeyFor()` | Let `attach()` install keys, or install only what `voiceFrameKeyFor(serverId, identity)` returns |
 | Same, and both of those are right | The installed engine version does not match the patch filename | Pin `0.13.31` exactly and re-run `patch-package` |
+| Same, and the engine is fine | `attach()` was given no `connectionReporter`, so a current backend never admitted the microphone (a warning under `debug`) | Pass `connectionReporter: client.voiceConnectionReporter()` to `attach()` |
 | `attach()` throws an identity mismatch | `botId` is not the bot's own user id | Pass `client.user.id` |
 | Bot holds `voice_listen` and still hears nothing | It joined deafened | Rejoin with `deafened: false`. The subscribe grant is fixed at join time |
 | Bot hears some members but not others | One identity's key install failed, or the bot never saw half the roster | Check the per-identity warnings in the log, and re-attach |

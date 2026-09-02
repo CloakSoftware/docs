@@ -135,6 +135,10 @@ client.commands.register(
       voiceKey,
       keys: client.voiceKeys,
       deafened: conn.selfDeafened,
+      // Not optional in practice: a current backend withholds the microphone
+      // until the bot reports its connection up, which attach() does through
+      // this reporter before publishing, then waits for the admission.
+      connectionReporter: client.voiceConnectionReporter(),
     });
 
     await ctx.reply(`playing in <#${channelId}>, I cannot hear any of you.`);
@@ -253,7 +257,7 @@ Then sit in a voice channel and run `/play` in any text channel the bot can see.
   </Accordion>
 
   <Accordion title="attach() installs the key before publishing" icon="lock">
-    `VoiceMediaSession.attach()` connects, installs the frame key under the identity LiveKit reported, and only then publishes. Reverse that order and the frame cryptor is created without a key, so the bot transmits audio nobody can decrypt.
+    `VoiceMediaSession.attach()` connects, installs the frame key under the identity LiveKit reported, reports the connection up through `connectionReporter`, waits for the microphone admission (up to `admissionTimeoutMs`, default 5 s), and only then publishes. Reverse the key-then-publish order and the frame cryptor is created without a key, so the bot transmits audio nobody can decrypt. Leave the reporter out and there is no wait: a current backend never admits the microphone, so the SFU forwards nothing. See [Microphone admission](/voice/audio#microphone-admission).
 
     `voiceKey` is passed for the scope and the length check. The bytes actually installed come from `keys`, the `voiceFrameKeyFor()` seam. `deafened` is diagnostic: `can_subscribe` is baked into the LiveKit token at join time and cannot be loosened here, but passing it lets `attach()` say the one useful thing when a listening bot hears nothing.
 

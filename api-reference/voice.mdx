@@ -21,9 +21,18 @@ These live on `Client`, not in the voice modules. Documented in full on [Joining
 | `setVoiceSelfState` | `(state: { muted?: boolean; deafened?: boolean }) => Promise<void>` |
 | `voiceRoster` | `(channelId: string) => VoiceParticipant[]` |
 | `refreshVoiceRoster` | `(serverId: string) => Promise<void>` |
+| `voiceConnectionReporter` | `() => (state: 0 \| 1) => void` |
 | `voiceKeys` | `VoiceKeyAccess` (getter) |
 
 `client.guild(serverId)` binds `joinVoice(channelId, opts?)` and `refreshVoiceRoster()`.
+
+### voiceConnectionReporter
+
+```ts
+voiceConnectionReporter(): (state: 0 | 1) => void
+```
+
+The connection-state sender a media session needs. Pass the result as `VoiceMediaOptions.connectionReporter`. The returned function sends the bot's own media connection state to the backend (`0` up, `1` reconnecting); on a current backend the `0` a server-voice session sends before it publishes is what admits the microphone. It rides the send chain, is a no-op when the bot is not in voice or is in a DM call, and never throws or rejects. Sending it twice is harmless. See [Microphone admission](/voice/audio#microphone-admission).
 
 Events: `voiceJoin`, `voiceLeave`, `voiceStateUpdate`, `voiceConnectionState`, `voiceDisconnect`, `voiceKeyUpdate`. See [Events](/api-reference/events).
 
@@ -132,7 +141,7 @@ class VoiceMediaSession {
 Requires the optional native engine. See [Voice runtime](/voice/runtime).
 
 <ResponseField name="attach(options)" type="Promise<VoiceMediaSession>">
-  Connects, installs frame keys, and publishes one microphone track. Fails closed on every precondition. Full walkthrough on [Publishing audio](/voice/audio).
+  Connects, installs frame keys, reports the connection up through `connectionReporter` and waits for the microphone admission, then publishes one microphone track. Fails closed on every precondition. Full walkthrough on [Publishing and receiving audio](/voice/audio).
 </ResponseField>
 
 <ResponseField name="identity" type="string">
@@ -184,12 +193,18 @@ interface VoiceMediaOptions {
   channels?: number;           // publish format, default 2
   receiveSampleRate?: number;  // room scope only, default 48000
   receiveChannels?: number;    // room scope only, default 1
+  connectionReporter?: (state: 0 | 1) => void;
+  admissionTimeoutMs?: number; // default 5000, ignored without a reporter
   debug?: boolean;
   engine?: RtcNodeModule; // test seam
 }
 ```
 
 `receiveSampleRate` and `receiveChannels` set the format of every received `PcmFrame`. They are fixed at attach, and the engine does the resampling and channel mixing.
+
+`connectionReporter` is not optional in practice. Pass `client.voiceConnectionReporter()`. `attach()` calls it with `0` before the publish, once the identity and key checks have passed, then waits for the microphone admission by polling the local participant's `canPublish` permission every 100 ms and re-sending the report every second, up to `admissionTimeoutMs`. It also calls it with `1` then `0` around an engine reconnect, and never from `detach()`. Without it there is no wait and a server-voice credential stays microphone-clamped on a current backend, so the publish is silent, with a warning only under `debug`.
+
+`admissionTimeoutMs` bounds that wait. Default 5000. On timeout `attach()` still publishes once, because an older single-phase backend never flips the flag but its credential already allows publishing; if that publish rejects, `attach()` fails closed with an error naming the two-phase admission, `connectionReporter`, and `admissionTimeoutMs`. Ignored without a `connectionReporter`. See [Microphone admission](/voice/audio#microphone-admission).
 
 ### VoiceMediaSessionEvents
 
